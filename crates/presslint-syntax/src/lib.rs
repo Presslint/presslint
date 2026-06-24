@@ -135,6 +135,113 @@ pub enum TokenizeErrorKind {
     UnterminatedHexString,
 }
 
+/// Reference to one token in the source token stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenRef {
+    /// Index in the token slice passed to [`assemble_operators`].
+    pub token_index: usize,
+    /// Source range of the referenced token.
+    pub range: ByteRange,
+}
+
+/// Operand represented by the original token ranges that formed it.
+///
+/// This is deliberately lexical. Numeric values, names, strings, arrays, and
+/// dictionaries are not decoded or normalized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperandRecord {
+    /// Exact tokens that form the operand. Composite operands include their
+    /// delimiter and interior trivia tokens.
+    pub tokens: Vec<TokenRef>,
+    /// Source range from the first operand token through the last one.
+    pub range: ByteRange,
+}
+
+/// One content-stream operator grouped with its preceding operands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorRecord {
+    /// Operator token.
+    pub operator: TokenRef,
+    /// Operands immediately preceding the operator at top level.
+    pub operands: Vec<OperandRecord>,
+    /// Top-level trivia between operands and their operator.
+    pub trivia: Vec<TokenRef>,
+    /// Source range from the first operand token, or the operator token for
+    /// zero-operand records, through the operator token.
+    pub range: ByteRange,
+}
+
+/// Assembled content stream with non-record trivia preserved explicitly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssembledContentStream {
+    /// Operator records in source order.
+    pub records: Vec<OperatorRecord>,
+    /// Top-level trivia not owned by an operator record.
+    pub trivia: Vec<TokenRef>,
+}
+
+/// Operator assembly failure with source location.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AssembleError {
+    /// A token range is reversed.
+    InvalidTokenRange {
+        /// Token index in the provided token stream.
+        token_index: usize,
+        /// Invalid source range.
+        range: ByteRange,
+    },
+    /// A top-level operand was not followed by an operator.
+    TrailingOperands {
+        /// First unconsumed operand token.
+        token_index: usize,
+        /// Source range of the first unconsumed operand.
+        range: ByteRange,
+    },
+    /// `]` appeared without a matching `[`.
+    UnmatchedArrayClose {
+        /// Token index of the unmatched close delimiter.
+        token_index: usize,
+        /// Source range of the unmatched close delimiter.
+        range: ByteRange,
+    },
+    /// `>>` appeared without a matching `<<`.
+    UnmatchedDictionaryClose {
+        /// Token index of the unmatched close delimiter.
+        token_index: usize,
+        /// Source range of the unmatched close delimiter.
+        range: ByteRange,
+    },
+    /// A composite operand closed with the wrong delimiter.
+    MismatchedDelimiter {
+        /// Token index of the mismatched close delimiter.
+        token_index: usize,
+        /// Source range of the mismatched close delimiter.
+        range: ByteRange,
+    },
+    /// The token stream ended before a composite operand closed.
+    UnterminatedCompositeOperand {
+        /// Token index of the opening delimiter.
+        token_index: usize,
+        /// Source range of the opening delimiter.
+        range: ByteRange,
+    },
+    /// An operator token appeared inside an array or dictionary operand.
+    OperatorInsideCompositeOperand {
+        /// Token index of the operator token.
+        token_index: usize,
+        /// Source range of the operator token.
+        range: ByteRange,
+    },
+    /// Object/stream keywords are not supported as content-stream operands.
+    UnexpectedKeyword {
+        /// Token index of the keyword token.
+        token_index: usize,
+        /// Source range of the keyword token.
+        range: ByteRange,
+    },
+}
+
 /// Tokenize a PDF content byte stream into source-preserving lexical tokens.
 ///
 /// This is a lexical scanner only. Token values remain encoded in the source
@@ -206,6 +313,205 @@ pub fn tokenize(input: &[u8]) -> Result<Vec<Token>, TokenizeError> {
     }
 
     Ok(tokens)
+}
+
+/// Assemble lexical tokens into content-stream operator records.
+///
+/// The assembler keeps operands as source token ranges and performs only
+/// content-stream ordering checks. It does not decode operand values or
+/// evaluate graphics state.
+///
+/// # Errors
+///
+/// Returns an [`AssembleError`] when operands are left without an operator,
+/// delimiters are malformed, object/stream keywords appear in the content
+/// stream, or token ranges are invalid.
+pub fn assemble_operators(tokens: &[Token]) -> Result<AssembledContentStream, AssembleError> {
+    let mut records = Vec::new();
+    let mut stream_trivia = Vec::new();
+    let mut pending_operands: Vec<OperandRecord> = Vec::new();
+    let mut pending_trivia = Vec::new();
+    let mut index = 0;
+
+    while index < tokens.len() {
+        let token_ref = checked_token_ref(tokens, index)?;
+        match tokens[index].kind {
+            TokenKind::Trivia(_) => {
+                if pending_operands.is_empty() {
+                    stream_trivia.push(token_ref);
+                } else {
+                    pending_trivia.push(token_ref);
+                }
+                index += 1;
+            }
+            TokenKind::Operator => {
+                let range = pending_operands
+                    .first()
+                    .map_or(token_ref.range, |first| ByteRange {
+                        start: first.range.start,
+                        end: token_ref.range.end,
+                    });
+                records.push(OperatorRecord {
+                    operator: token_ref,
+                    operands: core::mem::take(&mut pending_operands),
+                    trivia: core::mem::take(&mut pending_trivia),
+                    range,
+                });
+                index += 1;
+            }
+            TokenKind::Delimiter(Delimiter::ArrayClose) => {
+                return Err(AssembleError::UnmatchedArrayClose {
+                    token_index: index,
+                    range: token_ref.range,
+                });
+            }
+            TokenKind::Delimiter(Delimiter::DictionaryClose) => {
+                return Err(AssembleError::UnmatchedDictionaryClose {
+                    token_index: index,
+                    range: token_ref.range,
+                });
+            }
+            TokenKind::Keyword(_) => {
+                return Err(AssembleError::UnexpectedKeyword {
+                    token_index: index,
+                    range: token_ref.range,
+                });
+            }
+            _ => pending_operands.push(parse_operand_record(tokens, &mut index)?),
+        }
+    }
+
+    if let Some(first) = pending_operands.first() {
+        return Err(AssembleError::TrailingOperands {
+            token_index: first.tokens[0].token_index,
+            range: first.range,
+        });
+    }
+
+    Ok(AssembledContentStream {
+        records,
+        trivia: stream_trivia,
+    })
+}
+
+fn parse_operand_record(
+    tokens: &[Token],
+    index: &mut usize,
+) -> Result<OperandRecord, AssembleError> {
+    let first = checked_token_ref(tokens, *index)?;
+    match tokens[*index].kind {
+        TokenKind::Boolean
+        | TokenKind::Null
+        | TokenKind::Number(_)
+        | TokenKind::String(_)
+        | TokenKind::Name => {
+            *index += 1;
+            Ok(OperandRecord {
+                tokens: vec![first],
+                range: first.range,
+            })
+        }
+        TokenKind::Delimiter(Delimiter::ArrayOpen) => {
+            parse_composite_operand(tokens, index, Delimiter::ArrayClose)
+        }
+        TokenKind::Delimiter(Delimiter::DictionaryOpen) => {
+            parse_composite_operand(tokens, index, Delimiter::DictionaryClose)
+        }
+        TokenKind::Delimiter(Delimiter::ArrayClose | Delimiter::DictionaryClose)
+        | TokenKind::Operator
+        | TokenKind::Keyword(_)
+        | TokenKind::Trivia(_) => unreachable!("top-level parser handles non-operand tokens"),
+    }
+}
+
+fn parse_composite_operand(
+    tokens: &[Token],
+    index: &mut usize,
+    expected_close: Delimiter,
+) -> Result<OperandRecord, AssembleError> {
+    let mut refs = Vec::new();
+    append_composite_operand(tokens, index, expected_close, &mut refs)?;
+    Ok(operand_from_refs(refs))
+}
+
+fn append_composite_operand(
+    tokens: &[Token],
+    index: &mut usize,
+    expected_close: Delimiter,
+    refs: &mut Vec<TokenRef>,
+) -> Result<(), AssembleError> {
+    let open = checked_token_ref(tokens, *index)?;
+    refs.push(open);
+    *index += 1;
+
+    while *index < tokens.len() {
+        let token_ref = checked_token_ref(tokens, *index)?;
+        match tokens[*index].kind {
+            TokenKind::Trivia(_)
+            | TokenKind::Boolean
+            | TokenKind::Null
+            | TokenKind::Number(_)
+            | TokenKind::String(_)
+            | TokenKind::Name => {
+                refs.push(token_ref);
+                *index += 1;
+            }
+            TokenKind::Delimiter(Delimiter::ArrayOpen) => {
+                append_composite_operand(tokens, index, Delimiter::ArrayClose, refs)?;
+            }
+            TokenKind::Delimiter(Delimiter::DictionaryOpen) => {
+                append_composite_operand(tokens, index, Delimiter::DictionaryClose, refs)?;
+            }
+            TokenKind::Delimiter(close) if close == expected_close => {
+                refs.push(token_ref);
+                *index += 1;
+                return Ok(());
+            }
+            TokenKind::Delimiter(Delimiter::ArrayClose | Delimiter::DictionaryClose) => {
+                return Err(AssembleError::MismatchedDelimiter {
+                    token_index: *index,
+                    range: token_ref.range,
+                });
+            }
+            TokenKind::Operator => {
+                return Err(AssembleError::OperatorInsideCompositeOperand {
+                    token_index: *index,
+                    range: token_ref.range,
+                });
+            }
+            TokenKind::Keyword(_) => {
+                return Err(AssembleError::UnexpectedKeyword {
+                    token_index: *index,
+                    range: token_ref.range,
+                });
+            }
+        }
+    }
+
+    Err(AssembleError::UnterminatedCompositeOperand {
+        token_index: open.token_index,
+        range: open.range,
+    })
+}
+
+fn operand_from_refs(refs: Vec<TokenRef>) -> OperandRecord {
+    let first = refs[0];
+    let last = refs[refs.len() - 1];
+    OperandRecord {
+        tokens: refs,
+        range: ByteRange {
+            start: first.range.start,
+            end: last.range.end,
+        },
+    }
+}
+
+fn checked_token_ref(tokens: &[Token], token_index: usize) -> Result<TokenRef, AssembleError> {
+    let range = tokens[token_index].range;
+    if range.start > range.end {
+        return Err(AssembleError::InvalidTokenRange { token_index, range });
+    }
+    Ok(TokenRef { token_index, range })
 }
 
 fn scan_literal_string(input: &[u8], start: usize) -> Result<usize, TokenizeError> {
@@ -412,8 +718,9 @@ pub fn serialize_unmodified(input: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Delimiter, Keyword, NumberKind, SerializeError, StringKind, Token, TokenKind,
-        TokenizeErrorKind, TriviaKind, serialize_tokens_unmodified, serialize_unmodified, tokenize,
+        AssembleError, Delimiter, Keyword, NumberKind, SerializeError, StringKind, Token,
+        TokenKind, TokenRef, TokenizeErrorKind, TriviaKind, assemble_operators,
+        serialize_tokens_unmodified, serialize_unmodified, tokenize,
     };
     use presslint_core::ByteRange;
 
@@ -607,5 +914,140 @@ mod tests {
                 actual_start: 1,
             })
         );
+    }
+
+    #[test]
+    fn assembler_groups_operands_with_operator_tokens() -> Result<(), String> {
+        let input = b"q\n/DeviceRGB cs\n1 0 0 rg\n";
+        let tokens = tokenize(input).map_err(|error| format!("{error:?}"))?;
+        let assembled = assemble_operators(&tokens).map_err(|error| format!("{error:?}"))?;
+
+        assert_eq!(assembled.records.len(), 3);
+        assert_eq!(
+            assembled.records[0].operator.range,
+            ByteRange { start: 0, end: 1 }
+        );
+        assert!(assembled.records[0].operands.is_empty());
+        assert_eq!(
+            assembled.records[1].operands[0].range,
+            ByteRange { start: 2, end: 12 }
+        );
+        assert_eq!(
+            assembled.records[1].operator.range,
+            ByteRange { start: 13, end: 15 }
+        );
+        assert_eq!(assembled.records[1].range, ByteRange { start: 2, end: 15 });
+        assert_eq!(
+            assembled.records[2]
+                .operands
+                .iter()
+                .map(|operand| operand.range)
+                .collect::<Vec<_>>(),
+            vec![
+                ByteRange { start: 16, end: 17 },
+                ByteRange { start: 18, end: 19 },
+                ByteRange { start: 20, end: 21 },
+            ]
+        );
+        assert_eq!(
+            assembled.records[2].operator.range,
+            ByteRange { start: 22, end: 24 }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembler_keeps_composite_operands_as_token_ranges() -> Result<(), String> {
+        let input = b"[1 [2] << /K (v) >>] BDC\n";
+        let tokens = tokenize(input).map_err(|error| format!("{error:?}"))?;
+        let assembled = assemble_operators(&tokens).map_err(|error| format!("{error:?}"))?;
+        let record = &assembled.records[0];
+
+        assert_eq!(record.operands.len(), 1);
+        assert_eq!(record.operands[0].range, ByteRange { start: 0, end: 20 });
+        assert_eq!(
+            record.operands[0]
+                .tokens
+                .iter()
+                .map(|token| token.range)
+                .collect::<Vec<_>>(),
+            tokens[..15]
+                .iter()
+                .map(|token| token.range)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(record.operator.range, ByteRange { start: 21, end: 24 });
+        Ok(())
+    }
+
+    #[test]
+    fn assembler_preserves_all_token_references_explicitly() -> Result<(), String> {
+        let input = b"% lead\nq\n/DeviceRGB cs % mid\n1 0 0 rg\n";
+        let tokens = tokenize(input).map_err(|error| format!("{error:?}"))?;
+        let assembled = assemble_operators(&tokens).map_err(|error| format!("{error:?}"))?;
+        let mut refs = assembled.trivia.clone();
+        for record in &assembled.records {
+            refs.push(record.operator);
+            refs.extend(record.trivia.iter().copied());
+            for operand in &record.operands {
+                refs.extend(operand.tokens.iter().copied());
+            }
+        }
+        refs.sort_by_key(|token| token.token_index);
+
+        assert_eq!(
+            refs,
+            tokens
+                .iter()
+                .enumerate()
+                .map(|(token_index, token)| TokenRef {
+                    token_index,
+                    range: token.range,
+                })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            serialize_tokens_unmodified(input, &tokens).map_err(|error| format!("{error:?}"))?,
+            input
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembler_reports_malformed_ordering() -> Result<(), String> {
+        let trailing = tokenize(b"1 0 0 ").map_err(|error| format!("{error:?}"))?;
+        let unmatched = tokenize(b"]").map_err(|error| format!("{error:?}"))?;
+        let unterminated = tokenize(b"[1 2 rg").map_err(|error| format!("{error:?}"))?;
+        let keyword = tokenize(b"obj").map_err(|error| format!("{error:?}"))?;
+
+        assert_eq!(
+            assemble_operators(&trailing),
+            Err(AssembleError::TrailingOperands {
+                token_index: 0,
+                range: ByteRange { start: 0, end: 1 },
+            })
+        );
+        assert_eq!(
+            assemble_operators(&unmatched),
+            Err(AssembleError::UnmatchedArrayClose {
+                token_index: 0,
+                range: ByteRange { start: 0, end: 1 },
+            })
+        );
+        assert_eq!(
+            assemble_operators(&unterminated),
+            Err(AssembleError::OperatorInsideCompositeOperand {
+                token_index: 5,
+                range: ByteRange { start: 5, end: 7 },
+            })
+        );
+        assert_eq!(
+            assemble_operators(&keyword),
+            Err(AssembleError::UnexpectedKeyword {
+                token_index: 0,
+                range: ByteRange { start: 0, end: 3 },
+            })
+        );
+        Ok(())
     }
 }
