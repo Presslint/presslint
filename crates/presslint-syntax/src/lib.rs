@@ -331,6 +331,75 @@ const fn is_delimiter(byte: u8) -> bool {
     )
 }
 
+/// Serialization failure for unmodified token streams.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SerializeError {
+    /// A token range is reversed or outside the source bytes.
+    InvalidRange {
+        /// Token index in the provided token stream.
+        token_index: usize,
+        /// Invalid source range.
+        range: ByteRange,
+    },
+    /// Token ranges do not form one contiguous source span.
+    NonContiguousRange {
+        /// Token index in the provided token stream.
+        token_index: usize,
+        /// Expected range start.
+        expected_start: usize,
+        /// Actual range start.
+        actual_start: usize,
+    },
+}
+
+/// Serialize an unmodified token stream by copying exact source bytes.
+///
+/// This function is intentionally limited to the unmodified path. It proves
+/// that token ranges can re-emit the original byte stream without syntax
+/// normalization.
+///
+/// # Errors
+///
+/// Returns a [`SerializeError`] if token ranges are invalid or non-contiguous.
+pub fn serialize_tokens_unmodified(
+    source: &[u8],
+    tokens: &[Token],
+) -> Result<Vec<u8>, SerializeError> {
+    let mut output = Vec::with_capacity(source.len());
+    let mut expected_start = 0;
+
+    for (token_index, token) in tokens.iter().enumerate() {
+        if token.range.start != expected_start {
+            return Err(SerializeError::NonContiguousRange {
+                token_index,
+                expected_start,
+                actual_start: token.range.start,
+            });
+        }
+
+        let Some(bytes) = token.source_bytes(source) else {
+            return Err(SerializeError::InvalidRange {
+                token_index,
+                range: token.range,
+            });
+        };
+
+        output.extend_from_slice(bytes);
+        expected_start = token.range.end;
+    }
+
+    if expected_start != source.len() {
+        return Err(SerializeError::NonContiguousRange {
+            token_index: tokens.len(),
+            expected_start,
+            actual_start: source.len(),
+        });
+    }
+
+    Ok(output)
+}
+
 /// Return the input bytes unchanged.
 ///
 /// This placeholder makes the round-trip contract explicit before the real
@@ -343,8 +412,8 @@ pub fn serialize_unmodified(input: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Delimiter, Keyword, NumberKind, StringKind, Token, TokenKind, TokenizeErrorKind,
-        TriviaKind, serialize_unmodified, tokenize,
+        Delimiter, Keyword, NumberKind, SerializeError, StringKind, Token, TokenKind,
+        TokenizeErrorKind, TriviaKind, serialize_tokens_unmodified, serialize_unmodified, tokenize,
     };
     use presslint_core::ByteRange;
 
@@ -485,5 +554,58 @@ mod tests {
         assert_eq!(hex.kind, TokenizeErrorKind::UnterminatedHexString);
         assert_eq!(hex.range, ByteRange { start: 0, end: 5 });
         Ok(())
+    }
+
+    #[test]
+    fn token_stream_serializer_is_byte_identical() -> Result<(), String> {
+        let input = b"q\n/DeviceRGB cs [1 -2.5 .75]\n";
+        let tokens = tokenize(input).map_err(|error| format!("{error:?}"))?;
+
+        assert_eq!(
+            serialize_tokens_unmodified(input, &tokens).map_err(|error| format!("{error:?}"))?,
+            input
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn token_stream_serializer_rejects_bad_ranges() {
+        let source = b"abc";
+        let invalid = [Token::new(
+            TokenKind::Operator,
+            ByteRange { start: 0, end: 4 },
+        )];
+        let gapped = [
+            Token::new(TokenKind::Operator, ByteRange { start: 0, end: 1 }),
+            Token::new(TokenKind::Operator, ByteRange { start: 2, end: 3 }),
+        ];
+        let overlapping = [
+            Token::new(TokenKind::Operator, ByteRange { start: 0, end: 2 }),
+            Token::new(TokenKind::Operator, ByteRange { start: 1, end: 3 }),
+        ];
+
+        assert_eq!(
+            serialize_tokens_unmodified(source, &invalid),
+            Err(SerializeError::InvalidRange {
+                token_index: 0,
+                range: ByteRange { start: 0, end: 4 },
+            })
+        );
+        assert_eq!(
+            serialize_tokens_unmodified(source, &gapped),
+            Err(SerializeError::NonContiguousRange {
+                token_index: 1,
+                expected_start: 1,
+                actual_start: 2,
+            })
+        );
+        assert_eq!(
+            serialize_tokens_unmodified(source, &overlapping),
+            Err(SerializeError::NonContiguousRange {
+                token_index: 1,
+                expected_start: 2,
+                actual_start: 1,
+            })
+        );
     }
 }
