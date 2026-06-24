@@ -1,0 +1,17 @@
+[package]
+name = "presslint-actions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Serializable action and recipe model for presslint-core."
+
+[dependencies]
+presslint-core.workspace = true
+presslint-selectors.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true
+

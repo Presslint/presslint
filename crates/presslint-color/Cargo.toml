@@ -1,0 +1,16 @@
+[package]
+name = "presslint-color"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Color-management policy interfaces for presslint-core."
+
+[dependencies]
+presslint-core.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true
+

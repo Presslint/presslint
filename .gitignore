@@ -1,0 +1,7 @@
+target/
+out/
+_local/
+.DS_Store
+*.log
+*.tmp
+
