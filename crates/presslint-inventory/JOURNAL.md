@@ -12,10 +12,13 @@
 - Structured errors cover graphics-state stack underflow, malformed operand
   counts, malformed numeric operands, non-finite numeric operands, and invalid
   source ranges.
+- Builds the first vector inventory slice from supported path-paint events,
+  carrying caller-provided page/content scope, path-paint byte provenance,
+  observed stroke/fill colors, deterministic object IDs, and color-operand
+  rewrite capability.
 
 ## Follow-Ups
 
-- Build Inventory slice 1 from path-paint events into vector inventory entries
-  with color observations and edit capabilities.
 - Do not create text/image/form/shading inventory before the vector slice is
   stable.
+- Add geometry/bounds only after path construction interpretation is designed.
