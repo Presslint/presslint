@@ -6,8 +6,10 @@
 - Current predicates cover object kind, observed color space, page index, and
   edit capability.
 - Provides an in-memory matcher over `presslint_inventory::InventoryEntry`.
+- Focused serde tests lock the public JSON shape for selector boolean variants
+  and predicate fixtures.
 
 ## Follow-Ups
 
-- Add focused JSON serde-shape tests before adding CLI, MCP, or recipe
-  consumers.
+- Keep selector JSON compatibility explicit when adding future predicates or
+  consumer-facing recipes.
