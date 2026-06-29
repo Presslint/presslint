@@ -3,12 +3,20 @@ use serde::{Deserialize, Serialize};
 const PDF_HEADER_MARKER: &[u8] = b"%PDF-";
 const STARTXREF_MARKER: &[u8] = b"startxref";
 const EOF_MARKER: &[u8] = b"%%EOF";
+const XREF_KEYWORD: &[u8] = b"xref";
+const OBJ_KEYWORD: &[u8] = b"obj";
 
 /// Maximum leading bytes inspected while looking for a PDF header.
 pub const PDF_HEADER_SCAN_LIMIT: usize = 1024;
 
 /// Maximum trailing bytes inspected while looking for the final `startxref`.
 pub const STARTXREF_SCAN_LIMIT: usize = 4096;
+
+/// Maximum bytes inspected at the `startxref` offset during classification.
+///
+/// This window only needs to see the `xref` keyword or a short `N G obj`
+/// header, never the section body.
+pub const XREF_SECTION_SCAN_LIMIT: usize = 64;
 
 /// Small, source-oriented report over caller-provided PDF bytes.
 ///
@@ -22,6 +30,10 @@ pub struct PdfSourceInspection {
     pub header: PdfHeader,
     /// Final `startxref` value discovered in the bounded trailing source window.
     pub startxref: Option<PdfStartXref>,
+    /// Cross-reference section style classified at the resolved `startxref`
+    /// offset. Only populated when a `startxref` offset was resolved and the
+    /// bounded window at that offset matched a known section shape.
+    pub xref_section: Option<XrefSection>,
     /// Non-fatal facts that could not be discovered by this bounded slice.
     pub diagnostics: Vec<PdfSourceDiagnostic>,
 }
@@ -59,6 +71,27 @@ pub struct PdfStartXref {
     pub marker_byte_offset: usize,
     /// Decimal byte offset declared after `startxref`.
     pub byte_offset: usize,
+}
+
+/// Style of the cross-reference section found at the final `startxref` offset.
+///
+/// This classification only inspects the leading bytes of the section. It does
+/// not read table entries, the trailer dictionary, the stream dictionary, or
+/// any object body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "style", rename_all = "snake_case")]
+pub enum XrefSection {
+    /// Classic cross-reference table: the section begins (after optional PDF
+    /// whitespace) with the `xref` keyword.
+    Table,
+    /// Cross-reference stream: the section begins (after optional PDF
+    /// whitespace) with an `N G obj` indirect object header.
+    Stream {
+        /// Object number parsed from the indirect object header.
+        object_number: u32,
+        /// Generation number parsed from the indirect object header.
+        generation: u16,
+    },
 }
 
 /// Rejection returned when the source cannot be identified as a PDF source.
@@ -103,6 +136,32 @@ pub enum PdfSourceDiagnostic {
         /// Byte offset of the `startxref` keyword when one was found.
         marker_byte_offset: Option<usize>,
     },
+    /// The cross-reference section at the resolved `startxref` offset could not
+    /// be classified as a table or a stream.
+    XrefSectionUnclassified {
+        /// Why the section could not be classified.
+        reason: PdfXrefSectionIssue,
+        /// Resolved `startxref` offset where classification began.
+        byte_offset: usize,
+        /// Total source length, for out-of-bounds context.
+        byte_len: usize,
+    },
+}
+
+/// Reasons the cross-reference section at the `startxref` offset could not be
+/// classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdfXrefSectionIssue {
+    /// The `startxref` offset lies beyond the source length.
+    OffsetOutOfBounds,
+    /// The leading bytes match neither an `xref` table nor an `N G obj` header.
+    Unrecognized,
+    /// An `N G obj` header was found, but the object number does not fit `u32`.
+    ObjectNumberOutOfRange,
+    /// An `N G obj` header was found, but the generation number does not fit
+    /// `u16`.
+    GenerationOutOfRange,
 }
 
 /// Reasons the bounded trailing source window could not report `startxref`.
@@ -132,15 +191,28 @@ pub fn inspect_pdf_source(input: &[u8]) -> Result<PdfSourceInspection, PdfSource
     let header =
         inspect_header(input).map_err(|reason| PdfSourceInspectionError { byte_len, reason })?;
 
-    let (startxref, diagnostics) = match inspect_startxref(input) {
-        Ok(startxref) => (Some(startxref), Vec::new()),
-        Err(diagnostic) => (None, vec![diagnostic]),
+    let mut diagnostics = Vec::new();
+    let startxref = match inspect_startxref(input) {
+        Ok(startxref) => Some(startxref),
+        Err(diagnostic) => {
+            diagnostics.push(diagnostic);
+            None
+        }
     };
+
+    let mut xref_section = None;
+    if let Some(startxref) = startxref {
+        match classify_xref_section(input, startxref.byte_offset) {
+            Ok(section) => xref_section = Some(section),
+            Err(diagnostic) => diagnostics.push(diagnostic),
+        }
+    }
 
     Ok(PdfSourceInspection {
         byte_len,
         header,
         startxref,
+        xref_section,
         diagnostics,
     })
 }
@@ -188,10 +260,7 @@ fn inspect_startxref(input: &[u8]) -> Result<PdfStartXref, PdfSourceDiagnostic> 
     let remainder = &trailing[after_marker..];
     let offset_start = skip_whitespace(remainder);
     let digits = &remainder[offset_start..];
-    let digit_count = digits
-        .iter()
-        .take_while(|byte| byte.is_ascii_digit())
-        .count();
+    let digit_count = count_leading_digits(digits);
 
     if digit_count == 0 {
         return Err(startxref_diagnostic(
@@ -253,6 +322,110 @@ const fn startxref_diagnostic(
         searched_to,
         marker_byte_offset,
     }
+}
+
+fn classify_xref_section(
+    input: &[u8],
+    byte_offset: usize,
+) -> Result<XrefSection, PdfSourceDiagnostic> {
+    let byte_len = input.len();
+    if byte_offset >= byte_len {
+        return Err(xref_section_diagnostic(
+            PdfXrefSectionIssue::OffsetOutOfBounds,
+            byte_offset,
+            byte_len,
+        ));
+    }
+
+    let window_end = byte_offset
+        .saturating_add(XREF_SECTION_SCAN_LIMIT)
+        .min(byte_len);
+    let window = &input[byte_offset..window_end];
+    let content = &window[skip_whitespace(window)..];
+
+    if content.starts_with(XREF_KEYWORD) {
+        return Ok(XrefSection::Table);
+    }
+
+    classify_indirect_object_header(content, byte_offset, byte_len)
+}
+
+fn classify_indirect_object_header(
+    content: &[u8],
+    byte_offset: usize,
+    byte_len: usize,
+) -> Result<XrefSection, PdfSourceDiagnostic> {
+    let unrecognized =
+        || xref_section_diagnostic(PdfXrefSectionIssue::Unrecognized, byte_offset, byte_len);
+
+    let object_digits = count_leading_digits(content);
+    if object_digits == 0 {
+        return Err(unrecognized());
+    }
+    let after_object = &content[object_digits..];
+
+    let object_generation_gap = skip_whitespace(after_object);
+    if object_generation_gap == 0 {
+        return Err(unrecognized());
+    }
+    let generation_field = &after_object[object_generation_gap..];
+
+    let generation_digits = count_leading_digits(generation_field);
+    if generation_digits == 0 {
+        return Err(unrecognized());
+    }
+    let after_generation = &generation_field[generation_digits..];
+
+    let generation_keyword_gap = skip_whitespace(after_generation);
+    if generation_keyword_gap == 0 {
+        return Err(unrecognized());
+    }
+    if !after_generation[generation_keyword_gap..].starts_with(OBJ_KEYWORD) {
+        return Err(unrecognized());
+    }
+
+    let object_number = parse_usize_decimal(&content[..object_digits])
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| {
+            xref_section_diagnostic(
+                PdfXrefSectionIssue::ObjectNumberOutOfRange,
+                byte_offset,
+                byte_len,
+            )
+        })?;
+    let generation = parse_usize_decimal(&generation_field[..generation_digits])
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or_else(|| {
+            xref_section_diagnostic(
+                PdfXrefSectionIssue::GenerationOutOfRange,
+                byte_offset,
+                byte_len,
+            )
+        })?;
+
+    Ok(XrefSection::Stream {
+        object_number,
+        generation,
+    })
+}
+
+const fn xref_section_diagnostic(
+    reason: PdfXrefSectionIssue,
+    byte_offset: usize,
+    byte_len: usize,
+) -> PdfSourceDiagnostic {
+    PdfSourceDiagnostic::XrefSectionUnclassified {
+        reason,
+        byte_offset,
+        byte_len,
+    }
+}
+
+fn count_leading_digits(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count()
 }
 
 fn parse_version(bytes: &[u8]) -> Option<PdfVersion> {

@@ -17,7 +17,8 @@ mod tests;
 pub use source::{
     PDF_HEADER_SCAN_LIMIT, PdfHeader, PdfSourceDiagnostic, PdfSourceInspection,
     PdfSourceInspectionError, PdfSourceRejection, PdfStartXref, PdfStartXrefIssue, PdfVersion,
-    STARTXREF_SCAN_LIMIT, inspect_pdf_source,
+    PdfXrefSectionIssue, STARTXREF_SCAN_LIMIT, XREF_SECTION_SCAN_LIMIT, XrefSection,
+    inspect_pdf_source,
 };
 
 /// PDF indirect reference.
