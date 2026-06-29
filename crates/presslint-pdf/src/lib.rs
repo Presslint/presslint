@@ -16,6 +16,7 @@ mod object_header;
 mod source;
 mod source_utils;
 mod startxref;
+mod trailer;
 mod xref_resolve;
 mod xref_section;
 
@@ -42,6 +43,10 @@ pub use source::{
     PdfSourceInspectionError, PdfSourceRejection, PdfStartXref, PdfStartXrefIssue, PdfVersion,
     PdfXrefSectionIssue, STARTXREF_SCAN_LIMIT, XREF_SECTION_SCAN_LIMIT, XrefSection,
     inspect_pdf_source,
+};
+pub use trailer::{
+    ClassicXrefTrailerDictionaryInspection, ClassicXrefTrailerDictionaryInspectionError,
+    ClassicXrefTrailerDictionaryInspectionRejection, inspect_classic_xref_trailer_dictionary,
 };
 pub use xref_resolve::{
     ClassicXrefAmbiguousObjectEntry, ClassicXrefObjectLocation, resolve_classic_xref_object,

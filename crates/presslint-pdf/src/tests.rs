@@ -5,6 +5,7 @@ mod dictionary_extent;
 mod object_body;
 mod object_header;
 mod source;
+mod trailer;
 
 use super::{
     ClassicXrefAmbiguousObjectEntry, ClassicXrefEntry, ClassicXrefEntryState,

@@ -74,6 +74,16 @@
   structured errors for offsets at or beyond EOF, whitespace-only tails, a first
   token that is not `<<`, an unterminated literal or hex string, and an
   unterminated dictionary.
+- Adds `inspect_classic_xref_trailer_dictionary`, a pure composition helper for
+  caller-provided bytes and a classic xref `trailer` keyword offset. It skips
+  optional PDF whitespace at the caller offset, validates the resolved
+  `trailer` keyword with shared keyword-boundary rules, skips optional
+  whitespace after it through `inspect_dictionary_extent`, and reports only the
+  caller offset, resolved trailer keyword offset, dictionary open/close/after
+  offsets, and maximum observed dictionary nesting depth. It returns structured
+  public errors for offsets at or beyond EOF, missing `trailer` keywords, and
+  delegated dictionary-extent rejections, without parsing trailer keys such as
+  `/Size`, `/Root`, or `/Prev`.
 - Shares literal-string, hex-string, and `%`-comment opaque-span skip helpers
   through the internal `source_utils` module so the string/comment scanning
   rules live in one place alongside the existing whitespace/delimiter helpers.
