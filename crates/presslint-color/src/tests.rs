@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use self::json::{Json, JsonSerializer};
 use super::{
-    ColorPolicy, NamedOutputCondition, OutputIntentPolicy, OutputIntentSubtype, OutputIntentTarget,
+    ColorPolicy, NamedOutputCondition, ObservedOutputIntent, OutputIntentDecision,
+    OutputIntentPolicy, OutputIntentRejection, OutputIntentSubtype, OutputIntentTarget,
     OutputProfileSource, OverprintPolicy, ProfileBackedOutputIntent, SpotPolicy, TransformRequest,
+    resolve_output_intent_policy,
 };
 
 fn assert_json_round_trip<T>(value: &T, expected: Json)
@@ -120,9 +122,7 @@ fn output_intent_policy_variants_have_stable_json_shape() {
     );
     assert_json_round_trip(
         &OutputIntentPolicy::EnsureTarget {
-            target: OutputIntentTarget::NamedCondition {
-                condition: named_condition(),
-            },
+            target: named_target(),
         },
         Json::object([
             ("policy", Json::string("ensure_target")),
@@ -243,4 +243,314 @@ fn profile_backed_intent_json() -> Json {
             ]),
         ),
     ])
+}
+
+// --- Output-intent resolution tests ------------------------------------------
+//
+// These cover every policy/observed-state combination of
+// `resolve_output_intent_policy`: `Preserve` regardless of observed state,
+// `RequireExisting` with and without observed intents, and every `EnsureTarget`
+// branch (match, conflict, unrelated, empty) plus the documented priority of
+// match over conflict over requires-ensure-target.
+
+fn observed(subtype: OutputIntentSubtype, identifier: &str) -> ObservedOutputIntent {
+    ObservedOutputIntent {
+        subtype,
+        output_condition_identifier: identifier.to_owned(),
+    }
+}
+
+fn named_target() -> OutputIntentTarget {
+    OutputIntentTarget::NamedCondition {
+        condition: named_condition(),
+    }
+}
+
+fn ensure_named_fogra51() -> OutputIntentPolicy {
+    OutputIntentPolicy::EnsureTarget {
+        target: named_target(),
+    }
+}
+
+#[test]
+fn preserve_leaves_as_is_regardless_of_observed_state() {
+    assert_eq!(
+        resolve_output_intent_policy(&OutputIntentPolicy::Preserve, []),
+        OutputIntentDecision::Preserve,
+    );
+    assert_eq!(
+        resolve_output_intent_policy(
+            &OutputIntentPolicy::Preserve,
+            [observed(OutputIntentSubtype::GtsPdfx, "FOGRA51")],
+        ),
+        OutputIntentDecision::Preserve,
+    );
+}
+
+#[test]
+fn require_existing_is_satisfied_when_any_intent_is_present() {
+    assert_eq!(
+        resolve_output_intent_policy(
+            &OutputIntentPolicy::RequireExisting,
+            [observed(OutputIntentSubtype::IsoPdfe1, "anything")],
+        ),
+        OutputIntentDecision::SatisfiedByExisting,
+    );
+}
+
+#[test]
+fn require_existing_rejects_when_no_intent_is_present() {
+    assert_eq!(
+        resolve_output_intent_policy(&OutputIntentPolicy::RequireExisting, []),
+        OutputIntentDecision::Rejected {
+            rejection: OutputIntentRejection::NoExistingIntent,
+        },
+    );
+}
+
+#[test]
+fn ensure_target_requires_target_when_no_intent_is_observed() {
+    assert_eq!(
+        resolve_output_intent_policy(&ensure_named_fogra51(), []),
+        OutputIntentDecision::RequiresEnsureTarget {
+            target: named_target(),
+        },
+    );
+}
+
+#[test]
+fn ensure_target_requires_target_when_only_unrelated_subtypes_are_observed() {
+    // A different subtype with the same identifier string is unrelated: identity
+    // is `(subtype, identifier)`, so this neither matches nor conflicts.
+    assert_eq!(
+        resolve_output_intent_policy(
+            &ensure_named_fogra51(),
+            [observed(OutputIntentSubtype::GtsPdfa1, "FOGRA51")],
+        ),
+        OutputIntentDecision::RequiresEnsureTarget {
+            target: named_target(),
+        },
+    );
+}
+
+#[test]
+fn ensure_target_is_already_satisfied_on_matching_identity() {
+    assert_eq!(
+        resolve_output_intent_policy(
+            &ensure_named_fogra51(),
+            [observed(OutputIntentSubtype::GtsPdfx, "FOGRA51")],
+        ),
+        OutputIntentDecision::AlreadySatisfied {
+            target: named_target(),
+        },
+    );
+}
+
+#[test]
+fn ensure_target_matches_through_a_profile_backed_request() {
+    // The matched observed identity is compared only by subtype and identifier,
+    // so a profile-backed request matches an observed intent that shares them.
+    let policy = OutputIntentPolicy::EnsureTarget {
+        target: OutputIntentTarget::ProfileBacked {
+            intent: profile_backed_intent(),
+        },
+    };
+    assert_eq!(
+        resolve_output_intent_policy(&policy, [observed(OutputIntentSubtype::GtsPdfx, "Custom")],),
+        OutputIntentDecision::AlreadySatisfied {
+            target: OutputIntentTarget::ProfileBacked {
+                intent: profile_backed_intent(),
+            },
+        },
+    );
+}
+
+#[test]
+fn ensure_target_conflicts_on_same_subtype_different_identifier() {
+    assert_eq!(
+        resolve_output_intent_policy(
+            &ensure_named_fogra51(),
+            [observed(OutputIntentSubtype::GtsPdfx, "FOGRA39")],
+        ),
+        OutputIntentDecision::ConflictsWithExisting {
+            requested: named_target(),
+            existing: observed(OutputIntentSubtype::GtsPdfx, "FOGRA39"),
+        },
+    );
+}
+
+#[test]
+fn ensure_target_match_takes_priority_over_a_conflict() {
+    // A conflicting intent precedes the matching one; the match must still win.
+    assert_eq!(
+        resolve_output_intent_policy(
+            &ensure_named_fogra51(),
+            [
+                observed(OutputIntentSubtype::GtsPdfx, "FOGRA39"),
+                observed(OutputIntentSubtype::GtsPdfx, "FOGRA51"),
+            ],
+        ),
+        OutputIntentDecision::AlreadySatisfied {
+            target: named_target(),
+        },
+    );
+}
+
+#[test]
+fn ensure_target_conflict_takes_priority_over_requires_target() {
+    // A conflict plus an unrelated subtype resolves to the conflict, and the
+    // first conflicting intent is the one reported.
+    assert_eq!(
+        resolve_output_intent_policy(
+            &ensure_named_fogra51(),
+            [
+                observed(OutputIntentSubtype::GtsPdfa1, "FOGRA51"),
+                observed(OutputIntentSubtype::GtsPdfx, "FOGRA39"),
+                observed(OutputIntentSubtype::GtsPdfx, "FOGRA27"),
+            ],
+        ),
+        OutputIntentDecision::ConflictsWithExisting {
+            requested: named_target(),
+            existing: observed(OutputIntentSubtype::GtsPdfx, "FOGRA39"),
+        },
+    );
+}
+
+// --- Output-intent decision shape tests --------------------------------------
+//
+// These lock the public JSON encoding of every new resolution type. The
+// `RequiresEnsureTarget` fixtures pin the nested requested `OutputIntentTarget`
+// for both `NamedCondition` and `ProfileBacked` targets.
+
+#[test]
+fn observed_output_intent_has_stable_json_shape() {
+    assert_json_round_trip(
+        &observed(OutputIntentSubtype::GtsPdfx, "FOGRA51"),
+        Json::object([
+            ("subtype", Json::string("gts_pdfx")),
+            ("output_condition_identifier", Json::string("FOGRA51")),
+        ]),
+    );
+}
+
+#[test]
+fn output_intent_rejection_has_stable_json_shape() {
+    assert_json_round_trip(
+        &OutputIntentRejection::NoExistingIntent,
+        Json::object([("reason", Json::string("no_existing_intent"))]),
+    );
+}
+
+#[test]
+fn output_intent_decision_unit_variants_have_stable_json_shape() {
+    assert_json_round_trip(
+        &OutputIntentDecision::Preserve,
+        Json::object([("decision", Json::string("preserve"))]),
+    );
+    assert_json_round_trip(
+        &OutputIntentDecision::SatisfiedByExisting,
+        Json::object([("decision", Json::string("satisfied_by_existing"))]),
+    );
+}
+
+#[test]
+fn output_intent_decision_rejected_has_stable_json_shape() {
+    assert_json_round_trip(
+        &OutputIntentDecision::Rejected {
+            rejection: OutputIntentRejection::NoExistingIntent,
+        },
+        Json::object([
+            ("decision", Json::string("rejected")),
+            (
+                "rejection",
+                Json::object([("reason", Json::string("no_existing_intent"))]),
+            ),
+        ]),
+    );
+}
+
+#[test]
+fn output_intent_decision_already_satisfied_has_stable_json_shape() {
+    assert_json_round_trip(
+        &OutputIntentDecision::AlreadySatisfied {
+            target: named_target(),
+        },
+        Json::object([
+            ("decision", Json::string("already_satisfied")),
+            (
+                "target",
+                Json::object([
+                    ("kind", Json::string("named_condition")),
+                    ("condition", named_condition_json()),
+                ]),
+            ),
+        ]),
+    );
+}
+
+#[test]
+fn output_intent_decision_conflicts_with_existing_has_stable_json_shape() {
+    assert_json_round_trip(
+        &OutputIntentDecision::ConflictsWithExisting {
+            requested: named_target(),
+            existing: observed(OutputIntentSubtype::GtsPdfx, "FOGRA39"),
+        },
+        Json::object([
+            ("decision", Json::string("conflicts_with_existing")),
+            (
+                "requested",
+                Json::object([
+                    ("kind", Json::string("named_condition")),
+                    ("condition", named_condition_json()),
+                ]),
+            ),
+            (
+                "existing",
+                Json::object([
+                    ("subtype", Json::string("gts_pdfx")),
+                    ("output_condition_identifier", Json::string("FOGRA39")),
+                ]),
+            ),
+        ]),
+    );
+}
+
+#[test]
+fn output_intent_decision_requires_named_target_has_stable_json_shape() {
+    assert_json_round_trip(
+        &OutputIntentDecision::RequiresEnsureTarget {
+            target: named_target(),
+        },
+        Json::object([
+            ("decision", Json::string("requires_ensure_target")),
+            (
+                "target",
+                Json::object([
+                    ("kind", Json::string("named_condition")),
+                    ("condition", named_condition_json()),
+                ]),
+            ),
+        ]),
+    );
+}
+
+#[test]
+fn output_intent_decision_requires_profile_backed_target_has_stable_json_shape() {
+    assert_json_round_trip(
+        &OutputIntentDecision::RequiresEnsureTarget {
+            target: OutputIntentTarget::ProfileBacked {
+                intent: profile_backed_intent(),
+            },
+        },
+        Json::object([
+            ("decision", Json::string("requires_ensure_target")),
+            (
+                "target",
+                Json::object([
+                    ("kind", Json::string("profile_backed")),
+                    ("intent", profile_backed_intent_json()),
+                ]),
+            ),
+        ]),
+    );
 }

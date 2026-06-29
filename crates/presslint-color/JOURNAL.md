@@ -9,6 +9,18 @@
   a later writer.
 - Output-intent contracts are planning inputs only. They do not inspect PDF
   catalogs, parse ICC profiles, embed streams, or mutate PDF bytes.
+- Adds a pure `resolve_output_intent_policy` decision helper that resolves an
+  `OutputIntentPolicy` against a caller-supplied, ICC-free slice of
+  `ObservedOutputIntent` values and returns a serde-stable
+  `OutputIntentDecision`. It mirrors the `presslint-pdf::decide_indirect_object_edit`
+  pure-decision pattern: `Preserve` leaves as-is; `RequireExisting` is satisfied
+  when any intent is observed and otherwise yields an `OutputIntentRejection`;
+  `EnsureTarget` resolves to already-satisfied on a matching target identity, a
+  conflict on a same-subtype/different-identifier intent, or requires-ensure-target
+  otherwise. Target identity is compared only by subtype and output-condition
+  identifier (never `registry_name`, `info`, or profile bytes), with match taking
+  priority over conflict and conflict over requires-ensure-target. The helper is
+  pure: no PDF catalog inspection, no ICC parsing, no PDF byte mutation.
 - Focused serde shape tests lock the public JSON encoding of `ColorPolicy`,
   `SpotPolicy`, `OverprintPolicy`, `TransformRequest`, and the output-intent
   contracts. The transform fixture pins the nested `presslint-core::ColorSpace`
