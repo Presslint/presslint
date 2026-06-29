@@ -21,16 +21,26 @@
   identifier (never `registry_name`, `info`, or profile bytes), with match taking
   priority over conflict and conflict over requires-ensure-target. The helper is
   pure: no PDF catalog inspection, no ICC parsing, no PDF byte mutation.
+- Adds a report-only DeviceLink selection contract:
+  `DeviceLinkPolicy`, `DeviceLinkDescription`, `DeviceLinkRejection`,
+  `DeviceLinkDecision`, and `resolve_device_link_policy`. The helper resolves a
+  policy against a `TransformRequest` and caller-supplied abstract DeviceLink
+  descriptions. It never parses ICC bytes or executes transforms; matching is
+  exact `ColorSpace` equality for both source and destination. `Require` rejects
+  when no link matches, `Prefer` uses the first matching link and otherwise
+  falls back to profile-connection-space planning, and `Forbid` always plans
+  profile-connection-space conversion while ignoring supplied links.
 - Focused serde shape tests lock the public JSON encoding of `ColorPolicy`,
   `SpotPolicy`, `OverprintPolicy`, `TransformRequest`, and the output-intent
-  contracts. The transform fixture pins the nested `presslint-core::ColorSpace`
-  encoding for both a unit variant (`device_cmyk`) and the `Resource(PdfName)`
-  newtype variant. The dependency-free JSON harness lives in `src/tests/json.rs`
-  and the shape tests in `src/tests.rs`, mirroring `presslint-selectors` and
-  `presslint-actions`. The harness rejects `bool`, float, and `serde_bytes`-style
-  byte scalars: none of the locked color contracts use them (`PdfName` and
-  `EmbeddedBytes` wrap `Vec<u8>`, which serializes element-by-element as a
-  sequence), so the harness stays scoped to exactly what the fixtures exercise.
+  contracts plus the DeviceLink selection contracts. The transform fixture pins
+  the nested `presslint-core::ColorSpace` encoding for both a unit variant
+  (`device_cmyk`) and the `Resource(PdfName)` newtype variant. DeviceLink tests
+  live in `src/tests/devicelink.rs`; the dependency-free JSON harness lives in
+  `src/tests/json.rs`. The harness rejects `bool`, float, and
+  `serde_bytes`-style byte scalars: none of the locked color contracts use them
+  (`PdfName` and `EmbeddedBytes` wrap `Vec<u8>`, which serializes
+  element-by-element as a sequence), so the harness stays scoped to exactly what
+  the fixtures exercise.
 - Does not yet include ICC parsing, DeviceLink execution, transform caching, or
   PDF write logic.
 
