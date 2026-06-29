@@ -40,6 +40,13 @@
   `ClassicXrefTableInspection`. It reports in-use, free, not-found, and
   ambiguous object-number results without reading source bytes, doing I/O,
   allocating a lookup map, or parsing object bodies.
+- Adds `inspect_indirect_object_header`, a bounded helper for caller-provided
+  bytes and an expected indirect object byte offset. It skips optional PDF
+  whitespace, reports the parsed `IndirectRef`, the resolved header start, the
+  header byte range through the `obj` keyword, and the byte immediately after
+  `obj`. It validates public numeric ranges and returns structured errors for
+  out-of-bounds offsets, malformed headers, and object/generation range
+  failures without retaining PDF bytes or parsing object bodies.
 - Reports malformed or unsupported source shape through structured public
   rejection and diagnostic enums without retaining or copying PDF bytes.
 - The only owned allocations introduced by classic table inspection are the

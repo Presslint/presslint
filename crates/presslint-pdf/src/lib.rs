@@ -9,12 +9,18 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+mod object_header;
 mod source;
 mod xref_resolve;
 
 #[cfg(test)]
 mod tests;
 
+pub use object_header::{
+    IndirectObjectHeaderByteRange, IndirectObjectHeaderInspection,
+    IndirectObjectHeaderInspectionError, IndirectObjectHeaderInspectionRejection,
+    inspect_indirect_object_header,
+};
 pub use source::{
     PDF_HEADER_SCAN_LIMIT, PdfHeader, PdfSourceDiagnostic, PdfSourceInspection,
     PdfSourceInspectionError, PdfSourceRejection, PdfStartXref, PdfStartXrefIssue, PdfVersion,

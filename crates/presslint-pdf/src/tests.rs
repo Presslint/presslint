@@ -1,5 +1,7 @@
 #![allow(clippy::expect_used, clippy::missing_errors_doc)]
 
+mod object_header;
+
 use super::{
     ClassicXrefAmbiguousObjectEntry, ClassicXrefEntry, ClassicXrefEntryState,
     ClassicXrefObjectLocation, ClassicXrefSubsection, ClassicXrefTableInspection,
