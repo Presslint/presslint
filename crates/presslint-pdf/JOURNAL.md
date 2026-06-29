@@ -36,6 +36,10 @@
 - Regression coverage also pins fixed-width entry termination: a short
   `offset generation state` entry followed by a blank line is still rejected as
   `MalformedEntry`.
+- Adds `resolve_classic_xref_object`, a pure locate-only helper over an existing
+  `ClassicXrefTableInspection`. It reports in-use, free, not-found, and
+  ambiguous object-number results without reading source bytes, doing I/O,
+  allocating a lookup map, or parsing object bodies.
 - Reports malformed or unsupported source shape through structured public
   rejection and diagnostic enums without retaining or copying PDF bytes.
 - The only owned allocations introduced by classic table inspection are the

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 mod source;
+mod xref_resolve;
 
 #[cfg(test)]
 mod tests;
@@ -19,6 +20,9 @@ pub use source::{
     PdfSourceInspectionError, PdfSourceRejection, PdfStartXref, PdfStartXrefIssue, PdfVersion,
     PdfXrefSectionIssue, STARTXREF_SCAN_LIMIT, XREF_SECTION_SCAN_LIMIT, XrefSection,
     inspect_classic_xref_table, inspect_pdf_source,
+};
+pub use xref_resolve::{
+    ClassicXrefAmbiguousObjectEntry, ClassicXrefObjectLocation, resolve_classic_xref_object,
 };
 
 /// Parsed metadata for a classic cross-reference table.
