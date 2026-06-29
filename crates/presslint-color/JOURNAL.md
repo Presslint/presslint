@@ -30,12 +30,30 @@
   when no link matches, `Prefer` uses the first matching link and otherwise
   falls back to profile-connection-space planning, and `Forbid` always plans
   profile-connection-space conversion while ignoring supplied links.
+- Adds a report-only spot-resolution contract: `ObservedSpotColor`,
+  `SpotRejection`, `SpotSkipReason`, `SkippedSpotConversion`, `SpotDecision`, and
+  `resolve_spot_policy`. The helper resolves a `SpotPolicy` against a
+  caller-supplied, ICC-free slice of `ObservedSpotColor` values (each an abstract
+  colorant `name` plus the `alternate` color space its tint transform targets, no
+  ICC data, no tint-transform function, no components). `Preserve` leaves as is;
+  `Reject` is satisfied (`NoSpotColors`) when no spot is observed and otherwise
+  yields a `SpotRejection::SpotConversionRequired`; `ConvertAlternate` partitions
+  the observed spots in a single deterministic pass into `eligible` (alternate is
+  a process device color space: `DeviceGray`/`DeviceRgb`/`DeviceCmyk`) and
+  `skipped` (`SpotSkipReason::UnsupportedAlternate` for every other alternate),
+  both lists preserving caller iteration order. Reporting skips rather than
+  dropping unconvertible spots keeps unsupported shapes preserved or explicitly
+  skipped, never silently converted partially wrong. The shared
+  `is_process_device_color_space` private helper defines the process-device
+  notion. The helper is pure: no PDF catalog inspection, no `Separation`/`DeviceN`
+  reading, no ICC parsing, no tint-transform evaluation, no PDF byte mutation.
 - Focused serde shape tests lock the public JSON encoding of `ColorPolicy`,
   `SpotPolicy`, `OverprintPolicy`, `TransformRequest`, and the output-intent
   contracts plus the DeviceLink selection contracts. The transform fixture pins
   the nested `presslint-core::ColorSpace` encoding for both a unit variant
   (`device_cmyk`) and the `Resource(PdfName)` newtype variant. DeviceLink tests
-  live in `src/tests/devicelink.rs`; the dependency-free JSON harness lives in
+  live in `src/tests/devicelink.rs` and spot resolution tests in
+  `src/tests/spot.rs`; the dependency-free JSON harness lives in
   `src/tests/json.rs`. The harness rejects `bool`, float, and
   `serde_bytes`-style byte scalars: none of the locked color contracts use them
   (`PdfName` and `EmbeddedBytes` wrap `Vec<u8>`, which serializes

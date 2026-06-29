@@ -2,6 +2,7 @@
 
 mod devicelink;
 mod json;
+mod spot;
 
 use std::fmt;
 
