@@ -74,8 +74,10 @@ pub use object_header::{
 };
 pub use object_stream::{
     ContentStreamStartInspection, ContentStreamStartInspectionError,
-    ContentStreamStartInspectionRejection, StreamEolIssue, StreamKeywordEol,
-    inspect_content_stream_start,
+    ContentStreamStartInspectionRejection, DirectLengthContentStreamDataExtentInspection,
+    DirectLengthContentStreamDataExtentInspectionError,
+    DirectLengthContentStreamDataExtentInspectionRejection, StreamEolIssue, StreamKeywordEol,
+    inspect_content_stream_start, inspect_direct_length_content_stream_data_extent,
 };
 pub use page_content_targets::{
     PageContentTargetInspection, PageContentTargetsInspection, SkippedPageContentTargetReason,

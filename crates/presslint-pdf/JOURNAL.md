@@ -4,6 +4,35 @@
 
 - Defines initial structural PDF access data contracts for indirect references
   and document info.
+- Adds `inspect_direct_length_content_stream_data_extent`, a public,
+  report-only helper for dictionary-bodied content stream objects whose
+  top-level `/Length` value is a direct non-negative integer. It composes
+  `inspect_content_stream_start` for object, dictionary, `stream` keyword, and
+  stream-data-start validation, then scans the delegated dictionary entries for
+  exactly one exact raw `/Length` key. The report carries the delegated
+  `ContentStreamStartInspection`, `/Length` key/value byte ranges, the parsed
+  byte length, the stream-data start offset, and the exclusive stream-data end
+  offset computed with checked addition.
+- Direct-length stream extent inspection accepts only `/Length` values whose
+  delegated value span is a single ASCII-digit scalar that fits `usize`.
+  Structured public rejections cover missing and duplicate `/Length`, indirect
+  `N G R` length values, non-numeric direct values such as names/strings/arrays
+  or dictionaries, malformed number-like values such as negative numbers and
+  decimals, decimal values that do not fit `usize`, checked-addition overflow,
+  computed data ends past EOF, invalid post-data EOL markers, and missing or
+  misspelled `endstream` keywords at the computed position.
+- The direct-length helper validates the bytes immediately after the declared
+  data range structurally: LF and CRLF are accepted as the required
+  stream-data terminator before `endstream`; EOF, a lone CR, non-EOL bytes, and
+  an `endstream` spelling that fails the shared keyword-boundary rule are
+  rejected. It performs no fallback scan for `endstream` when `/Length` is
+  absent or malformed.
+- The direct-length stream extent report retains no stream bytes, decoded
+  bytes, object bodies, dictionaries, source slices, or copied PDF payloads.
+  It adds no new owned byte buffers, caches, object maps, filesystem I/O, xref
+  stream support, object stream support, indirect `/Length` resolution,
+  `/Filter` or `/DecodeParms` validation, content-stream tokenization,
+  decompression, concatenation, or page semantics.
 - Adds bounded source inspection over caller-provided bytes:
   `inspect_pdf_source` reports total byte length, `%PDF-M.N` header offset and
   version from a fixed leading window, and final `startxref` offset from a fixed

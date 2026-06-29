@@ -1,12 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-use crate::source_utils::{consume_keyword, skip_whitespace_and_comments};
+use crate::source_utils::{consume_keyword, parse_usize_decimal, skip_whitespace_and_comments};
 use crate::{
+    DictionaryEntryByteRange, DictionaryEntrySpan, DictionaryValueKind,
     IndirectObjectBodyLeadingTokenKind, IndirectObjectDictionaryInspection,
     IndirectObjectDictionaryInspectionRejection,
 };
 
 const STREAM_KEYWORD: &[u8] = b"stream";
+const ENDSTREAM_KEYWORD: &[u8] = b"endstream";
+const LENGTH_KEY: &[u8] = b"/Length";
 
 /// End-of-line marker accepted after the `stream` keyword per PDF 32000
 /// §7.3.8.1.
@@ -57,6 +60,29 @@ pub struct ContentStreamStartInspection {
     pub stream_data_start_byte_offset: usize,
 }
 
+/// Located byte extent for a content stream whose `/Length` is a direct
+/// non-negative integer.
+///
+/// This report stores only the delegated stream-start inspection, `/Length`
+/// key/value ranges, parsed scalar length, and byte offsets. It does not
+/// retain or copy stream bytes, decoded bytes, object bodies, dictionaries,
+/// source slices, or PDF payload bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectLengthContentStreamDataExtentInspection {
+    /// Delegated `stream` keyword and data-start inspection.
+    pub stream_start: ContentStreamStartInspection,
+    /// Byte range covering the exact top-level raw `/Length` key.
+    pub length_key_range: DictionaryEntryByteRange,
+    /// Byte range covering the `/Length` value span.
+    pub length_value_range: DictionaryEntryByteRange,
+    /// Parsed direct non-negative integer `/Length` in bytes.
+    pub length: usize,
+    /// Byte offset where stream data begins.
+    pub stream_data_start_byte_offset: usize,
+    /// Exclusive byte offset immediately after the declared stream data.
+    pub stream_data_end_byte_offset: usize,
+}
+
 /// Error returned when a stream object's `stream` keyword and data start cannot
 /// be located.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +96,20 @@ pub struct ContentStreamStartInspectionError {
     pub error_byte_offset: Option<usize>,
     /// Structured failure reason.
     pub reason: ContentStreamStartInspectionRejection,
+}
+
+/// Error returned when a direct-length stream-data extent cannot be located.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectLengthContentStreamDataExtentInspectionError {
+    /// Caller-supplied object byte offset where inspection began.
+    pub byte_offset: usize,
+    /// Total source length.
+    pub byte_len: usize,
+    /// Byte offset where the malformed or unsupported construct was found, when
+    /// available.
+    pub error_byte_offset: Option<usize>,
+    /// Structured failure reason.
+    pub reason: DirectLengthContentStreamDataExtentInspectionRejection,
 }
 
 /// Structured content stream start inspection rejection reasons.
@@ -99,6 +139,53 @@ pub enum ContentStreamStartInspectionRejection {
         /// Specific end-of-line violation.
         eol_issue: StreamEolIssue,
     },
+}
+
+/// Structured direct-length stream-data extent rejection reasons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum DirectLengthContentStreamDataExtentInspectionRejection {
+    /// A delegated content-stream start inspection failed.
+    StreamStart {
+        /// Underlying content-stream start rejection reason.
+        stream_start_reason: ContentStreamStartInspectionRejection,
+    },
+    /// The stream dictionary has no exact top-level raw `/Length` key.
+    MissingLength,
+    /// The stream dictionary has more than one exact top-level raw `/Length`
+    /// key.
+    DuplicateLength {
+        /// First `/Length` key range observed in source order.
+        first_key_range: DictionaryEntryByteRange,
+        /// Duplicate `/Length` key range observed in source order.
+        duplicate_key_range: DictionaryEntryByteRange,
+    },
+    /// The `/Length` value is shaped as an indirect reference; resolving it is
+    /// out of scope for the direct-length helper.
+    IndirectLength,
+    /// The `/Length` value is not a scalar number-like value.
+    NonNumericLength {
+        /// Shallow value kind reported by dictionary entry inspection.
+        value_kind: DictionaryValueKind,
+    },
+    /// The direct `/Length` scalar is not made only of ASCII digits consuming
+    /// the full delegated value span.
+    MalformedLength,
+    /// The direct `/Length` integer does not fit `usize`.
+    LengthOutOfRange,
+    /// `stream_data_start + length` overflowed `usize`.
+    StreamDataEndOverflow,
+    /// The computed exclusive stream-data end offset is past EOF.
+    StreamDataEndOutOfBounds,
+    /// The byte(s) immediately after the declared stream data are not the
+    /// required LF or CRLF terminator before `endstream`.
+    InvalidEndstreamEol {
+        /// Specific end-of-line violation.
+        eol_issue: StreamEolIssue,
+    },
+    /// The exact `endstream` keyword was not found immediately after the
+    /// required stream-data terminator EOL.
+    MissingEndstreamKeyword,
 }
 
 /// Specific §7.3.8.1 end-of-line violation after the `stream` keyword.
@@ -203,6 +290,183 @@ pub fn inspect_content_stream_start(
     })
 }
 
+/// Locate the stream-data byte range for a dictionary-bodied content stream
+/// object whose `/Length` is a direct non-negative integer.
+///
+/// The helper composes [`inspect_content_stream_start`] for object,
+/// dictionary, `stream` keyword, and stream-data-start validation. It then uses
+/// the delegated top-level dictionary entries to find exactly one exact raw
+/// `/Length` key, accepts only a direct ASCII-digit integer value that consumes
+/// the full reported value span, computes the exclusive stream-data end offset
+/// with checked addition, and requires an LF or CRLF followed immediately by an
+/// exact `endstream` keyword at that computed end.
+///
+/// It does not resolve indirect `/Length` objects, fallback-scan for
+/// `endstream`, read/copy/decode/decompress stream bytes, inspect filters,
+/// tokenize content streams, or validate page/content semantics.
+///
+/// # Errors
+///
+/// Returns [`DirectLengthContentStreamDataExtentInspectionError`] for delegated
+/// stream-start failures, missing/duplicate `/Length`, indirect/non-numeric or
+/// malformed direct `/Length` values, numeric/offset overflow, out-of-bounds
+/// data ends, invalid post-data EOL, or a missing/malformed `endstream`
+/// keyword at the computed position.
+pub fn inspect_direct_length_content_stream_data_extent(
+    input: &[u8],
+    object_offset: usize,
+) -> Result<
+    DirectLengthContentStreamDataExtentInspection,
+    DirectLengthContentStreamDataExtentInspectionError,
+> {
+    let stream_start = inspect_content_stream_start(input, object_offset).map_err(|error| {
+        direct_length_error(
+            input,
+            object_offset,
+            error.error_byte_offset,
+            DirectLengthContentStreamDataExtentInspectionRejection::StreamStart {
+                stream_start_reason: error.reason,
+            },
+        )
+    })?;
+
+    let length_entry = find_length_entry(input, object_offset, &stream_start)?;
+    let length = parse_direct_length(input, object_offset, length_entry)?;
+    let stream_data_start_byte_offset = stream_start.stream_data_start_byte_offset;
+    let stream_data_end_byte_offset = stream_data_start_byte_offset
+        .checked_add(length)
+        .ok_or_else(|| {
+            direct_length_error(
+                input,
+                object_offset,
+                Some(stream_data_start_byte_offset),
+                DirectLengthContentStreamDataExtentInspectionRejection::StreamDataEndOverflow,
+            )
+        })?;
+
+    if stream_data_end_byte_offset > input.len() {
+        return Err(direct_length_error(
+            input,
+            object_offset,
+            Some(stream_data_end_byte_offset),
+            DirectLengthContentStreamDataExtentInspectionRejection::StreamDataEndOutOfBounds,
+        ));
+    }
+
+    let (_, after_eol_offset) =
+        accept_stream_eol(input, stream_data_end_byte_offset).map_err(|eol_issue| {
+            direct_length_error(
+                input,
+                object_offset,
+                Some(stream_data_end_byte_offset),
+                DirectLengthContentStreamDataExtentInspectionRejection::InvalidEndstreamEol {
+                    eol_issue,
+                },
+            )
+        })?;
+
+    if consume_keyword(&input[after_eol_offset..], ENDSTREAM_KEYWORD).is_none() {
+        return Err(direct_length_error(
+            input,
+            object_offset,
+            Some(after_eol_offset),
+            DirectLengthContentStreamDataExtentInspectionRejection::MissingEndstreamKeyword,
+        ));
+    }
+
+    Ok(DirectLengthContentStreamDataExtentInspection {
+        stream_start,
+        length_key_range: length_entry.key_range,
+        length_value_range: length_entry.value_range,
+        length,
+        stream_data_start_byte_offset,
+        stream_data_end_byte_offset,
+    })
+}
+
+fn find_length_entry(
+    input: &[u8],
+    object_offset: usize,
+    stream_start: &ContentStreamStartInspection,
+) -> Result<DictionaryEntrySpan, DirectLengthContentStreamDataExtentInspectionError> {
+    let mut length_entry: Option<DictionaryEntrySpan> = None;
+    for entry in &stream_start.dictionary.entries {
+        if input.get(entry.key_range.start..entry.key_range.end) != Some(LENGTH_KEY) {
+            continue;
+        }
+
+        if let Some(first) = length_entry {
+            return Err(direct_length_error(
+                input,
+                object_offset,
+                Some(entry.key_range.start),
+                DirectLengthContentStreamDataExtentInspectionRejection::DuplicateLength {
+                    first_key_range: first.key_range,
+                    duplicate_key_range: entry.key_range,
+                },
+            ));
+        }
+
+        length_entry = Some(*entry);
+    }
+
+    length_entry.ok_or_else(|| {
+        direct_length_error(
+            input,
+            object_offset,
+            Some(stream_start.dictionary.dictionary_close_byte_offset),
+            DirectLengthContentStreamDataExtentInspectionRejection::MissingLength,
+        )
+    })
+}
+
+fn parse_direct_length(
+    input: &[u8],
+    object_offset: usize,
+    length_entry: DictionaryEntrySpan,
+) -> Result<usize, DirectLengthContentStreamDataExtentInspectionError> {
+    match length_entry.value_kind {
+        DictionaryValueKind::IndirectReferenceLike => {
+            return Err(direct_length_error(
+                input,
+                object_offset,
+                Some(length_entry.value_range.start),
+                DirectLengthContentStreamDataExtentInspectionRejection::IndirectLength,
+            ));
+        }
+        DictionaryValueKind::NumberLike => {}
+        value_kind => {
+            return Err(direct_length_error(
+                input,
+                object_offset,
+                Some(length_entry.value_range.start),
+                DirectLengthContentStreamDataExtentInspectionRejection::NonNumericLength {
+                    value_kind,
+                },
+            ));
+        }
+    }
+
+    let value_bytes = &input[length_entry.value_range.start..length_entry.value_range.end];
+    if value_bytes.is_empty() || !value_bytes.iter().all(u8::is_ascii_digit) {
+        return Err(direct_length_error(
+            input,
+            object_offset,
+            Some(length_entry.value_range.start),
+            DirectLengthContentStreamDataExtentInspectionRejection::MalformedLength,
+        ));
+    }
+
+    parse_usize_decimal(value_bytes).ok_or_else(|| {
+        direct_length_error(
+            input,
+            object_offset,
+            Some(length_entry.value_range.start),
+            DirectLengthContentStreamDataExtentInspectionRejection::LengthOutOfRange,
+        )
+    })
+}
+
 /// Validate the §7.3.8.1 end-of-line marker at `after_stream_offset`.
 ///
 /// Accepts a single LF or a CRLF pair and returns the marker plus the
@@ -236,6 +500,20 @@ const fn content_stream_start_error(
     reason: ContentStreamStartInspectionRejection,
 ) -> ContentStreamStartInspectionError {
     ContentStreamStartInspectionError {
+        byte_offset,
+        byte_len: input.len(),
+        error_byte_offset,
+        reason,
+    }
+}
+
+const fn direct_length_error(
+    input: &[u8],
+    byte_offset: usize,
+    error_byte_offset: Option<usize>,
+    reason: DirectLengthContentStreamDataExtentInspectionRejection,
+) -> DirectLengthContentStreamDataExtentInspectionError {
+    DirectLengthContentStreamDataExtentInspectionError {
         byte_offset,
         byte_len: input.len(),
         error_byte_offset,
