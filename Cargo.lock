@@ -219,9 +219,11 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 name = "presslint-actions"
 version = "0.0.1"
 dependencies = [
+ "criterion",
  "presslint-core",
  "presslint-inventory",
  "presslint-selectors",
+ "presslint-syntax",
  "serde",
 ]
 

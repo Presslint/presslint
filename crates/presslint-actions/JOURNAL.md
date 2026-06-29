@@ -35,6 +35,26 @@
   by focused serde shape tests. Each fixture asserts a full round-trip and pins
   the externally-tagged `action`/`reason`/`kind` field names and `snake_case`
   variant names exactly as the current `#[serde(...)]` attributes emit them.
+- A Criterion benchmark target `actions`
+  (`benches/actions.rs`, `harness = false`) measures the action-planning hot
+  path without touching production source or public contracts. It mirrors the
+  `presslint-inventory` bench: synthetic public content streams are tokenized
+  and assembled via `presslint_syntax::{tokenize, assemble_operators}` and built
+  into inventories with `presslint_inventory::build_inventory` once, outside the
+  timed loop, so only the planner/matcher are measured.
+  - `actions/plan_recipe` times `plan_recipe` over three synthetic inventories —
+    `small_mixed` (sourced process-color fills plus a default-color skip),
+    `large_repeated_targets` (target/patch-heavy), and `many_skip_few_target`
+    (skip-branch-heavy with a small target tail) — reporting inventory entries
+    per second via `Throughput::Elements`. The `ConvertColor`/`Selector::All`
+    recipe exercises both the target/patch and skip (`MissingColorSource`)
+    branches.
+  - `actions/selector_matches` times `presslint_selectors::matches` over a large
+    diverse inventory (vector/text/image/form entries) with a multi-predicate
+    `Or`/`And` selector, reporting entries per second.
+  - Adds only `criterion` and `presslint-syntax` as `[dev-dependencies]` (both
+    workspace dependencies); no production code, public types, serde shapes, or
+    planner behavior changed.
 - Tests are split into `src/tests.rs` (planner behavior plus legacy shape
   tests), `src/tests/patch_boundary.rs` (boundary planning and JSON shape
   tests), and `src/tests/json.rs`, a dependency-free in-memory JSON serde

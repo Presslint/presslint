@@ -13,5 +13,13 @@ presslint-inventory.workspace = true
 presslint-selectors.workspace = true
 serde.workspace = true
 
+[dev-dependencies]
+criterion.workspace = true
+presslint-syntax.workspace = true
+
+[[bench]]
+name = "actions"
+harness = false
+
 [lints]
 workspace = true
