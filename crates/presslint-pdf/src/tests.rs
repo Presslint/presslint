@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used, clippy::missing_errors_doc)]
 
 mod classic_xref;
+mod dictionary_extent;
 mod object_body;
 mod object_header;
 mod source;

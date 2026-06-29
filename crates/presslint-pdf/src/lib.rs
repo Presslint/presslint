@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 mod classic_xref;
+mod dictionary_extent;
 mod object_body;
 mod object_header;
 mod source;
@@ -22,6 +23,10 @@ mod xref_section;
 mod tests;
 
 pub use classic_xref::inspect_classic_xref_table;
+pub use dictionary_extent::{
+    DictionaryExtentInspection, DictionaryExtentInspectionError,
+    DictionaryExtentInspectionRejection, inspect_dictionary_extent,
+};
 pub use object_body::{
     IndirectObjectBodyLeadingTokenKind, IndirectObjectBodyTokenInspection,
     IndirectObjectBodyTokenInspectionError, IndirectObjectBodyTokenInspectionRejection,

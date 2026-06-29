@@ -55,6 +55,28 @@
   returns structured errors for offsets at or beyond EOF, whitespace-only tails,
   and unclassified leading bytes, without copying object bodies, stream bodies,
   dictionaries, arrays, strings, names, or numeric values.
+- Adds `inspect_dictionary_extent`, a bounded single-pass helper for
+  caller-provided bytes and a byte offset that begins a dictionary (typically
+  the `first_token_byte_offset` reported for a `DictionaryOpen`). It skips
+  optional PDF whitespace, requires the first significant token to be the `<<`
+  dictionary-open delimiter, and tracks `<<`/`>>` nesting depth so the reported
+  close is the matching close of the outermost `<<`, not the first inner `>>`.
+  It reports the open `<<` offset, the closing `>>` offset, the exclusive
+  byte offset after the close, and the deepest observed nesting depth. Literal
+  strings `( ... )` (honoring `\` escapes and balanced unescaped parentheses),
+  hex strings `< ... >` (a `<` not followed by `<`), and `%` comments are
+  skipped as opaque spans so `<<`, `>>`, `>`, and `<` bytes inside them never
+  affect the depth count. A private `MAX_DICTIONARY_NESTING_DEPTH` constant
+  bounds pathological inputs: exceeding it yields a structured
+  `MaxNestingExceeded` rejection rather than unbounded work. The helper decodes
+  no key, value, name, number, or string contents, and never retains or copies
+  PDF bytes; it reports only byte offsets and the depth scalar. It returns
+  structured errors for offsets at or beyond EOF, whitespace-only tails, a first
+  token that is not `<<`, an unterminated literal or hex string, and an
+  unterminated dictionary.
+- Shares literal-string, hex-string, and `%`-comment opaque-span skip helpers
+  through the internal `source_utils` module so the string/comment scanning
+  rules live in one place alongside the existing whitespace/delimiter helpers.
 - Reports malformed or unsupported source shape through structured public
   rejection and diagnostic enums without retaining or copying PDF bytes.
 - The only owned allocations introduced by classic table inspection are the
