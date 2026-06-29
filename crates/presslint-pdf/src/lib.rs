@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 mod array_extent;
+mod catalog_pages;
 mod classic_xref;
 mod dictionary_entries;
 mod dictionary_extent;
@@ -31,6 +32,10 @@ mod tests;
 pub use array_extent::{
     ArrayExtentInspection, ArrayExtentInspectionError, ArrayExtentInspectionRejection,
     inspect_array_extent,
+};
+pub use catalog_pages::{
+    CatalogPagesInspection, CatalogPagesInspectionError, CatalogPagesInspectionRejection,
+    inspect_catalog_pages,
 };
 pub use classic_xref::inspect_classic_xref_table;
 pub use dictionary_entries::{

@@ -193,6 +193,24 @@
   synthetic classic-xref bytes, locating a catalog-shaped object and a page-tree
   root object and reporting their top-level entry keys (`/Type`, `/Pages`,
   `/Kids`, `/Count`) as spans without copying their bytes.
+- Adds `inspect_catalog_pages`, a focused composition helper for
+  caller-provided bytes and an already-located catalog object byte offset. It
+  delegates catalog-shaped object inspection to
+  `inspect_indirect_object_dictionary`, matches only the exact raw top-level
+  key bytes `/Pages`, and parses the selected value through
+  `parse_indirect_reference`. The report carries the delegated object
+  dictionary inspection, `/Pages` key and value byte ranges, and the parsed
+  page-tree root `IndirectRef`; it retains or copies no PDF bytes, object
+  bodies, stream bodies, page-tree dictionaries, page dictionaries, contents
+  streams, or referenced-object bytes. Structured public rejections cover
+  delegated catalog dictionary failures, missing `/Pages`, duplicate exact
+  `/Pages` keys, direct non-reference values such as dictionaries/names/numbers,
+  and malformed scalar reference attempts such as `2 0 obj`. This slice does
+  not validate `/Type /Catalog`, decode name escapes, resolve the parsed
+  `/Pages` reference, traverse `/Kids`, inspect `/Count`, page dictionaries,
+  `/Contents`, resources, annotations, inherited attributes, streams, xref
+  streams, object streams, encryption, linearization, incremental updates, or
+  `/Prev` chains.
 - Promotes the shared `parse_u64_decimal` decimal parser into `source_utils` so
   the indirect-reference and object-header helpers reuse one bounded
   decimal-to-`u64` routine instead of duplicating it.
