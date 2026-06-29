@@ -33,6 +33,39 @@
   stream support, object stream support, indirect `/Length` resolution,
   `/Filter` or `/DecodeParms` validation, content-stream tokenization,
   decompression, concatenation, or page semantics.
+- Adds `inspect_indirect_length_content_stream_data_extent`, the sibling
+  report-only helper for dictionary-bodied content stream objects whose
+  top-level `/Length` value is an indirect reference resolved through a
+  caller-supplied `ClassicXrefTableInspection`. It composes
+  `inspect_content_stream_start`, scans the delegated top-level dictionary
+  entry metadata for exactly one exact raw `/Length` key, requires that value
+  to be `DictionaryValueKind::IndirectReferenceLike`, delegates the value span
+  to `resolve_classic_xref_integer_object`, and reports the delegated
+  `ContentStreamStartInspection`, `/Length` key/value byte ranges, delegated
+  `ClassicXrefIntegerObjectResolution`, resolved byte length, stream-data start
+  offset, and exclusive stream-data end offset computed with checked addition.
+- Indirect-length stream extent inspection rejects missing and duplicate
+  `/Length` keys, direct or otherwise non-reference `/Length` values, delegated
+  indirect-integer resolution failures while preserving the underlying
+  `ClassicXrefIntegerObjectResolutionRejection`, checked-addition overflow,
+  computed data ends past EOF, invalid post-data EOL markers, and missing or
+  misspelled `endstream` keywords at the computed position. It accepts only the
+  resolved one-level non-negative integer object; it does not follow reference
+  chains.
+- The indirect-length helper uses the same structural `endstream` policy as
+  the direct helper: the computed data end must be in bounds, then LF or CRLF
+  must appear immediately before an exact `endstream` keyword accepted by the
+  shared keyword-boundary rule. There is no fallback scan when `/Length` is
+  missing, malformed, unresolved, or inconsistent.
+- The indirect-length stream extent report retains no stream bytes, decoded
+  bytes, object bodies, dictionaries, source slices, or copied PDF payloads.
+  It adds no copied stream buffers, decoded buffers, object maps, caches,
+  filesystem I/O, `/Prev` traversal, xref stream parsing, object stream
+  parsing, `/Filter` or `/DecodeParms` validation, content-stream tokenization,
+  decompression, concatenation, page semantics, selectors, actions, or mutation
+  planning. Private factoring is limited to exact `/Length` entry selection and
+  fixed-position `endstream` validation shared with the direct helper, without
+  changing the direct helper's public fields or serde shape.
 - Adds `resolve_classic_xref_integer_object`, a focused report-only composition
   helper for caller-provided bytes, an existing `ClassicXrefTableInspection`, and
   the byte offset where an `N G R` value begins (typically a `DictionaryEntrySpan`
@@ -70,9 +103,9 @@
   module (sibling to `object_stream.rs` / `object_dictionary.rs`). A composition
   test parses a `<< /Length 7 0 R >>` dictionary's `IndirectReferenceLike`
   `/Length` value span with `inspect_dictionary_entries` and resolves it to an
-  integer through this helper. The named follow-up is wiring this primitive into
-  an indirect-length stream-data extent helper (the deferred indirect case of
-  `inspect_direct_length_content_stream_data_extent`'s `IndirectLength`).
+  integer through this helper. This primitive is now also used by
+  `inspect_indirect_length_content_stream_data_extent` for the deferred indirect
+  case of content-stream `/Length` handling.
 - Adds bounded source inspection over caller-provided bytes:
   `inspect_pdf_source` reports total byte length, `%PDF-M.N` header offset and
   version from a fixed leading window, and final `startxref` offset from a fixed
