@@ -9,6 +9,7 @@ mod indirect_reference;
 mod object_body;
 mod object_dictionary;
 mod object_header;
+mod object_stream;
 mod page_content_targets;
 mod page_contents;
 mod page_tree_kids;

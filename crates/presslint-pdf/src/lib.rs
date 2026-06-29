@@ -18,6 +18,7 @@ mod indirect_reference;
 mod object_body;
 mod object_dictionary;
 mod object_header;
+mod object_stream;
 mod page_content_targets;
 mod page_contents;
 mod page_tree_kids;
@@ -70,6 +71,11 @@ pub use object_header::{
     IndirectObjectHeaderByteRange, IndirectObjectHeaderInspection,
     IndirectObjectHeaderInspectionError, IndirectObjectHeaderInspectionRejection,
     inspect_indirect_object_header,
+};
+pub use object_stream::{
+    ContentStreamStartInspection, ContentStreamStartInspectionError,
+    ContentStreamStartInspectionRejection, StreamEolIssue, StreamKeywordEol,
+    inspect_content_stream_start,
 };
 pub use page_content_targets::{
     PageContentTargetInspection, PageContentTargetsInspection, SkippedPageContentTargetReason,

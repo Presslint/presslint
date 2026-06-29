@@ -387,6 +387,46 @@
   syntax or inventory crates. A composition test chains catalog `/Pages`, page
   tree `/Kids`, leaf page `/Contents`, and classic-xref content target
   resolution over synthetic bytes.
+- Adds `inspect_content_stream_start`, a focused report-only composition helper
+  for caller-provided bytes and a dictionary-bodied stream object byte offset
+  (typically a `PageContentTargetInspection::Resolved` `object_byte_offset`). It
+  delegates object-dictionary validation to
+  `inspect_indirect_object_dictionary`, then from the reported
+  `after_dictionary_close_byte_offset` skips optional PDF whitespace and `%`
+  comments through the shared `skip_whitespace_and_comments`, requires the exact
+  `stream` keyword via the shared `consume_keyword` boundary rule (so `streams`
+  or `stream0` is rejected as malformed), and validates the PDF 32000 §7.3.8.1
+  end-of-line rule immediately after the keyword: only a CRLF pair or a single
+  LF is accepted, and a lone CR is rejected. The report carries the delegated
+  `IndirectObjectDictionaryInspection` (which already exposes the parsed
+  `IndirectRef` and the dictionary open/close/after offsets), the `stream`
+  keyword start/after byte offsets, the accepted `StreamKeywordEol`
+  (`line_feed` or `carriage_return_line_feed`, with a `byte_len()` of 1 or 2),
+  and the stream-data start byte offset immediately after the EOL. It retains or
+  copies no PDF bytes, object bodies, stream bodies, decoded streams, or source
+  slices; offsets and ranges only. Structured public rejections distinguish a
+  delegated object-dictionary failure (`ObjectDictionary`), a non-dictionary
+  object body surfaced as a dedicated `NonDictionaryBody` carrying the classified
+  `IndirectObjectBodyLeadingTokenKind`, a post-dictionary offset at or beyond EOF
+  before any `stream` keyword (`OffsetOutOfBounds`), a missing or malformed
+  `stream` keyword (`MissingStreamKeyword`), and an invalid post-`stream`
+  end-of-line marker (`InvalidStreamEol` carrying a `StreamEolIssue` of
+  `lone_carriage_return`, `end_of_file`, or `not_end_of_line`). This slice
+  locates only the *start* of the stream body: it does not locate `endstream`,
+  read/parse/resolve `/Length` (direct or indirect), compute the stream-data end
+  offset, read/decode/decompress/tokenize stream bytes, validate `/Filter`,
+  `/Type`, or `/DecodeParms`, connect streams to `presslint-syntax`/
+  `presslint-inventory`, or mutate PDF bytes — each deliberately deferred. It is
+  allocation-light: one delegated dictionary inspection plus a fixed-size
+  post-`>>` whitespace/keyword/EOL check, with no copied byte buffers, source
+  slices, caches, or object maps, so no benchmark was added. It lives in its own
+  `object_stream.rs` module (sibling to `object_dictionary.rs`). A composition
+  test chains `inspect_classic_xref_table -> inspect_classic_xref_trailer_root ->
+  inspect_catalog_pages -> inspect_page_tree_reference_target ->
+  inspect_page_tree_kids -> inspect_page_tree_reference_target ->
+  inspect_page_contents -> inspect_page_content_targets ->
+  inspect_content_stream_start` over synthetic bytes to reach a resolved content
+  stream's data start offset without copying PDF bytes.
 - Ablation T077: replaces the page-content-target report assembly loop with a
   direct source-ordered iterator collection over the already reported
   `/Contents` references. Runtime behavior, public API, serde shape, skip
