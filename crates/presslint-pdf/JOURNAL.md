@@ -313,6 +313,59 @@
   caches/indexes around classic xref lookup. A composition test chains trailer
   root, catalog `/Pages`, page-tree `/Kids`, and one selected kid-reference
   classification without implementing full page-tree traversal.
+- Adds `inspect_page_contents`, a focused composition helper for
+  caller-provided bytes and an already-located leaf page-object byte offset
+  (typically the in-use xref target of a `/Page` kid resolved by
+  `inspect_page_tree_reference_target`). It delegates page-object inspection to
+  `inspect_indirect_object_dictionary`, matches only the exact raw top-level key
+  bytes `/Contents` from each entry's `key_range`, and reports the direct
+  content-stream indirect reference(s) a future page-content reader will
+  resolve. A single-reference value (`N G R`, classified `IndirectReferenceLike`
+  or `OtherScalar`) is parsed through `parse_indirect_reference` and reported as
+  one content reference, requiring the parsed reference to consume the whole
+  value span. An array value (`[ ... ]`) is bounded with `inspect_array_extent`
+  and scanned for direct top-level `N G R` references in source order, reusing
+  the same scan discipline as `inspect_page_tree_kids` and the shared
+  `source_utils` skip helpers: nested arrays, dictionaries, literal/hex strings,
+  comments, names, numbers, booleans, nulls, and other direct scalars become
+  shallow `SkippedPageContentEntry` diagnostics instead of failing the whole
+  inspection or being silently dropped, and malformed reference-shaped
+  candidates carry the delegated `IndirectReferenceInspectionRejection`. The
+  report carries the delegated `IndirectObjectDictionaryInspection`, the
+  `/Contents` key/value byte ranges, a `PageContentsValueShape` marker
+  (`single_reference` vs `array`), the ordered `PageContentReference`s with their
+  `IndirectReferenceByteRange`s, and the array skip diagnostics; it retains or
+  copies no PDF bytes, object bodies, array bytes, content-stream bodies, or
+  referenced-object bytes, addressing references and ranges by offset only. The
+  only owned allocations are the public report vectors for content references
+  and skipped array entries; no benchmark was added because this remains one
+  delegated object-dictionary inspection plus, for the array case, a single
+  bounded array-extent scan over the `/Contents` array body rather than a
+  whole-document traversal. Structured public rejections distinguish a delegated
+  page-object dictionary failure (`PageDictionary`), missing `/Contents`
+  (`MissingContents`), duplicate exact `/Contents` (`DuplicateContents`,
+  matching the `inspect_catalog_pages` duplicate-key policy), a
+  non-reference/non-array scalar value (`NonReferenceOrArrayContentsValue`), and
+  a malformed single-reference value (`MalformedContentsReference`). A defensive
+  `ContentsArrayExtent` channel mirrors `inspect_page_tree_node`'s
+  `KidsArrayExtent`: because an array-classified value was already bounded by the
+  delegated dictionary-entry scan, the re-bounding `inspect_array_extent` call
+  cannot currently fail for a well-formed array value, so this variant is the
+  dedicated reporting channel rather than a reachable failure. This slice does
+  not resolve, fetch, decode, or concatenate content streams, parse
+  `stream`/`endstream`/`/Length`, validate `/Type /Page`, inspect `/Resources`,
+  page boxes, `/Annots`, or inherited attributes, recurse into `/Kids`, decode
+  name escapes, or treat an absent `/Contents` as a valid empty page. It lives
+  in its own `page_contents.rs` module and currently mirrors the
+  `inspect_page_tree_kids` array scanner (whose helpers are module-private)
+  rather than sharing one scanner, a duplication a later ablation could factor
+  into a shared internal helper. A composition test chains
+  `inspect_classic_xref_table -> inspect_classic_xref_trailer_root ->
+  inspect_catalog_pages -> inspect_page_tree_reference_target ->
+  inspect_page_tree_kids -> inspect_page_tree_reference_target ->
+  inspect_page_contents` over synthetic bytes, reporting a resolved leaf page's
+  single-reference contents and a second leaf's source-ordered array contents
+  without copying PDF bytes.
 - Ablation T075: removes duplicate page-tree-reference test fixture builders and
   reuses the existing shared test helpers for indirect references and synthetic
   classic xref inspections. Runtime behavior, public APIs, and coverage are

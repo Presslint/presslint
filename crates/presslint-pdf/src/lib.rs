@@ -18,6 +18,7 @@ mod indirect_reference;
 mod object_body;
 mod object_dictionary;
 mod object_header;
+mod page_contents;
 mod page_tree_kids;
 mod page_tree_node;
 mod page_tree_node_type;
@@ -68,6 +69,11 @@ pub use object_header::{
     IndirectObjectHeaderByteRange, IndirectObjectHeaderInspection,
     IndirectObjectHeaderInspectionError, IndirectObjectHeaderInspectionRejection,
     inspect_indirect_object_header,
+};
+pub use page_contents::{
+    PageContentReference, PageContentsInspection, PageContentsInspectionError,
+    PageContentsInspectionRejection, PageContentsValueShape, SkippedPageContentEntry,
+    SkippedPageContentEntryKind, inspect_page_contents,
 };
 pub use page_tree_kids::{
     PageTreeKidReference, PageTreeKidsInspection, PageTreeKidsInspectionError,
