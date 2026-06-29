@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 
 mod array_extent;
 mod classic_xref;
+mod dictionary_entries;
 mod dictionary_extent;
 mod object_body;
 mod object_header;
@@ -29,6 +30,11 @@ pub use array_extent::{
     inspect_array_extent,
 };
 pub use classic_xref::inspect_classic_xref_table;
+pub use dictionary_entries::{
+    DictionaryEntryByteRange, DictionaryEntryInspection, DictionaryEntryInspectionError,
+    DictionaryEntryInspectionRejection, DictionaryEntrySpan, DictionaryValueKind,
+    inspect_dictionary_entries,
+};
 pub use dictionary_extent::{
     DictionaryExtentInspection, DictionaryExtentInspectionError,
     DictionaryExtentInspectionRejection, inspect_dictionary_extent,

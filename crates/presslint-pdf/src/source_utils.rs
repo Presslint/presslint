@@ -59,7 +59,7 @@ pub const fn is_pdf_whitespace(byte: u8) -> bool {
     matches!(byte, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
 }
 
-const fn is_pdf_delimiter(byte: u8) -> bool {
+pub const fn is_pdf_delimiter(byte: u8) -> bool {
     matches!(
         byte,
         b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'

@@ -106,6 +106,22 @@
   public errors for offsets at or beyond EOF, missing `trailer` keywords, and
   delegated dictionary-extent rejections, without parsing trailer keys such as
   `/Size`, `/Root`, or `/Prev`.
+- Adds `inspect_dictionary_entries`, a bounded shallow scanner for
+  caller-provided bytes and a dictionary-open byte offset. It first validates
+  and bounds the outer dictionary through `inspect_dictionary_extent`, then
+  scans only between the outer `<<` and its matching `>>` for top-level
+  `/Name value` pairs. Each entry reports key and value byte ranges plus a
+  shallow value kind (`dictionary`, `array`, `name`, `string`, `number_like`,
+  `boolean`, `null`, `indirect_reference_like`, or `other_scalar`) without
+  retaining or copying key/value bytes. Nested dictionaries and arrays are
+  skipped as opaque values through the existing extent helpers, while literal
+  strings, hex strings, and comments are treated as opaque spans so delimiters
+  inside them do not split top-level entries. Scalar scanning recognizes
+  `N G R`-shaped values as one indirect-reference-like span but does not resolve
+  or interpret references or any specific dictionary key semantics. The helper
+  returns structured public errors for malformed non-name top-level keys,
+  missing values, delegated dictionary/array extent failures, and unterminated
+  string spans.
 - Shares literal-string, hex-string, and `%`-comment opaque-span skip helpers
   through the internal `source_utils` module so the string/comment scanning
   rules live in one place alongside the existing whitespace/delimiter helpers.
