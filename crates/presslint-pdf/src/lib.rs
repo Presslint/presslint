@@ -9,8 +9,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+mod source;
+
 #[cfg(test)]
 mod tests;
+
+pub use source::{
+    PDF_HEADER_SCAN_LIMIT, PdfHeader, PdfSourceDiagnostic, PdfSourceInspection,
+    PdfSourceInspectionError, PdfSourceRejection, PdfStartXref, PdfStartXrefIssue, PdfVersion,
+    STARTXREF_SCAN_LIMIT, inspect_pdf_source,
+};
 
 /// PDF indirect reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
