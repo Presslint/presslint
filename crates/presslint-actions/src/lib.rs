@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use presslint_core::{ColorSpace, EditCapability, ObjectId};
+use presslint_core::{ByteRange, ColorSpace, ContentScope, EditCapability, ObjectId, PageIndex};
 use presslint_inventory::{Inventory, InventoryEntry};
 use presslint_selectors::{Selector, matches as selector_matches};
 use serde::{Deserialize, Serialize};
@@ -104,8 +104,37 @@ pub struct ActionPlan {
     pub action: Action,
     /// Objects selected for the action in inventory order.
     pub targets: Vec<ObjectId>,
+    /// Planned report-only patches for targets with a concrete future mutation
+    /// boundary.
+    pub patches: Vec<PlannedPatch>,
     /// Objects matched by the selector but skipped before future mutation.
     pub skipped: Vec<SkippedTarget>,
+}
+
+/// Report-only patch request for a selected target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedPatch {
+    /// Selected object the future patch would apply to.
+    pub object: ObjectId,
+    /// Edit capability proven for this planned patch.
+    pub capability: EditCapability,
+    /// Narrow source boundary a future executor would be allowed to edit.
+    pub boundary: MutationBoundary,
+}
+
+/// Serializable boundary for a future mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MutationBoundary {
+    /// Range in one decoded content stream record.
+    ContentStream {
+        /// Page where the editable content stream was observed.
+        page: PageIndex,
+        /// Stable content scope identifier.
+        scope: ContentScope,
+        /// Byte range of the sourced operator record.
+        range: ByteRange,
+    },
 }
 
 /// Matched inventory entry skipped during planning.
@@ -152,39 +181,62 @@ const fn is_process_space(space: &ColorSpace) -> bool {
     )
 }
 
-/// Return the skip reason for a capability-passing matched entry, or `None` when
-/// the entry is an action target.
+/// Return the planned mutation boundary for a capability-passing `ConvertColor`
+/// entry, or a structured skip reason when no single sourced process color
+/// operator can be selected.
 ///
 /// `ConvertColor` additionally requires exactly one sourced process device
-/// color observation; `SpreadText` and `MinimumStrokeWidth` rely on the
-/// capability check alone and never skip here.
-fn action_skip_reason(action: &Action, entry: &InventoryEntry) -> Option<SkipReason> {
-    match action {
-        Action::ConvertColor(_) => {
-            let mut process_colors = 0usize;
-            let mut sourced_process_colors = 0usize;
+/// color observation.
+fn convert_color_boundary(entry: &InventoryEntry) -> Result<MutationBoundary, SkipReason> {
+    let mut has_process_color = false;
+    let mut missing_source = false;
+    let mut ambiguous_source = false;
+    let mut source = None;
 
-            for color in &entry.colors {
-                if is_process_space(&color.space) {
-                    process_colors += 1;
+    for color in &entry.colors {
+        if is_process_space(&color.space) {
+            has_process_color = true;
 
-                    if color.source.is_some() {
-                        sourced_process_colors += 1;
-                    }
-                }
-            }
-
-            if process_colors == 0 {
-                Some(SkipReason::NonProcessColor)
-            } else if sourced_process_colors < process_colors {
-                Some(SkipReason::MissingColorSource)
-            } else if sourced_process_colors > 1 {
-                Some(SkipReason::AmbiguousColorSource)
-            } else {
-                None
+            match color.source {
+                Some(range) if source.is_none() => source = Some(range),
+                Some(_) => ambiguous_source = true,
+                None => missing_source = true,
             }
         }
-        Action::SpreadText(_) | Action::MinimumStrokeWidth(_) => None,
+    }
+
+    if !has_process_color {
+        Err(SkipReason::NonProcessColor)
+    } else if missing_source {
+        Err(SkipReason::MissingColorSource)
+    } else if ambiguous_source {
+        Err(SkipReason::AmbiguousColorSource)
+    } else if let Some(range) = source {
+        Ok(MutationBoundary::ContentStream {
+            page: entry.provenance.page,
+            scope: entry.provenance.scope.clone(),
+            range,
+        })
+    } else {
+        Err(SkipReason::MissingColorSource)
+    }
+}
+
+fn plan_patch_for_action(
+    action: &Action,
+    entry: &InventoryEntry,
+    required: EditCapability,
+) -> Result<Option<PlannedPatch>, SkipReason> {
+    match action {
+        Action::ConvertColor(_) => {
+            let boundary = convert_color_boundary(entry)?;
+            Ok(Some(PlannedPatch {
+                object: entry.id.clone(),
+                capability: required,
+                boundary,
+            }))
+        }
+        Action::SpreadText(_) | Action::MinimumStrokeWidth(_) => Ok(None),
     }
 }
 
@@ -218,6 +270,7 @@ pub fn plan_recipe(recipe: &Recipe, inventory: &Inventory) -> PatchPlan {
 fn plan_step(step: &RecipeStep, inventory: &Inventory) -> ActionPlan {
     let required = step.action.required_capability();
     let mut targets = Vec::new();
+    let mut patches = Vec::new();
     let mut skipped = Vec::new();
 
     for entry in &inventory.entries {
@@ -225,25 +278,36 @@ fn plan_step(step: &RecipeStep, inventory: &Inventory) -> ActionPlan {
             continue;
         }
 
+        if !entry.capabilities.contains(&required) {
+            skipped.push(SkippedTarget {
+                object: entry.id.clone(),
+                reason: SkipReason::UnsupportedCapability { required },
+            });
+            continue;
+        }
+
         // The capability check takes precedence over per-action eligibility.
-        let skip_reason = if entry.capabilities.contains(&required) {
-            action_skip_reason(&step.action, entry)
-        } else {
-            Some(SkipReason::UnsupportedCapability { required })
+        let patch = match plan_patch_for_action(&step.action, entry, required) {
+            Ok(patch) => patch,
+            Err(reason) => {
+                skipped.push(SkippedTarget {
+                    object: entry.id.clone(),
+                    reason,
+                });
+                continue;
+            }
         };
 
-        match skip_reason {
-            Some(reason) => skipped.push(SkippedTarget {
-                object: entry.id.clone(),
-                reason,
-            }),
-            None => targets.push(entry.id.clone()),
+        targets.push(entry.id.clone());
+        if let Some(patch) = patch {
+            patches.push(patch);
         }
     }
 
     ActionPlan {
         action: step.action.clone(),
         targets,
+        patches,
         skipped,
     }
 }

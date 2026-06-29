@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used, clippy::missing_errors_doc)]
 
 mod json;
+mod patch_boundary;
 
 use std::fmt::Debug;
 
@@ -603,6 +604,7 @@ fn action_plan_has_stable_json_shape() {
                 overprint: false,
             }),
             targets: vec![object_id(1)],
+            patches: Vec::new(),
             skipped: vec![SkippedTarget {
                 object: object_id(2),
                 reason: SkipReason::NonProcessColor,
@@ -618,6 +620,7 @@ fn action_plan_has_stable_json_shape() {
                 ]),
             ),
             ("targets", Json::array([object_id_json(1)])),
+            ("patches", Json::array([])),
             (
                 "skipped",
                 Json::array([Json::object([
@@ -640,6 +643,7 @@ fn patch_plan_has_stable_json_shape() {
             steps: vec![ActionPlan {
                 action: Action::MinimumStrokeWidth(MinimumStrokeWidth { width_pt: 0.25 }),
                 targets: vec![object_id(1)],
+                patches: Vec::new(),
                 skipped: Vec::new(),
             }],
         },
@@ -656,6 +660,7 @@ fn patch_plan_has_stable_json_shape() {
                         ]),
                     ),
                     ("targets", Json::array([object_id_json(1)])),
+                    ("patches", Json::array([])),
                     ("skipped", Json::array([])),
                 ])]),
             ),
