@@ -97,6 +97,37 @@
   transform execution, output-intent insertion, or PDF byte mutation. Focused
   delegation and serde shape tests live in `src/tests/transform_plan.rs`, with
   the request shape locked in `src/tests.rs`.
+- Adds a report-only, deterministic transform cache-key contract:
+  `ProfileReference`, `TransformCacheKey`, `TransformCacheKeyRejection`,
+  `TransformCacheKeyDecision`, and `derive_transform_cache_key`, in their own
+  `transform_cache.rs` module. The key identifies one abstract color transform so
+  a future executor can recognise identical transforms before any real
+  ICC/DeviceLink execution exists; this slice models only the key contract and
+  its derivation, not a cache store, eviction, invalidation, or LRU policy. The
+  key names a transform by the conversion path the crate already resolves: the
+  DeviceLink path (`TransformCacheKey::DeviceLink`) keyed by the selected
+  DeviceLink's stable `id` plus the abstract source/destination `ColorSpace`, and
+  the profile-connection-space path (`TransformCacheKey::ProfileConnectionSpace`)
+  keyed by caller-supplied, bytes-free source/destination `ProfileReference`
+  values plus the abstract source/destination `ColorSpace`. `ProfileReference`
+  mirrors the `OutputProfileSource::OpaqueId` pattern: it names a profile by a
+  stable id only and carries no ICC/profile bytes; the key never carries, hashes,
+  or copies profile bytes, and no `EmbeddedBytes`-style variant is accepted into
+  it. The key derives `Eq`/`Hash` so a future bounded cache can use it directly:
+  equal inputs (same path, ids, color spaces) yield equal keys and any differing
+  link id, profile reference, source, or destination yields a different key.
+  `derive_transform_cache_key` is a pure single match over an already-resolved
+  `DeviceLinkDecision` plus the originating `TransformRequest` and the two
+  bytes-free PCS profile references (consulted only on the PCS path):
+  `UseDeviceLink` yields a keyed DeviceLink key, `UseProfileConnectionSpace`
+  yields a keyed PCS key or, when a profile reference is absent, a structured
+  `MissingSourceProfileId`/`MissingDestinationProfileId` no-key reason (source
+  checked first), and `Rejected` yields `RejectedDeviceLink`. It fabricates no
+  placeholder key for unbounded inputs. The helper is pure: no ICC parsing, no
+  PDF catalog or graphics-state inspection, no transform execution, no PDF byte
+  mutation. Derivation, equality/inequality, no-key-reason, and serde shape tests
+  live in `src/tests/transform_cache.rs`; the dependency-free JSON harness needed
+  no change because the contract uses only `String` and `ColorSpace`.
 - Focused serde shape tests lock the public JSON encoding of `ColorPolicy`,
   `SpotPolicy`, `OverprintPolicy`, `TransformRequest`, and the output-intent
   contracts plus the DeviceLink selection, spot-resolution, and

@@ -8,6 +8,7 @@ mod output_intent;
 mod overprint;
 mod policy;
 mod spot;
+mod transform_cache;
 mod transform_plan;
 
 #[cfg(test)]
@@ -33,5 +34,9 @@ pub use policy::{
 pub use spot::{
     ObservedSpotColor, SkippedSpotConversion, SpotDecision, SpotRejection, SpotSkipReason,
     resolve_spot_policy,
+};
+pub use transform_cache::{
+    ProfileReference, TransformCacheKey, TransformCacheKeyDecision, TransformCacheKeyRejection,
+    derive_transform_cache_key,
 };
 pub use transform_plan::{TransformPlanDecision, resolve_transform_plan};

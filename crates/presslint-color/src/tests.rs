@@ -5,6 +5,7 @@ mod devicelink;
 mod json;
 mod overprint;
 mod spot;
+mod transform_cache;
 mod transform_plan;
 
 use std::fmt;
