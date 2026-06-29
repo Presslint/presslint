@@ -30,6 +30,27 @@ n
 Q
 ";
 
+// Path-construction and no-op operators only: every record walks but none emits
+// an inventory entry. Repeated many times, this dominates the stream with no-ops.
+const NOOP_HEAVY_UNIT: &[u8] = br"
+10 20 m
+30 40 l
+50 60 l
+h
+W
+n
+1 0 0 1 1 1 cm
+";
+
+// A short tail with a few entry-producing operators (one fill, one text show,
+// one image Do, one form Do) appended after the no-op-heavy body.
+const FEW_ENTRY_TAIL: &[u8] = br"
+0.1 0.2 0.3 rg f
+BT (Hi) Tj ET
+/Im1 Do
+/Fm1 Do
+";
+
 struct InventoryCase {
     name: &'static str,
     source: Vec<u8>,
@@ -43,6 +64,16 @@ fn repeated_stream(repetitions: usize) -> Vec<u8> {
     for _ in 0..repetitions {
         stream.extend_from_slice(REPEATED_STREAM_UNIT);
     }
+    stream
+}
+
+fn noop_heavy_stream(noop_repetitions: usize) -> Vec<u8> {
+    let mut stream =
+        Vec::with_capacity(NOOP_HEAVY_UNIT.len() * noop_repetitions + FEW_ENTRY_TAIL.len());
+    for _ in 0..noop_repetitions {
+        stream.extend_from_slice(NOOP_HEAVY_UNIT);
+    }
+    stream.extend_from_slice(FEW_ENTRY_TAIL);
     stream
 }
 
@@ -65,7 +96,7 @@ fn assemble_source(source: &[u8]) -> Vec<OperatorRecord> {
     require_ok(assemble_operators(&tokens), "synthetic stream assembles").records
 }
 
-fn inventory_cases() -> [InventoryCase; 2] {
+fn inventory_cases() -> [InventoryCase; 3] {
     [
         InventoryCase {
             name: "small_mixed_records",
@@ -79,6 +110,21 @@ fn inventory_cases() -> [InventoryCase; 2] {
             let records = assemble_source(&source);
             InventoryCase {
                 name: "large_repeated_records",
+                source,
+                records,
+                image_xobject_names: vec![PdfName(b"Im1".to_vec())],
+                form_xobject_names: vec![PdfName(b"Fm1".to_vec())],
+            }
+        },
+        {
+            // Many no-op/path-construction records with only four entries at the
+            // tail: exercises combined `build_inventory` throughput when the
+            // event stream is dominated by operators that emit no inventory
+            // entry, the case the streaming driver is designed for.
+            let source = noop_heavy_stream(512);
+            let records = assemble_source(&source);
+            InventoryCase {
+                name: "many_noop_few_entry",
                 source,
                 records,
                 image_xobject_names: vec![PdfName(b"Im1".to_vec())],

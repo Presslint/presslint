@@ -81,10 +81,29 @@
   bounds, color observations, color spaces/usages, object kinds, and edit
   capabilities. The fixture includes bounded vector output, sourced color
   provenance, and a read-only form-style entry with empty colors.
+- The `source + records` inventory builders (`build_inventory` and the four
+  per-kind `build_*_inventory` slices) drive the walker step-by-step through a
+  private `collect_entries_streaming` driver instead of first materializing a
+  full `Vec<GraphicsStateEvent>`. The driver creates one `GraphicsStateWalker`,
+  walks every record in order via `step`, and feeds each owned event to the same
+  per-event classifier closures the builders already used, with the same shared
+  monotonic content-order `sequence` (`entries.len()` at emit time). Output is
+  bit-identical to the materializing path (object IDs, digests, sequence
+  assignment, error kind/range all unchanged), but peak retained event memory
+  drops from O(records) to O(1) event plus the produced entries: the
+  intermediate event vector is removed, so the per-event snapshot clones the
+  walker still makes inside `step` are no longer all retained at once, only one
+  event at a time, before M4 layers real conversion on top. The events-based `*_from_graphics_events` builders are
+  untouched, so callers that already hold a materialized event slice keep using
+  them. An equivalence test pins `build_inventory` equal to
+  `inventory_from_graphics_events` over `walk_graphics_state` for a mixed
+  many-no-op/few-entry stream, and an error-parity test pins the same
+  `GraphicsWalkError` for a malformed record placed after the last
+  entry-producing operator.
 - Criterion benchmark target `inventory` covers graphics-state walking
   throughput in operator records/events and combined inventory-building
-  throughput in emitted inventory entries over small and repeated synthetic
-  public content streams.
+  throughput in emitted inventory entries over small, repeated, and
+  many-no-op/few-entry synthetic public content streams.
 
 ## Follow-Ups
 

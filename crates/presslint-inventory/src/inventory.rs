@@ -9,8 +9,8 @@ use crate::digest::{
     form_object_digest, image_object_digest, text_object_digest, usize_to_u32, vector_object_digest,
 };
 use crate::walker::{
-    GraphicsStateEvent, GraphicsStateEventKind, GraphicsStateSnapshot, GraphicsWalkError,
-    PathPaintKind, TextRenderingMode, walk_graphics_state,
+    GraphicsStateEvent, GraphicsStateEventKind, GraphicsStateSnapshot, GraphicsStateWalker,
+    GraphicsWalkError, PathPaintKind, TextRenderingMode,
 };
 
 /// One queryable page object discovered by the inventory pass.
@@ -66,8 +66,9 @@ pub fn build_vector_inventory(
     page: PageIndex,
     scope: &ContentScope,
 ) -> Result<Inventory, GraphicsWalkError> {
-    let events = walk_graphics_state(source, records)?;
-    Ok(vector_inventory_from_graphics_events(page, scope, &events))
+    collect_entries_streaming(source, records, |event, sequence| {
+        vector_entry(page, scope, event, sequence)
+    })
 }
 
 /// Build text inventory entries from assembled content-stream operators.
@@ -85,8 +86,9 @@ pub fn build_text_inventory(
     page: PageIndex,
     scope: &ContentScope,
 ) -> Result<Inventory, GraphicsWalkError> {
-    let events = walk_graphics_state(source, records)?;
-    Ok(text_inventory_from_graphics_events(page, scope, &events))
+    collect_entries_streaming(source, records, |event, sequence| {
+        text_entry(page, scope, event, sequence)
+    })
 }
 
 /// Build image inventory entries from assembled content-stream operators.
@@ -108,13 +110,9 @@ pub fn build_image_inventory(
     scope: &ContentScope,
     image_xobject_names: &[PdfName],
 ) -> Result<Inventory, GraphicsWalkError> {
-    let events = walk_graphics_state(source, records)?;
-    Ok(image_inventory_from_graphics_events(
-        page,
-        scope,
-        &events,
-        image_xobject_names,
-    ))
+    collect_entries_streaming(source, records, |event, sequence| {
+        image_entry(page, scope, event, image_xobject_names, sequence)
+    })
 }
 
 /// Build form `XObject` invocation inventory entries from assembled
@@ -137,13 +135,9 @@ pub fn build_form_inventory(
     scope: &ContentScope,
     form_xobject_names: &[PdfName],
 ) -> Result<Inventory, GraphicsWalkError> {
-    let events = walk_graphics_state(source, records)?;
-    Ok(form_inventory_from_graphics_events(
-        page,
-        scope,
-        &events,
-        form_xobject_names,
-    ))
+    collect_entries_streaming(source, records, |event, sequence| {
+        form_entry(page, scope, event, form_xobject_names, sequence)
+    })
 }
 
 /// Build a combined page-object inventory from assembled content-stream
@@ -171,14 +165,14 @@ pub fn build_inventory(
     image_xobject_names: &[PdfName],
     form_xobject_names: &[PdfName],
 ) -> Result<Inventory, GraphicsWalkError> {
-    let events = walk_graphics_state(source, records)?;
-    Ok(inventory_from_graphics_events(
-        page,
-        scope,
-        &events,
-        image_xobject_names,
-        form_xobject_names,
-    ))
+    collect_entries_streaming(source, records, |event, sequence| {
+        // Same fixed dispatch order as `inventory_from_graphics_events`: image is
+        // tried before form so a name present in both lists wins as an image.
+        vector_entry(page, scope, event, sequence)
+            .or_else(|| text_entry(page, scope, event, sequence))
+            .or_else(|| image_entry(page, scope, event, image_xobject_names, sequence))
+            .or_else(|| form_entry(page, scope, event, form_xobject_names, sequence))
+    })
 }
 
 /// Build vector inventory entries from graphics-state events.
@@ -302,6 +296,36 @@ fn collect_entries(
         }
     }
     Inventory { entries }
+}
+
+/// Drive the walker step-by-step on the `source + records` path, classifying
+/// each owned event as it streams past instead of first materializing the whole
+/// `Vec<GraphicsStateEvent>`.
+///
+/// This mirrors [`collect_entries`] exactly: it walks every record in order via
+/// [`GraphicsStateWalker::step`] (so save/restore, snapshot propagation, and
+/// error detection on records after the last entry-producing operator match
+/// [`walk_graphics_state`](crate::walker::walk_graphics_state)), and assigns the
+/// same shared monotonic content-order `sequence` (`entries.len()` at emit time)
+/// to each emitted entry. The first malformed record short-circuits with the
+/// same `GraphicsWalkError` the materializing path would return. Output is
+/// therefore bit-identical to feeding the full event slice to `collect_entries`,
+/// but peak retained event memory drops from O(records) to O(1).
+fn collect_entries_streaming(
+    source: &[u8],
+    records: &[OperatorRecord],
+    mut classify: impl FnMut(&GraphicsStateEvent, u32) -> Option<InventoryEntry>,
+) -> Result<Inventory, GraphicsWalkError> {
+    let mut walker = GraphicsStateWalker::new();
+    let mut entries = Vec::new();
+    for (index, record) in records.iter().enumerate() {
+        let event = walker.step(source, index, record)?;
+        let sequence = usize_to_u32(entries.len());
+        if let Some(entry) = classify(&event, sequence) {
+            entries.push(entry);
+        }
+    }
+    Ok(Inventory { entries })
 }
 
 fn vector_entry(
