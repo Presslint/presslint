@@ -15,6 +15,7 @@ mod object_stream;
 mod page_content_extents;
 mod page_content_targets;
 mod page_contents;
+mod page_tree_kid_targets;
 mod page_tree_kids;
 mod page_tree_node;
 mod page_tree_node_type;

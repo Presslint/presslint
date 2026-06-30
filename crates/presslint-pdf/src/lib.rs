@@ -24,6 +24,7 @@ mod object_stream;
 mod page_content_extents;
 mod page_content_targets;
 mod page_contents;
+mod page_tree_kid_targets;
 mod page_tree_kids;
 mod page_tree_node;
 mod page_tree_node_type;
@@ -106,6 +107,10 @@ pub use page_contents::{
     PageContentReference, PageContentsInspection, PageContentsInspectionError,
     PageContentsInspectionRejection, PageContentsValueShape, SkippedPageContentEntry,
     SkippedPageContentEntryKind, inspect_page_contents,
+};
+pub use page_tree_kid_targets::{
+    PageTreeKidTargetInspection, PageTreeKidTargetsInspection, PageTreeKidTargetsInspectionError,
+    PageTreeKidTargetsInspectionRejection, inspect_page_tree_kid_targets,
 };
 pub use page_tree_kids::{
     PageTreeKidReference, PageTreeKidsInspection, PageTreeKidsInspectionError,

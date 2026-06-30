@@ -2,6 +2,36 @@
 
 ## Current State
 
+- Adds `inspect_page_tree_kid_targets`, a focused one-node page-tree expansion
+  helper. Given caller bytes, a `&ClassicXrefTableInspection`, and the byte
+  offset of an already-located page-tree node, it first delegates to
+  `inspect_page_tree_kids` and carries the full `PageTreeKidsInspection` in the
+  aggregate report. The helper then walks the delegated `kids.kids` vector in
+  source order and delegates each original `PageTreeKidReference::reference` to
+  `inspect_page_tree_reference_target`, producing exactly one
+  `PageTreeKidTargetInspection` entry per direct kid reference without
+  reordering or deduplicating. `Resolved` entries preserve the original kid
+  reference metadata plus the delegated `PageTreeReferenceTargetInspection`, so
+  callers can distinguish `/Pages`, `/Page`, and other-name targets through the
+  delegated node-type report. `Failed` entries preserve the original kid
+  reference metadata plus the delegated
+  `PageTreeReferenceTargetInspectionError`, and a failed child does not abort
+  later kids. Malformed or unsupported top-level `/Kids` entries remain only in
+  the delegated `PageTreeKidsInspection::skipped` list; this helper does not
+  reinterpret, drop, or promote them to target entries. The aggregate exposes
+  caller-visible `byte_len`, the delegated kids report, the source-ordered
+  child-result vector, and a `#[must_use] resolved_count()` accessor for the
+  number of successful child resolutions. It retains or copies no PDF bytes,
+  object bodies, stream bodies, page dictionaries, page-tree dictionaries,
+  content streams, decoded streams, or source slices; owned data is limited to
+  the delegated reports and the deterministic result vector. The helper lives in
+  `page_tree_kid_targets.rs` as a sibling module and leaves `page_tree_kids.rs`
+  and `page_tree_reference.rs` public fields and serde shapes unchanged. Non-
+  goals for this slice: no recursive page-tree traversal, leaf-page enumeration,
+  `/Count` validation, page `/Contents`/resources/boxes/annotations inspection,
+  `/Parent` parsing, xref-stream/object-stream support, `/Prev` traversal,
+  filesystem I/O, caches, indexes, or mutation.
+
 - Adds `inspect_page_content_extents`, the page-level aggregator that locates the
   ordered content-stream data byte extents for a single leaf page. It takes the
   caller bytes, a `&ClassicXrefTableInspection`, and a
