@@ -40,8 +40,9 @@ mod xref_stream_trailer;
 use super::{
     ClassicXrefAmbiguousObjectEntry, ClassicXrefEntry, ClassicXrefEntryState,
     ClassicXrefObjectLocation, ClassicXrefSubsection, ClassicXrefTableInspection,
-    IndirectObjectEditDisposition, IndirectObjectOwnership, IndirectRef,
-    decide_indirect_object_edit, resolve_classic_xref_object,
+    IndirectObjectEditDisposition, IndirectObjectOwnership, IndirectRef, XrefStreamEntry,
+    XrefStreamEntryRecord, XrefStreamSection, decide_indirect_object_edit,
+    resolve_classic_xref_object,
 };
 
 fn indirect_ref(object_number: u32, generation: u16) -> IndirectRef {
@@ -84,6 +85,32 @@ fn classic_inspection(subsections: Vec<ClassicXrefSubsection>) -> ClassicXrefTab
         table_byte_offset: 0,
         subsections,
         trailer_byte_offset: 0,
+    }
+}
+
+fn xref_stream_section(entries: Vec<XrefStreamEntry>) -> XrefStreamSection {
+    XrefStreamSection {
+        object_byte_offset: 0,
+        widths: [1, 2, 1],
+        size: 0,
+        index_subsections: Vec::new(),
+        root_reference: indirect_ref(1, 0),
+        prev_byte_offset: None,
+        entries,
+    }
+}
+
+fn xref_stream_entry(object_number: usize, record: XrefStreamEntryRecord) -> XrefStreamEntry {
+    XrefStreamEntry {
+        object_number,
+        record,
+    }
+}
+
+fn xref_stream_uncompressed(byte_offset: usize) -> XrefStreamEntryRecord {
+    XrefStreamEntryRecord::Uncompressed {
+        byte_offset,
+        generation: 0,
     }
 }
 

@@ -2,15 +2,19 @@
 #[allow(clippy::duplicate_mod)]
 mod serde_harness;
 
-use super::{classic_entry, classic_inspection, classic_subsection, indirect_ref};
+use super::{
+    classic_entry, classic_inspection, classic_subsection, indirect_ref, xref_stream_entry,
+    xref_stream_section,
+};
 
 use serde_harness::{from_serde_value, serde_value};
 
 use crate::{
-    ClassicXrefEntryState, ClassicXrefObjectLocation, PageTreeKidTargetInspection,
-    PageTreeKidTargetsInspection, PageTreeNodeType, PageTreeReferenceTargetInspectionRejection,
-    SkippedPageTreeKidKind, inspect_catalog_pages, inspect_classic_xref_table,
-    inspect_classic_xref_trailer_root, inspect_page_tree_kid_targets,
+    ClassicXrefEntryState, ClassicXrefObjectLocation, ObjectLookup, ObjectLookupLocation,
+    PageTreeKidTargetInspection, PageTreeKidTargetsInspection, PageTreeNodeType,
+    PageTreeReferenceTargetInspectionRejection, SkippedPageTreeKidKind, XrefStreamEntryRecord,
+    inspect_catalog_pages, inspect_classic_xref_table, inspect_classic_xref_trailer_root,
+    inspect_page_tree_kid_targets, inspect_page_tree_kid_targets_with_lookup,
     inspect_page_tree_reference_target,
 };
 
@@ -230,6 +234,95 @@ fn page_tree_kid_targets_serde_round_trips_aggregate_report_and_failed_entry() {
     let restored_entry: PageTreeKidTargetInspection =
         from_serde_value(entry_value).expect("failed entry should deserialize");
     assert_eq!(restored_entry, failed_entry);
+}
+
+#[test]
+fn with_lookup_over_classic_backend_matches_classic_helper() {
+    let root = b"2 0 obj\n<< /Type /Pages /Kids [ 3 0 R 4 0 R ] /Count 2 >>\nendobj\n";
+    let page = b"3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n";
+    let page_offset = root.len();
+    let mut source = Vec::new();
+    source.extend_from_slice(root);
+    source.extend_from_slice(page);
+    let xref = classic_inspection(vec![classic_subsection(
+        3,
+        vec![classic_entry(
+            3,
+            0,
+            page_offset,
+            ClassicXrefEntryState::InUse,
+        )],
+    )]);
+
+    let classic = inspect_page_tree_kid_targets(&source, &xref, 0);
+    let neutral =
+        inspect_page_tree_kid_targets_with_lookup(&source, ObjectLookup::ClassicXref(&xref), 0);
+
+    assert_eq!(classic, neutral);
+}
+
+#[test]
+fn with_lookup_resolves_xref_stream_kids_and_skips_compressed_kid() {
+    let root = b"2 0 obj\n<< /Type /Pages /Kids [ 3 0 R 4 0 R ] /Count 2 >>\nendobj\n";
+    let page = b"3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n";
+    let page_offset = root.len();
+    let mut source = Vec::new();
+    source.extend_from_slice(root);
+    source.extend_from_slice(page);
+    let section = xref_stream_section(vec![
+        xref_stream_entry(
+            3,
+            XrefStreamEntryRecord::Uncompressed {
+                byte_offset: page_offset,
+                generation: 0,
+            },
+        ),
+        xref_stream_entry(
+            4,
+            XrefStreamEntryRecord::Compressed {
+                object_stream_number: 9,
+                index_within_object_stream: 1,
+            },
+        ),
+    ]);
+
+    let report = inspect_page_tree_kid_targets_with_lookup(
+        &source,
+        ObjectLookup::XrefStreamSection(&section),
+        0,
+    )
+    .expect("xref-stream kid targets should inspect");
+
+    assert_eq!(report.entries.len(), 2);
+    assert_eq!(report.resolved_count(), 1);
+
+    assert!(matches!(
+        &report.entries[0],
+        PageTreeKidTargetInspection::Resolved { .. }
+    ));
+    if let PageTreeKidTargetInspection::Resolved { kid, target } = &report.entries[0] {
+        assert_eq!(kid.reference, indirect_ref(3, 0));
+        assert_eq!(target.object_byte_offset, page_offset);
+        assert_eq!(target.node_type.node_type, PageTreeNodeType::Page);
+    }
+
+    assert!(matches!(
+        &report.entries[1],
+        PageTreeKidTargetInspection::Failed { .. }
+    ));
+    if let PageTreeKidTargetInspection::Failed { kid, error } = &report.entries[1] {
+        assert_eq!(kid.reference, indirect_ref(4, 0));
+        assert_eq!(
+            error.reason,
+            PageTreeReferenceTargetInspectionRejection::UnresolvedLookupLocation {
+                location: ObjectLookupLocation::XrefStreamCompressed {
+                    object_number: 4,
+                    object_stream_number: 9,
+                    index_within_object_stream: 1,
+                },
+            }
+        );
+    }
 }
 
 #[test]

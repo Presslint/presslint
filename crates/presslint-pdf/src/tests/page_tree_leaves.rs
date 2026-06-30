@@ -2,14 +2,19 @@
 #[allow(clippy::duplicate_mod)]
 mod serde_harness;
 
-use super::{classic_entry, classic_inspection, classic_subsection, indirect_ref};
+use super::{
+    classic_entry, classic_inspection, classic_subsection, indirect_ref, xref_stream_entry,
+    xref_stream_section, xref_stream_uncompressed,
+};
 
 use serde_harness::{from_serde_value, serde_value};
 
 use crate::{
-    ClassicXrefEntryState, PageTreeKidTargetsInspectionRejection, PageTreeLeavesInspection,
-    PageTreeLeavesTruncation, SkippedPageTreeLeafReason, inspect_catalog_pages,
-    inspect_classic_xref_table, inspect_classic_xref_trailer_root, inspect_page_tree_leaves,
+    ClassicXrefEntryState, ObjectLookup, ObjectLookupLocation,
+    PageTreeKidTargetsInspectionRejection, PageTreeLeavesInspection, PageTreeLeavesTruncation,
+    PageTreeReferenceTargetInspectionRejection, SkippedPageTreeLeafReason, XrefStreamEntryRecord,
+    inspect_catalog_pages, inspect_classic_xref_table, inspect_classic_xref_trailer_root,
+    inspect_page_tree_leaves, inspect_page_tree_leaves_with_lookup,
     inspect_page_tree_reference_target,
 };
 
@@ -173,6 +178,99 @@ fn page_tree_leaves_fail_only_when_root_expansion_fails() {
         error.error.reason,
         PageTreeKidTargetsInspectionRejection::PageTreeKids { .. }
     ));
+}
+
+#[test]
+fn with_lookup_over_classic_backend_matches_classic_helper() {
+    let (source, xref) = skip_fixture();
+
+    let classic = inspect_page_tree_leaves(&source, &xref, 0);
+    let neutral =
+        inspect_page_tree_leaves_with_lookup(&source, ObjectLookup::ClassicXref(&xref), 0);
+
+    assert_eq!(classic, neutral);
+}
+
+#[test]
+fn with_lookup_enumerates_xref_stream_backed_leaves_in_document_order() {
+    let root = b"2 0 obj\n<< /Type /Pages /Kids [ 3 0 R 4 0 R ] /Count 2 >>\nendobj\n";
+    let page_three = b"3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n";
+    let page_four = b"4 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n";
+    let page_three_offset = root.len();
+    let page_four_offset = root.len() + page_three.len();
+    let mut source = Vec::new();
+    source.extend_from_slice(root);
+    source.extend_from_slice(page_three);
+    source.extend_from_slice(page_four);
+    let section = xref_stream_section(vec![
+        xref_stream_entry(2, xref_stream_uncompressed(0)),
+        xref_stream_entry(3, xref_stream_uncompressed(page_three_offset)),
+        xref_stream_entry(4, xref_stream_uncompressed(page_four_offset)),
+    ]);
+
+    let report =
+        inspect_page_tree_leaves_with_lookup(&source, ObjectLookup::XrefStreamSection(&section), 0)
+            .expect("xref-stream-backed leaf enumeration should inspect");
+
+    assert_eq!(report.leaf_count(), 2);
+    assert!(report.skipped.is_empty());
+    assert!(report.truncated.is_none());
+    assert_eq!(
+        report
+            .leaves
+            .iter()
+            .map(|leaf| (leaf.reference, leaf.object_byte_offset))
+            .collect::<Vec<_>>(),
+        vec![
+            (indirect_ref(3, 0), page_three_offset),
+            (indirect_ref(4, 0), page_four_offset),
+        ]
+    );
+}
+
+#[test]
+fn with_lookup_skips_compressed_kid_as_non_leaf() {
+    let root = b"2 0 obj\n<< /Type /Pages /Kids [ 3 0 R 4 0 R ] /Count 2 >>\nendobj\n";
+    let page_three = b"3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n";
+    let page_three_offset = root.len();
+    let mut source = Vec::new();
+    source.extend_from_slice(root);
+    source.extend_from_slice(page_three);
+    let section = xref_stream_section(vec![
+        xref_stream_entry(3, xref_stream_uncompressed(page_three_offset)),
+        xref_stream_entry(
+            4,
+            XrefStreamEntryRecord::Compressed {
+                object_stream_number: 9,
+                index_within_object_stream: 1,
+            },
+        ),
+    ]);
+
+    let report =
+        inspect_page_tree_leaves_with_lookup(&source, ObjectLookup::XrefStreamSection(&section), 0)
+            .expect("a compressed kid must not abort leaf enumeration");
+
+    assert_eq!(report.leaf_count(), 1);
+    assert_eq!(report.leaves[0].reference, indirect_ref(3, 0));
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(report.skipped[0].kid, indirect_ref(4, 0));
+    assert!(matches!(
+        report.skipped[0].reason,
+        SkippedPageTreeLeafReason::UnresolvedTarget { .. }
+    ));
+    if let SkippedPageTreeLeafReason::UnresolvedTarget { error } = &report.skipped[0].reason {
+        assert_eq!(
+            error.reason,
+            PageTreeReferenceTargetInspectionRejection::UnresolvedLookupLocation {
+                location: ObjectLookupLocation::XrefStreamCompressed {
+                    object_number: 4,
+                    object_stream_number: 9,
+                    index_within_object_stream: 1,
+                },
+            }
+        );
+    }
 }
 
 #[test]

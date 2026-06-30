@@ -3,9 +3,9 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ClassicXrefTableInspection, IndirectRef, PageTreeKidTargetInspection,
+    ClassicXrefTableInspection, IndirectRef, ObjectLookup, PageTreeKidTargetInspection,
     PageTreeKidTargetsInspection, PageTreeKidTargetsInspectionError, PageTreeNodeType,
-    PageTreeReferenceTargetInspectionError, inspect_page_tree_kid_targets,
+    PageTreeReferenceTargetInspectionError, inspect_page_tree_kid_targets_with_lookup,
 };
 
 /// Maximum page-tree recursion depth.
@@ -184,21 +184,56 @@ pub struct PageTreeLeavesInspectionError {
 /// `/Contents`/`/Resources`/boxes/`/Annots`/`/Parent`, follow `/Prev`, parse
 /// xref or object streams, build caches or object maps, or mutate source bytes.
 ///
+/// This is a thin classic wrapper over [`inspect_page_tree_leaves_with_lookup`]
+/// via [`ObjectLookup::ClassicXref`], so its leaf, skip, truncation, and error
+/// reports stay byte-identical to the pre-`_with_lookup` behavior.
+///
 /// # Errors
 ///
 /// Returns [`PageTreeLeavesInspectionError`] only when the delegated root-node
-/// [`inspect_page_tree_kid_targets`] fails at `root_node_object_offset`.
+/// kid-target expansion fails at `root_node_object_offset`.
 pub fn inspect_page_tree_leaves(
     input: &[u8],
     xref: &ClassicXrefTableInspection,
     root_node_object_offset: usize,
 ) -> Result<PageTreeLeavesInspection, PageTreeLeavesInspectionError> {
-    let root_targets = inspect_page_tree_kid_targets(input, xref, root_node_object_offset)
-        .map_err(|error| PageTreeLeavesInspectionError {
-            root_node_byte_offset: root_node_object_offset,
-            byte_len: input.len(),
-            error,
-        })?;
+    inspect_page_tree_leaves_with_lookup(
+        input,
+        ObjectLookup::ClassicXref(xref),
+        root_node_object_offset,
+    )
+}
+
+/// Enumerate the leaf `/Page` objects of a page tree in document order through
+/// any [`ObjectLookup`] backend.
+///
+/// The walk is identical to [`inspect_page_tree_leaves`] but resolves every
+/// page-tree reference through the supplied backend (a classic xref table or a
+/// decoded cross-reference-stream section) via
+/// [`inspect_page_tree_kid_targets_with_lookup`]. The bounded depth/visited-node
+/// limits and the cycle guard are unchanged, so a compressed or reserved
+/// cross-reference-stream entry becomes a non-fatal
+/// [`SkippedPageTreeLeafReason::UnresolvedTarget`] skip and is never enumerated
+/// as a leaf.
+///
+/// # Errors
+///
+/// Returns [`PageTreeLeavesInspectionError`] only when the delegated root-node
+/// [`inspect_page_tree_kid_targets_with_lookup`] fails at
+/// `root_node_object_offset`.
+pub fn inspect_page_tree_leaves_with_lookup(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    root_node_object_offset: usize,
+) -> Result<PageTreeLeavesInspection, PageTreeLeavesInspectionError> {
+    let root_targets =
+        inspect_page_tree_kid_targets_with_lookup(input, lookup, root_node_object_offset).map_err(
+            |error| PageTreeLeavesInspectionError {
+                root_node_byte_offset: root_node_object_offset,
+                byte_len: input.len(),
+                error,
+            },
+        )?;
 
     let mut walk = LeafWalk::new();
     walk.visited.insert(
@@ -210,7 +245,7 @@ pub fn inspect_page_tree_leaves(
             .object_number,
     );
     walk.visited_node_count = 1;
-    walk.process_node(input, xref, &root_targets, 0);
+    walk.process_node(input, lookup, &root_targets, 0);
 
     Ok(PageTreeLeavesInspection {
         byte_len: input.len(),
@@ -247,7 +282,7 @@ impl LeafWalk {
     fn process_node(
         &mut self,
         input: &[u8],
-        xref: &ClassicXrefTableInspection,
+        lookup: ObjectLookup<'_>,
         targets: &PageTreeKidTargetsInspection,
         depth: usize,
     ) {
@@ -262,7 +297,7 @@ impl LeafWalk {
                         }),
                         PageTreeNodeType::Pages => self.descend_into_child(
                             input,
-                            xref,
+                            lookup,
                             kid.reference,
                             target.object_byte_offset,
                             node_byte_offset,
@@ -293,7 +328,7 @@ impl LeafWalk {
     fn descend_into_child(
         &mut self,
         input: &[u8],
-        xref: &ClassicXrefTableInspection,
+        lookup: ObjectLookup<'_>,
         kid: IndirectRef,
         child_byte_offset: usize,
         parent_node_byte_offset: usize,
@@ -346,8 +381,8 @@ impl LeafWalk {
         self.visited.insert(kid.object_number);
         self.visited_node_count += 1;
 
-        match inspect_page_tree_kid_targets(input, xref, child_byte_offset) {
-            Ok(child_targets) => self.process_node(input, xref, &child_targets, child_depth),
+        match inspect_page_tree_kid_targets_with_lookup(input, lookup, child_byte_offset) {
+            Ok(child_targets) => self.process_node(input, lookup, &child_targets, child_depth),
             Err(error) => self.push_skip(
                 kid,
                 parent_node_byte_offset,

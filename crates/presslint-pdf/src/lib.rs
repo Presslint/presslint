@@ -90,7 +90,9 @@ pub use dictionary_extent::{
 };
 pub use document_access::{
     ClassicDocumentAccess, ClassicDocumentAccessError, ClassicDocumentAccessRejection,
-    inspect_classic_document_access,
+    DocumentAccess, DocumentAccessBackend, DocumentAccessError, DocumentAccessRejection,
+    MAX_XREF_STREAM_SECTION_DECODED_BYTES, inspect_classic_document_access,
+    inspect_document_access,
 };
 pub use document_page_content_extents::{
     DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
@@ -151,6 +153,7 @@ pub use page_contents::{
 pub use page_tree_kid_targets::{
     PageTreeKidTargetInspection, PageTreeKidTargetsInspection, PageTreeKidTargetsInspectionError,
     PageTreeKidTargetsInspectionRejection, inspect_page_tree_kid_targets,
+    inspect_page_tree_kid_targets_with_lookup,
 };
 pub use page_tree_kids::{
     PageTreeKidReference, PageTreeKidsInspection, PageTreeKidsInspectionError,
@@ -160,7 +163,7 @@ pub use page_tree_kids::{
 pub use page_tree_leaves::{
     MAX_PAGE_TREE_DEPTH, MAX_VISITED_PAGE_TREE_NODES, PageTreeLeaf, PageTreeLeavesInspection,
     PageTreeLeavesInspectionError, PageTreeLeavesTruncation, SkippedPageTreeLeafEntry,
-    SkippedPageTreeLeafReason, inspect_page_tree_leaves,
+    SkippedPageTreeLeafReason, inspect_page_tree_leaves, inspect_page_tree_leaves_with_lookup,
 };
 pub use page_tree_node::{
     PageTreeNodeInspection, PageTreeNodeInspectionError, PageTreeNodeInspectionRejection,
@@ -173,6 +176,7 @@ pub use page_tree_node_type::{
 pub use page_tree_reference::{
     PageTreeReferenceTargetInspection, PageTreeReferenceTargetInspectionError,
     PageTreeReferenceTargetInspectionRejection, inspect_page_tree_reference_target,
+    inspect_page_tree_reference_target_with_lookup,
 };
 pub use source::{
     PDF_HEADER_SCAN_LIMIT, PdfHeader, PdfSourceDiagnostic, PdfSourceInspection,

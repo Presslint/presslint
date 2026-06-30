@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ClassicXrefTableInspection, PageTreeKidReference, PageTreeKidsInspection,
+    ClassicXrefTableInspection, ObjectLookup, PageTreeKidReference, PageTreeKidsInspection,
     PageTreeKidsInspectionRejection, PageTreeReferenceTargetInspection,
     PageTreeReferenceTargetInspectionError, inspect_page_tree_kids,
-    inspect_page_tree_reference_target,
+    inspect_page_tree_reference_target_with_lookup,
 };
 
 /// Resolved and classified direct `/Kids` targets for one page-tree node.
@@ -85,19 +85,13 @@ pub enum PageTreeKidTargetsInspectionRejection {
     },
 }
 
-/// Resolve and classify every direct `/Kids` reference of one page-tree node.
+/// Resolve and classify every direct `/Kids` reference of one page-tree node
+/// through a classic xref table.
 ///
-/// The helper first delegates to [`inspect_page_tree_kids`] for bounded `/Kids`
-/// array inspection, preserving its direct-reference order and skipped-entry
-/// diagnostics unchanged. It then walks the delegated `kids.kids` in source
-/// order and delegates each [`PageTreeKidReference::reference`] to
-/// [`inspect_page_tree_reference_target`]. Per-child target failures are
-/// reported in place and do not abort later kids.
-///
-/// It does not recursively traverse the page tree, enumerate leaf pages,
-/// validate `/Count`, inspect page contents/resources/boxes/annotations, parse
-/// `/Parent` links, follow `/Prev`, parse xref or object streams, build caches
-/// or indexes, or mutate source bytes.
+/// This is a thin classic wrapper over
+/// [`inspect_page_tree_kid_targets_with_lookup`] via [`ObjectLookup::ClassicXref`],
+/// so its report, per-child resolution, and error variants stay byte-identical
+/// to the pre-`_with_lookup` behavior.
 ///
 /// # Errors
 ///
@@ -108,6 +102,39 @@ pub enum PageTreeKidTargetsInspectionRejection {
 pub fn inspect_page_tree_kid_targets(
     input: &[u8],
     xref: &ClassicXrefTableInspection,
+    node_object_offset: usize,
+) -> Result<PageTreeKidTargetsInspection, PageTreeKidTargetsInspectionError> {
+    inspect_page_tree_kid_targets_with_lookup(
+        input,
+        ObjectLookup::ClassicXref(xref),
+        node_object_offset,
+    )
+}
+
+/// Resolve and classify every direct `/Kids` reference of one page-tree node
+/// through any [`ObjectLookup`] backend.
+///
+/// The helper first delegates to [`inspect_page_tree_kids`] for bounded `/Kids`
+/// array inspection, preserving its direct-reference order and skipped-entry
+/// diagnostics unchanged. It then walks the delegated `kids.kids` in source
+/// order and delegates each [`PageTreeKidReference::reference`] to
+/// [`inspect_page_tree_reference_target_with_lookup`]. Per-child target failures
+/// are reported in place and do not abort later kids.
+///
+/// It does not recursively traverse the page tree, enumerate leaf pages,
+/// validate `/Count`, inspect page contents/resources/boxes/annotations, parse
+/// `/Parent` links, follow `/Prev`, extract object streams, build caches or
+/// indexes, or mutate source bytes.
+///
+/// # Errors
+///
+/// Returns [`PageTreeKidTargetsInspectionError`] only when delegated
+/// [`inspect_page_tree_kids`] fails. Malformed or unsupported top-level `/Kids`
+/// entries remain in [`PageTreeKidsInspection::skipped`], while per-child target
+/// failures are reported as [`PageTreeKidTargetInspection::Failed`].
+pub fn inspect_page_tree_kid_targets_with_lookup(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
     node_object_offset: usize,
 ) -> Result<PageTreeKidTargetsInspection, PageTreeKidTargetsInspectionError> {
     let kids = inspect_page_tree_kids(input, node_object_offset).map_err(|error| {
@@ -126,7 +153,7 @@ pub fn inspect_page_tree_kid_targets(
         .kids
         .iter()
         .copied()
-        .map(|kid| inspect_kid_target(input, xref, kid))
+        .map(|kid| inspect_kid_target(input, lookup, kid))
         .collect();
 
     Ok(PageTreeKidTargetsInspection {
@@ -138,10 +165,10 @@ pub fn inspect_page_tree_kid_targets(
 
 fn inspect_kid_target(
     input: &[u8],
-    xref: &ClassicXrefTableInspection,
+    lookup: ObjectLookup<'_>,
     kid: PageTreeKidReference,
 ) -> PageTreeKidTargetInspection {
-    match inspect_page_tree_reference_target(input, xref, kid.reference) {
+    match inspect_page_tree_reference_target_with_lookup(input, lookup, kid.reference) {
         Ok(target) => PageTreeKidTargetInspection::Resolved { kid, target },
         Err(error) => PageTreeKidTargetInspection::Failed { kid, error },
     }

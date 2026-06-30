@@ -1,10 +1,14 @@
-use super::{classic_entry, classic_inspection, classic_subsection, indirect_ref};
+use super::{
+    classic_entry, classic_inspection, classic_subsection, indirect_ref, xref_stream_entry,
+    xref_stream_section,
+};
 
 use crate::{
     ClassicXrefAmbiguousObjectEntry, ClassicXrefEntryState, ClassicXrefObjectLocation,
-    PageTreeNodeType, PageTreeNodeTypeInspectionRejection,
-    PageTreeReferenceTargetInspectionRejection, inspect_catalog_pages, inspect_classic_xref_table,
-    inspect_classic_xref_trailer_root, inspect_page_tree_kids, inspect_page_tree_reference_target,
+    ObjectLookup, ObjectLookupLocation, PageTreeNodeType, PageTreeNodeTypeInspectionRejection,
+    PageTreeReferenceTargetInspectionRejection, XrefStreamEntryRecord, inspect_catalog_pages,
+    inspect_classic_xref_table, inspect_classic_xref_trailer_root, inspect_page_tree_kids,
+    inspect_page_tree_reference_target, inspect_page_tree_reference_target_with_lookup,
 };
 
 #[test]
@@ -191,6 +195,108 @@ fn page_tree_reference_target_report_does_not_retain_source_bytes() {
     assert!(!debug_report.contains("not-copied"));
     assert!(!debug_report.contains("/Pages"));
     assert!(!debug_report.contains("/Type"));
+}
+
+#[test]
+fn with_lookup_over_classic_backend_matches_classic_helper_on_success() {
+    let source = b"2 0 obj\n<< /Type /Pages /Kids [ 3 0 R ] /Count 1 >>\nendobj\n";
+    let xref = classic_inspection(vec![classic_subsection(
+        2,
+        vec![classic_entry(2, 0, 0, ClassicXrefEntryState::InUse)],
+    )]);
+
+    let classic = inspect_page_tree_reference_target(&source[..], &xref, indirect_ref(2, 0));
+    let neutral = inspect_page_tree_reference_target_with_lookup(
+        &source[..],
+        ObjectLookup::ClassicXref(&xref),
+        indirect_ref(2, 0),
+    );
+
+    assert_eq!(classic, neutral);
+}
+
+#[test]
+fn with_lookup_over_classic_backend_matches_classic_helper_on_free_entry() {
+    let source = b"";
+    let xref = classic_inspection(vec![classic_subsection(
+        2,
+        vec![classic_entry(2, 7, 0, ClassicXrefEntryState::Free)],
+    )]);
+
+    let classic = inspect_page_tree_reference_target(source, &xref, indirect_ref(2, 7));
+    let neutral = inspect_page_tree_reference_target_with_lookup(
+        source,
+        ObjectLookup::ClassicXref(&xref),
+        indirect_ref(2, 7),
+    );
+
+    assert_eq!(classic, neutral);
+    let error = neutral.expect_err("classic free entry should reject through the lookup path");
+    assert_eq!(
+        error.reason,
+        PageTreeReferenceTargetInspectionRejection::UnresolvedXrefLocation {
+            location: ClassicXrefObjectLocation::Free {
+                object_number: 2,
+                generation: 7,
+                next_free_object_number: 0,
+            },
+        }
+    );
+}
+
+#[test]
+fn with_lookup_resolves_uncompressed_xref_stream_entry() {
+    let source = b"3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n";
+    let section = xref_stream_section(vec![xref_stream_entry(
+        3,
+        XrefStreamEntryRecord::Uncompressed {
+            byte_offset: 0,
+            generation: 0,
+        },
+    )]);
+
+    let report = inspect_page_tree_reference_target_with_lookup(
+        &source[..],
+        ObjectLookup::XrefStreamSection(&section),
+        indirect_ref(3, 0),
+    )
+    .expect("uncompressed xref-stream entry should resolve");
+
+    assert_eq!(report.reference, indirect_ref(3, 0));
+    assert_eq!(report.object_byte_offset, 0);
+    assert_eq!(report.xref_generation, 0);
+    assert_eq!(report.node_type.node_type, PageTreeNodeType::Page);
+}
+
+#[test]
+fn with_lookup_reports_compressed_entry_as_neutral_unresolved() {
+    let source = b"";
+    let section = xref_stream_section(vec![xref_stream_entry(
+        3,
+        XrefStreamEntryRecord::Compressed {
+            object_stream_number: 5,
+            index_within_object_stream: 2,
+        },
+    )]);
+
+    let error = inspect_page_tree_reference_target_with_lookup(
+        source,
+        ObjectLookup::XrefStreamSection(&section),
+        indirect_ref(3, 0),
+    )
+    .expect_err("a compressed xref-stream entry has no resolvable byte offset");
+
+    assert_eq!(error.object_byte_offset, None);
+    assert_eq!(
+        error.reason,
+        PageTreeReferenceTargetInspectionRejection::UnresolvedLookupLocation {
+            location: ObjectLookupLocation::XrefStreamCompressed {
+                object_number: 3,
+                object_stream_number: 5,
+                index_within_object_stream: 2,
+            },
+        }
+    );
 }
 
 #[test]
