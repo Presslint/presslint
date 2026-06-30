@@ -6,6 +6,7 @@ mod classic_xref;
 mod content_stream_bridge;
 mod content_stream_extent;
 mod content_stream_filter;
+mod decode_parms;
 mod dictionary_entries;
 mod dictionary_extent;
 mod document_access;

@@ -15,6 +15,7 @@ mod classic_xref;
 mod content_stream_extent;
 mod content_stream_filter;
 mod content_stream_slice;
+mod decode_parms;
 mod dictionary_entries;
 mod dictionary_extent;
 mod document_access;
@@ -69,6 +70,10 @@ pub use content_stream_filter::{
 };
 pub use content_stream_slice::{
     ContentStreamDataSliceError, ContentStreamDataSliceRejection, content_stream_data_slice,
+};
+pub use decode_parms::{
+    DecodeParmsParameter, FlateDecodeParametersResolution, FlateDecodeParametersResolutionError,
+    FlateDecodeParametersResolutionRejection, resolve_flate_decode_parameters,
 };
 pub use dictionary_entries::{
     DictionaryEntryByteRange, DictionaryEntryInspection, DictionaryEntryInspectionError,
