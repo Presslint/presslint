@@ -21,6 +21,7 @@ mod object_body;
 mod object_dictionary;
 mod object_header;
 mod object_stream;
+mod page_content_extents;
 mod page_content_targets;
 mod page_contents;
 mod page_tree_kids;
@@ -93,6 +94,9 @@ pub use object_stream::{
     IndirectLengthContentStreamDataExtentInspectionRejection, StreamEolIssue, StreamKeywordEol,
     inspect_content_stream_start, inspect_direct_length_content_stream_data_extent,
     inspect_indirect_length_content_stream_data_extent,
+};
+pub use page_content_extents::{
+    PageContentExtentInspection, PageContentExtentsInspection, inspect_page_content_extents,
 };
 pub use page_content_targets::{
     PageContentTargetInspection, PageContentTargetsInspection, SkippedPageContentTargetReason,

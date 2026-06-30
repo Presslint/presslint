@@ -2,6 +2,52 @@
 
 ## Current State
 
+- Adds `inspect_page_content_extents`, the page-level aggregator that locates the
+  ordered content-stream data byte extents for a single leaf page. It takes the
+  caller bytes, a `&ClassicXrefTableInspection`, and a
+  `&PageContentTargetsInspection` (the resolved `/Contents` targets from
+  `inspect_page_content_targets`), and walks `targets.entries` once in source
+  order, producing exactly one source-ordered result per target and never
+  reordering or deduplicating, so the page's content-stream order is preserved.
+  Each `PageContentTargetInspection::Resolved` target is delegated to
+  `inspect_content_stream_data_extent` at its resolved `object_byte_offset` with
+  `Some(xref)`: on success the entry is `PageContentExtentInspection::Located`
+  carrying the original `PageContentReference`, the resolved `object_byte_offset`,
+  and the delegated `ContentStreamDataExtentInspection`; on failure it is
+  `PageContentExtentInspection::Failed`, preserving the underlying
+  `ContentStreamDataExtentInspectionError` and the resolved offset without
+  aborting the remaining targets. Each `PageContentTargetInspection::Skipped`
+  target is carried through unchanged as `PageContentExtentInspection::Skipped`,
+  preserving the original `PageContentReference` and the existing
+  `SkippedPageContentTargetReason`, with no extent inspection attempted. The
+  aggregate `PageContentExtentsInspection` exposes the caller-visible source
+  `byte_len`, the source-ordered `Vec` of per-target results, and a `#[must_use]`
+  `located_count()` accessor returning the number of `Located` entries so callers
+  can detect a fully-located page (`located_count() == entries.len()`) without
+  re-matching variants. For a given input the per-target located extent equals
+  byte-for-byte what `inspect_content_stream_data_extent` returns for the same
+  resolved object offset and xref table; the aggregator reimplements no
+  `/Length`, indirect-resolution, or `endstream` logic and only iterates targets
+  and dispatches. It retains or copies no stream bytes, decoded bytes, object
+  bodies, dictionaries, source slices, or concatenated content buffer; the only
+  owned data is the source-ordered `Vec` of fixed-size delegated reports plus the
+  copied small `PageContentReference`/offset metadata already present in the
+  delegated reports. Each delegated `inspect_content_stream_data_extent` still
+  re-inspects its own stream start (as documented for the combined extent helper);
+  this aggregator adds no new redundant source scan of its own. It lives in its
+  own `page_content_extents.rs` module and leaves `page_content_targets.rs`,
+  `page_contents.rs`, and `content_stream_extent.rs` public surfaces, fields, and
+  serde shapes unchanged (no `pub(crate)` factoring was needed). Non-goals for
+  this slice: it does not decode, decompress, concatenate, or tokenize stream
+  bytes, materialize a concatenated content buffer, follow `/Prev`, parse xref or
+  object streams, build object maps/caches, resolve indirect-reference chains, or
+  bridge content streams to `presslint-syntax`/`presslint-inventory`/selectors/
+  actions/mutation planning. A composition test chains
+  `inspect_page_contents -> inspect_page_content_targets -> inspect_page_content_extents`
+  over a synthetic classic-xref/page fixture and confirms the located extents
+  match calling `inspect_content_stream_data_extent` directly on each resolved
+  offset.
+
 - Defines initial structural PDF access data contracts for indirect references
   and document info.
 - Adds `inspect_content_stream_data_extent`, a focused public aggregator for
