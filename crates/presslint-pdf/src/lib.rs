@@ -26,6 +26,7 @@ mod page_content_targets;
 mod page_contents;
 mod page_tree_kid_targets;
 mod page_tree_kids;
+mod page_tree_leaves;
 mod page_tree_node;
 mod page_tree_node_type;
 mod page_tree_reference;
@@ -116,6 +117,11 @@ pub use page_tree_kids::{
     PageTreeKidReference, PageTreeKidsInspection, PageTreeKidsInspectionError,
     PageTreeKidsInspectionRejection, SkippedPageTreeKid, SkippedPageTreeKidKind,
     inspect_page_tree_kids,
+};
+pub use page_tree_leaves::{
+    MAX_PAGE_TREE_DEPTH, MAX_VISITED_PAGE_TREE_NODES, PageTreeLeaf, PageTreeLeavesInspection,
+    PageTreeLeavesInspectionError, PageTreeLeavesTruncation, SkippedPageTreeLeafEntry,
+    SkippedPageTreeLeafReason, inspect_page_tree_leaves,
 };
 pub use page_tree_node::{
     PageTreeNodeInspection, PageTreeNodeInspectionError, PageTreeNodeInspectionRejection,

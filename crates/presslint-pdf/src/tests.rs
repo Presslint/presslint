@@ -17,6 +17,7 @@ mod page_content_targets;
 mod page_contents;
 mod page_tree_kid_targets;
 mod page_tree_kids;
+mod page_tree_leaves;
 mod page_tree_node;
 mod page_tree_node_type;
 mod page_tree_reference;
