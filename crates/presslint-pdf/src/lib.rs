@@ -46,6 +46,7 @@ mod xref_resolve;
 mod xref_section;
 mod xref_stream;
 mod xref_stream_entries;
+mod xref_stream_map;
 mod xref_stream_trailer;
 
 #[cfg(test)]
@@ -196,6 +197,10 @@ pub use xref_stream::{
 pub use xref_stream_entries::{
     XrefStreamEntriesError, XrefStreamEntriesRejection, XrefStreamEntry, XrefStreamEntryRecord,
     parse_xref_stream_entries,
+};
+pub use xref_stream_map::{
+    XrefStreamSection, XrefStreamSectionError, XrefStreamSectionRejection,
+    decode_xref_stream_section,
 };
 pub use xref_stream_trailer::{
     XrefStreamTrailerInspection, XrefStreamTrailerInspectionError,

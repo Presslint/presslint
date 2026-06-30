@@ -33,6 +33,7 @@ mod trailer;
 mod trailer_root;
 mod xref_stream;
 mod xref_stream_entries;
+mod xref_stream_map;
 mod xref_stream_trailer;
 
 use super::{
