@@ -16,6 +16,7 @@ mod integer_object;
 mod object_body;
 mod object_dictionary;
 mod object_header;
+mod object_lookup;
 mod object_resolver;
 mod object_stream;
 mod page_content_extents;

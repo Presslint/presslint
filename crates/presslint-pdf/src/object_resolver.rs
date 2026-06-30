@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ClassicXrefObjectLocation, ClassicXrefTableInspection, IndirectObjectHeaderInspectionRejection,
-    IndirectRef, inspect_indirect_object_header, resolve_classic_xref_object,
+    ClassicXrefTableInspection, IndirectObjectHeaderInspectionRejection, IndirectRef, ObjectLookup,
+    ObjectLookupLocation, inspect_indirect_object_header, locate_xref_object,
 };
 
 /// In-use object location resolved from a cross-reference backend.
@@ -48,10 +48,31 @@ pub struct ObjectResolutionError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum ObjectResolutionRejection {
-    /// The cross-reference result was not exactly one in-use entry.
+    /// The cross-reference result was not an uncompressed in-use object entry.
     UnresolvedXrefLocation {
         /// Locate-only cross-reference result for the requested object number.
-        location: ClassicXrefObjectLocation,
+        location: ObjectLookupLocation,
+    },
+    /// The cross-reference stream reports the object as compressed inside an
+    /// object stream. This resolver does not extract object streams.
+    UnsupportedCompressedXrefStreamEntry {
+        /// Requested object number.
+        object_number: usize,
+        /// Object number of the containing object stream.
+        object_stream_number: usize,
+        /// Index of this object inside the object stream.
+        index_within_object_stream: usize,
+    },
+    /// The cross-reference stream reports a reserved or future entry type.
+    UnsupportedReservedXrefStreamEntry {
+        /// Requested object number.
+        object_number: usize,
+        /// Raw type field value.
+        entry_type: u64,
+        /// Raw second field value.
+        field2: u64,
+        /// Raw third field value.
+        field3: u64,
     },
     /// The in-use cross-reference entry generation did not match the requested
     /// reference generation.
@@ -106,21 +127,30 @@ pub fn resolve_classic_xref_object_offset(
     xref: &ClassicXrefTableInspection,
     reference: IndirectRef,
 ) -> Result<ResolvedObject, ObjectResolutionError> {
-    let location = resolve_classic_xref_object(xref, reference.object_number);
-    let ClassicXrefObjectLocation::InUse {
-        generation: xref_generation,
-        byte_offset: object_byte_offset,
-        ..
-    } = location
-    else {
-        return Err(object_resolution_error(
-            input,
-            reference,
-            None,
-            None,
-            ObjectResolutionRejection::UnresolvedXrefLocation { location },
-        ));
-    };
+    resolve_xref_object_offset(input, ObjectLookup::ClassicXref(xref), reference)
+}
+
+/// Resolve an indirect reference to an in-use object byte offset through a
+/// borrowed xref backend.
+///
+/// Classic and cross-reference-stream type-1 entries share the same success
+/// currency and the same object-header validation. Cross-reference-stream
+/// type-2 compressed entries and reserved/future entry types are reported as
+/// structured unsupported paths and are never treated as not found or fabricated
+/// into byte offsets.
+///
+/// # Errors
+///
+/// Returns [`ObjectResolutionError`] when lookup does not produce an
+/// uncompressed in-use object entry, the xref generation does not match, the
+/// object header fails to parse, or the parsed header reference does not match
+/// the requested reference.
+pub fn resolve_xref_object_offset(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    reference: IndirectRef,
+) -> Result<ResolvedObject, ObjectResolutionError> {
+    let (xref_generation, object_byte_offset) = resolve_lookup_location(input, lookup, reference)?;
 
     if xref_generation != reference.generation {
         return Err(object_resolution_error(
@@ -164,6 +194,68 @@ pub fn resolve_classic_xref_object_offset(
         object_byte_offset,
         xref_generation,
     })
+}
+
+fn resolve_lookup_location(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    reference: IndirectRef,
+) -> Result<(u16, usize), ObjectResolutionError> {
+    let location = locate_xref_object(
+        lookup,
+        usize::try_from(reference.object_number).map_or(usize::MAX, |value| value),
+    );
+    match location {
+        ObjectLookupLocation::ClassicInUse {
+            generation,
+            byte_offset,
+            ..
+        }
+        | ObjectLookupLocation::XrefStreamUncompressed {
+            generation,
+            byte_offset,
+            ..
+        } => Ok((generation, byte_offset)),
+        ObjectLookupLocation::XrefStreamCompressed {
+            object_number,
+            object_stream_number,
+            index_within_object_stream,
+        } => Err(object_resolution_error(
+            input,
+            reference,
+            None,
+            None,
+            ObjectResolutionRejection::UnsupportedCompressedXrefStreamEntry {
+                object_number,
+                object_stream_number,
+                index_within_object_stream,
+            },
+        )),
+        ObjectLookupLocation::XrefStreamReserved {
+            object_number,
+            entry_type,
+            field2,
+            field3,
+        } => Err(object_resolution_error(
+            input,
+            reference,
+            None,
+            None,
+            ObjectResolutionRejection::UnsupportedReservedXrefStreamEntry {
+                object_number,
+                entry_type,
+                field2,
+                field3,
+            },
+        )),
+        _ => Err(object_resolution_error(
+            input,
+            reference,
+            None,
+            None,
+            ObjectResolutionRejection::UnresolvedXrefLocation { location },
+        )),
+    }
 }
 
 const fn object_resolution_error(

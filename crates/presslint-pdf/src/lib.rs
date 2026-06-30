@@ -1,8 +1,10 @@
 //! Structural PDF access interfaces.
 //!
-//! This crate will own document opening, object lookup, stream access, and
-//! deterministic write seams. The initial scaffold keeps only public data
-//! contracts so higher-level crates can depend on a stable boundary.
+//! This crate provides byte-preserving structural inspection for PDF sources:
+//! source classification, classic xref parsing, single-section xref-stream
+//! decoding, indirect object lookup, stream extent access, page-tree traversal,
+//! and small planning contracts used by higher-level crates. The APIs carry
+//! structural metadata and byte ranges rather than retaining source payloads.
 
 #![forbid(unsafe_code)]
 
@@ -25,6 +27,7 @@ mod integer_object;
 mod object_body;
 mod object_dictionary;
 mod object_header;
+mod object_lookup;
 mod object_resolver;
 mod object_stream;
 mod page_content_extents;
@@ -117,9 +120,10 @@ pub use object_header::{
     IndirectObjectHeaderInspectionError, IndirectObjectHeaderInspectionRejection,
     inspect_indirect_object_header,
 };
+pub use object_lookup::{ObjectLookup, ObjectLookupLocation, locate_xref_object};
 pub use object_resolver::{
     ObjectResolutionError, ObjectResolutionRejection, ResolvedObject,
-    resolve_classic_xref_object_offset,
+    resolve_classic_xref_object_offset, resolve_xref_object_offset,
 };
 pub use object_stream::{
     ContentStreamStartInspection, ContentStreamStartInspectionError,

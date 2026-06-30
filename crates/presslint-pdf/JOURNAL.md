@@ -344,6 +344,40 @@ Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.
   `/Root`, stream-extent, entry-parse length mismatch), a no-retained-bytes
   check, and serde round-trips pinning the report and every rejection variant.
 
+### T099 - Add Unified Xref Object Lookup
+
+- Adds the public borrowing `ObjectLookup<'a>` abstraction over
+  `ClassicXrefTableInspection` and one decoded `XrefStreamSection`, plus
+  `locate_xref_object` and the serde-pinned `ObjectLookupLocation` locate-only
+  result. The locate shape distinguishes classic in-use/free/not-found/ambiguous
+  entries from xref-stream uncompressed/free/compressed/reserved/not-found
+  entries, and reports xref-stream object numbers or generations that cannot fit
+  the existing `IndirectRef` widths without truncating them.
+- The xref-stream lookup uses the sorted `XrefStreamSection.entries` vector
+  directly with binary search. It builds no per-call map, copies no source bytes,
+  and never fabricates byte offsets for type-2 compressed or reserved/future
+  entry types.
+- Adds `resolve_xref_object_offset(input, lookup, reference)` as the
+  backend-neutral resolver. It returns the existing `ResolvedObject` success
+  currency for classic in-use entries and xref-stream type-1 uncompressed entries
+  after checking the xref generation and validating the indirect object header at
+  the resolved offset.
+- Keeps `resolve_classic_xref_object_offset` as a thin compatibility wrapper over
+  `ObjectLookup::ClassicXref`, preserving the classic double validation:
+  requested generation vs xref generation first, then requested reference vs the
+  parsed object header reference.
+- Xref-stream type-2 compressed entries reject with
+  `UnsupportedCompressedXrefStreamEntry`, carrying the object-stream number and
+  index inside that object stream. Reserved/future entry types reject with
+  `UnsupportedReservedXrefStreamEntry`, carrying the raw decoded fields. Neither
+  path is treated as not-found, and neither attempts object-stream extraction.
+- Copy budget: lookup and resolution reports retain only structural metadata
+  (`usize` offsets/fields, references, and small enums). They retain no PDF source
+  bytes, decoded stream bytes, object bodies, dictionaries, or stream bodies.
+- Deferred: this slice does not thread the new lookup through page-tree/document
+  access, follow `/Prev`, merge incremental xref sections, support hybrid
+  references, or extract object streams. That remains future spine wiring.
+
 ## Follow-Ups
 
 - Next C slice: follow `/Prev` to chain `decode_xref_stream_section` over
