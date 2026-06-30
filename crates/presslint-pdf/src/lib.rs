@@ -16,12 +16,14 @@ mod content_stream_extent;
 mod content_stream_slice;
 mod dictionary_entries;
 mod dictionary_extent;
+mod document_access;
 mod document_page_content_extents;
 mod indirect_reference;
 mod integer_object;
 mod object_body;
 mod object_dictionary;
 mod object_header;
+mod object_resolver;
 mod object_stream;
 mod page_content_extents;
 mod page_content_targets;
@@ -72,6 +74,10 @@ pub use dictionary_extent::{
     DictionaryExtentInspection, DictionaryExtentInspectionError,
     DictionaryExtentInspectionRejection, inspect_dictionary_extent,
 };
+pub use document_access::{
+    ClassicDocumentAccess, ClassicDocumentAccessError, ClassicDocumentAccessRejection,
+    inspect_classic_document_access,
+};
 pub use document_page_content_extents::{
     DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
     DocumentPageContentExtentsInspection, DocumentPageContentExtentsInspectionError,
@@ -99,6 +105,10 @@ pub use object_header::{
     IndirectObjectHeaderByteRange, IndirectObjectHeaderInspection,
     IndirectObjectHeaderInspectionError, IndirectObjectHeaderInspectionRejection,
     inspect_indirect_object_header,
+};
+pub use object_resolver::{
+    ObjectResolutionError, ObjectResolutionRejection, ResolvedObject,
+    resolve_classic_xref_object_offset,
 };
 pub use object_stream::{
     ContentStreamStartInspection, ContentStreamStartInspectionError,

@@ -189,6 +189,59 @@ Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.
   incremental-section merging, hybrid-reference (`/XRefStm`) support,
   object-stream body reading, or compressed-object extraction.
 
+### T092 - Classic-Xref Document Access Spine
+
+- Adds a small, backend-neutral object-resolution model in the new
+  `object_resolver.rs` module: `ResolvedObject` (the success currency) plus
+  `resolve_classic_xref_object_offset(input, xref, reference)`. The classic
+  backend resolves an `IndirectRef` to an in-use object byte offset only when all
+  checks hold: `resolve_classic_xref_object` reports exactly one in-use entry
+  (free, not-found, and ambiguous results are rejected as
+  `UnresolvedXrefLocation`), the in-use entry generation matches the requested
+  reference (`GenerationMismatch`), and the indirect object header at the
+  resolved offset both parses (`ObjectHeader`) and matches the requested
+  object/generation (`ObjectHeaderReferenceMismatch`). Generation is therefore
+  validated twice: against the xref entry and against the object header.
+- The model is deliberately neutral so a later cross-reference-stream backend can
+  return the same `ResolvedObject`/`ObjectResolutionError` without changing
+  consumers. It is report-only metadata, not a document cache, object map, or
+  opener; it reads only the short header at the resolved offset and the
+  already-parsed xref table.
+- Adds the first composing document-access spine in the new
+  `document_access.rs` module: `inspect_classic_document_access(input)` threads
+  the existing low-level inspectors in document order — `inspect_startxref`,
+  `classify_xref_section`, `inspect_classic_xref_table`,
+  `inspect_classic_xref_trailer_root`, root-reference resolution via the new
+  resolver, `inspect_catalog_pages`, pages-reference resolution, and
+  `inspect_page_tree_leaves`.
+- `ClassicDocumentAccess` reports the classic xref table, trailer `/Root`, the
+  resolved catalog `ResolvedObject`, catalog `/Pages`, the resolved page-tree-root
+  `ResolvedObject`, and the document-ordered `PageTreeLeavesInspection` (leaves
+  plus non-fatal skips/truncation). It retains or copies no PDF bytes, object
+  bodies, stream bodies, dictionaries, decoded streams, or source slices; owned
+  data is limited to the metadata and bounded vectors the delegated inspectors
+  already produced, so no benchmark was added (no new scan beyond the delegated
+  inspectors).
+- Every failure path is a deterministic, structured `ClassicDocumentAccessError`
+  whose `ClassicDocumentAccessRejection` names the spine stage that stopped and
+  preserves the delegated failure verbatim. A cross-reference-stream section is a
+  structured `UnsupportedXrefStream { object_number, generation }` result, not a
+  success, and no xref-stream object-map work is attempted. Per-kid leaf-walk
+  problems (other-typed kids, per-kid resolution failures, bound-stopped descents)
+  stay as structured skips inside `page_leaves`, not spine failures.
+- Tests live in `src/tests/object_resolver.rs` (unique in-use success, two header
+  checks, both generation checks, free/not-found/header-parse/header-mismatch
+  rejections, no-retained-bytes, serde round-trip) and
+  `src/tests/document_access.rs` (synthetic multi-page success, unsupported
+  xref-stream classification, missing `startxref`, trailer `/Root` resolution
+  failure, catalog `/Pages` resolution failure, xref generation mismatch, object
+  header mismatch at the resolved offset, preserved leaf skips, no-retained-bytes,
+  serde round-trip).
+- Non-goals for this slice: no xref-stream object-map backend, no `/Prev`
+  traversal or incremental-section merging, no object-stream extraction, no stream
+  decoding, content tokenization, or inventory building, no whole-document object
+  map or cache, no document opener, and no PDF byte mutation or writer work.
+
 ## Follow-Ups
 
 - Next C slice: locate xref-stream data extents, resolve `/Length`, and wire
