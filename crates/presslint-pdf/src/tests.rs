@@ -6,6 +6,7 @@ mod classic_xref;
 mod content_stream_extent;
 mod dictionary_entries;
 mod dictionary_extent;
+mod document_page_content_extents;
 mod indirect_reference;
 mod integer_object;
 mod object_body;

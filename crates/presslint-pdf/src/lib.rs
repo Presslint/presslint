@@ -15,6 +15,7 @@ mod classic_xref;
 mod content_stream_extent;
 mod dictionary_entries;
 mod dictionary_extent;
+mod document_page_content_extents;
 mod indirect_reference;
 mod integer_object;
 mod object_body;
@@ -62,6 +63,11 @@ pub use dictionary_entries::{
 pub use dictionary_extent::{
     DictionaryExtentInspection, DictionaryExtentInspectionError,
     DictionaryExtentInspectionRejection, inspect_dictionary_extent,
+};
+pub use document_page_content_extents::{
+    DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
+    DocumentPageContentExtentsInspection, DocumentPageContentExtentsInspectionError,
+    inspect_document_page_content_extents,
 };
 pub use indirect_reference::{
     IndirectReferenceByteRange, IndirectReferenceInspection, IndirectReferenceInspectionError,

@@ -2,6 +2,51 @@
 
 ## Current State
 
+- Adds `inspect_document_page_content_extents`, the document-order aggregation
+  layer for page content-stream data extents. Given caller bytes, a
+  `&ClassicXrefTableInspection`, and the byte offset of an already-located root
+  `/Pages` node, it first delegates to `inspect_page_tree_leaves`; a root
+  leaf-enumeration failure is the helper's only top-level `Err` and is wrapped
+  in `DocumentPageContentExtentsInspectionError` with the root offset and source
+  length. On success, `DocumentPageContentExtentsInspection` carries the
+  caller-visible `byte_len`, the full delegated `PageTreeLeavesInspection`, and
+  exactly one document-ordered `DocumentPageContentExtentInspection` per
+  enumerated `PageTreeLeaf`. Each per-page result stores the zero-based ordinal
+  and original leaf metadata so callers can connect document order, page
+  reference, and page object offset without relying on vector position alone.
+  For each leaf, the helper delegates in order to `inspect_page_contents`,
+  `inspect_page_content_targets`, and `inspect_page_content_extents`; successful
+  pages carry those three delegated reports in
+  `DocumentPageContentExtentResult::Inspected`. A leaf whose `/Contents`
+  inspection fails is recorded as
+  `DocumentPageContentExtentResult::ContentsFailed`, preserving the delegated
+  `PageContentsInspectionError` while later leaves continue through the same
+  pipeline. Skipped leaf-tree diagnostics and truncation markers remain only in
+  the delegated `leaves` field and are not promoted into page results or
+  reinterpreted by the aggregate. The report exposes `#[must_use]`
+  `page_count()`, per-page `is_located()`, and `located_page_count()` helpers;
+  a page is counted as located when `/Contents` inspection succeeded and every
+  delegated content target has a located extent. The implementation reimplements
+  no page-tree traversal, `/Contents` parsing, xref target resolution, `/Length`
+  parsing, or `endstream` validation; it only assembles delegated reports in
+  deterministic document order. It retains or copies no PDF bytes, object
+  bodies, page dictionaries, stream dictionaries, stream bytes, decoded bytes,
+  concatenated content buffers, or source slices; owned data is limited to
+  delegated reports, offsets, ordinals, small enums, and the source-ordered
+  per-page result vector. No benchmark was added because the only new allocation
+  is deterministic public report materialization and the work is a bounded
+  delegation loop over already-enumerated leaves. Non-goals for this slice:
+  no filesystem opener or trailer-to-document pipeline, no decoding,
+  decompression, concatenation, tokenization, `/Resources`/boxes/annotations or
+  inherited-attribute inspection, `/Count` validation, `/Prev` traversal, xref
+  stream/object stream parsing, caches, object maps, syntax/inventory/selectors/
+  actions bridging, or mutation planning. Focused tests cover a multi-page
+  classic-xref fixture with all pages located in document order, a missing
+  `/Contents` page that fails per-page while a later leaf is still processed,
+  preservation of delegated leaf skips plus cycle truncation separately from
+  per-page content failure, and a serde round-trip with one inspected page and
+  one per-page `/Contents` failure.
+
 - Adds `inspect_page_tree_kid_targets`, a focused one-node page-tree expansion
   helper. Given caller bytes, a `&ClassicXrefTableInspection`, and the byte
   offset of an already-located page-tree node, it first delegates to
