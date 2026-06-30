@@ -41,6 +41,7 @@ mod trailer_root;
 mod xref_resolve;
 mod xref_section;
 mod xref_stream;
+mod xref_stream_entries;
 mod xref_stream_trailer;
 
 #[cfg(test)]
@@ -171,6 +172,10 @@ pub use xref_resolve::{
 pub use xref_stream::{
     XrefStreamDictionaryInspection, XrefStreamDictionaryInspectionError,
     XrefStreamDictionaryInspectionRejection, XrefStreamSubsection, inspect_xref_stream_dictionary,
+};
+pub use xref_stream_entries::{
+    XrefStreamEntriesError, XrefStreamEntriesRejection, XrefStreamEntry, XrefStreamEntryRecord,
+    parse_xref_stream_entries,
 };
 pub use xref_stream_trailer::{
     XrefStreamTrailerInspection, XrefStreamTrailerInspectionError,

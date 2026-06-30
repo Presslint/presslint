@@ -154,8 +154,43 @@ Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.
   (`/XRefStm`) support, no `/Root` resolution or catalog/page-tree traversal, and
   no filesystem I/O, document opener, caches, or whole-document eager parsing.
 
+### T091 - Decode Cross-Reference Stream Entry Records
+
+- Adds `parse_xref_stream_entries(decoded, widths, subsections)`, a pure helper
+  that consumes caller-supplied already-decoded xref-stream body bytes plus the
+  validated `/W` widths and ordered `/Index` subsections, then slices the body
+  into fixed-width records and returns typed entries with derived object
+  numbers.
+- Each record is decoded as three explicit big-endian unsigned fields whose
+  byte widths come from `/W`. Missing fields use the PDF xref-stream defaults:
+  `W[0] == 0` makes the entry type default to `1`, while omitted fields 2 and 3
+  default to `0`.
+- Known entry types are reported as `Free`, `Uncompressed`, or `Compressed`.
+  Unknown or future entry type values are surfaced as `Reserved { entry_type,
+  field2, field3 }` with the raw decoded fields, so they are never silently
+  fabricated into byte offsets or object-stream references.
+- The decoder is all-or-nothing. Zero record width, a field width wider than the
+  fixed integer accumulator, total-entry or decoded-length arithmetic overflow,
+  decoded-length mismatch, known-entry field values that do not fit `usize`, and
+  derived object-number overflow each produce distinct structured rejections
+  without returning partial entries.
+- The copy budget is intentionally bounded: `decoded` stays borrowed and no PDF
+  bytes are retained or copied. The only owned output is a
+  `Vec<XrefStreamEntry>` of small `Copy` records bounded by the declared total
+  entry count, matching the deterministic report-materialization budget used by
+  the T089/T090 xref-stream slices.
+- No benchmark was added for this isolated pure decoder. The realistic
+  Criterion target is deferred to the end-to-end structural slice that locates
+  the xref-stream data extent, runs the T088 FlateDecode helper as needed, feeds
+  this decoder, and builds the object-offset map over large xref inputs.
+- Non-goals for this slice: no stream-data extent location, `/Length`
+  resolution, `stream`/`endstream` scanning, FlateDecode/predictor invocation,
+  object-offset map construction, `/Root` resolution, `/Prev` chain following,
+  incremental-section merging, hybrid-reference (`/XRefStm`) support,
+  object-stream body reading, or compressed-object extraction.
+
 ## Follow-Ups
 
-- Next C slice: decode the xref-stream body (via the T088 FlateDecode helper) and
-  slice it into `/W`-width entry records over the `/Index` subsections, then
-  resolve `/Root` and follow the `/Prev` chain to merge incremental sections.
+- Next C slice: locate xref-stream data extents, resolve `/Length`, and wire
+  T088 FlateDecode output into `parse_xref_stream_entries`; then build the
+  object-offset map and follow `/Prev` to merge incremental sections.
