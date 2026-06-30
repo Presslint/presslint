@@ -10,7 +10,7 @@ use presslint_types::{
 use serde::{Deserialize, Serialize};
 
 use self::json::{Json, JsonSerializer};
-use super::{Predicate, Selector, matches};
+use super::{PageMatcher, PageParity, Predicate, Selector, matches};
 
 fn assert_selector_json(selector: &Selector, expected_json: Json) {
     let encoded = selector
@@ -271,6 +271,114 @@ fn color_usage_predicate_has_stable_json_shape() {
     );
 }
 
+#[test]
+fn page_match_predicate_has_stable_json_shape() {
+    assert_predicate_json(
+        &Predicate::PageMatch {
+            matcher: PageMatcher::Parity {
+                parity: PageParity::Odd,
+            },
+        },
+        Json::object([
+            ("kind", Json::string("page_match")),
+            (
+                "matcher",
+                Json::object([
+                    ("match", Json::string("parity")),
+                    ("parity", Json::string("odd")),
+                ]),
+            ),
+        ]),
+    );
+    assert_predicate_json(
+        &Predicate::PageMatch {
+            matcher: PageMatcher::Parity {
+                parity: PageParity::Even,
+            },
+        },
+        Json::object([
+            ("kind", Json::string("page_match")),
+            (
+                "matcher",
+                Json::object([
+                    ("match", Json::string("parity")),
+                    ("parity", Json::string("even")),
+                ]),
+            ),
+        ]),
+    );
+    assert_predicate_json(
+        &Predicate::PageMatch {
+            matcher: PageMatcher::Range {
+                start: PageIndex(4),
+                end: PageIndex(9),
+            },
+        },
+        Json::object([
+            ("kind", Json::string("page_match")),
+            (
+                "matcher",
+                Json::object([
+                    ("match", Json::string("range")),
+                    ("start", Json::U32(4)),
+                    ("end", Json::U32(9)),
+                ]),
+            ),
+        ]),
+    );
+    assert_predicate_json(
+        &Predicate::PageMatch {
+            matcher: PageMatcher::Set {
+                pages: vec![PageIndex(1), PageIndex(5), PageIndex(12)],
+            },
+        },
+        Json::object([
+            ("kind", Json::string("page_match")),
+            (
+                "matcher",
+                Json::object([
+                    ("match", Json::string("set")),
+                    (
+                        "pages",
+                        Json::array([Json::U32(1), Json::U32(5), Json::U32(12)]),
+                    ),
+                ]),
+            ),
+        ]),
+    );
+}
+
+#[test]
+fn page_match_predicate_round_trips_through_selector() {
+    assert_selector_json(
+        &Selector::Predicate {
+            predicate: Predicate::PageMatch {
+                matcher: PageMatcher::Range {
+                    start: PageIndex(2),
+                    end: PageIndex(2),
+                },
+            },
+        },
+        Json::object([
+            ("op", Json::string("predicate")),
+            (
+                "predicate",
+                Json::object([
+                    ("kind", Json::string("page_match")),
+                    (
+                        "matcher",
+                        Json::object([
+                            ("match", Json::string("range")),
+                            ("start", Json::U32(2)),
+                            ("end", Json::U32(2)),
+                        ]),
+                    ),
+                ]),
+            ),
+        ]),
+    );
+}
+
 fn color_observation(usage: ColorUsage) -> ColorObservation {
     ColorObservation {
         usage,
@@ -375,4 +483,110 @@ fn scope_predicate_does_not_match_across_scope_kind() {
         &scope_selector(form_xobject_scope(b"Fm0")),
         &entry
     ));
+}
+
+fn entry_on_page(page: u32) -> InventoryEntry {
+    let mut entry = inventory_entry(ContentScope::Page, Vec::new());
+    entry.id.page = PageIndex(page);
+    entry
+}
+
+fn page_match_selector(matcher: PageMatcher) -> Selector {
+    Selector::Predicate {
+        predicate: Predicate::PageMatch { matcher },
+    }
+}
+
+fn parity_selector(parity: PageParity) -> Selector {
+    page_match_selector(PageMatcher::Parity { parity })
+}
+
+#[test]
+fn parity_odd_matches_first_third_fifth_pages() {
+    // One-based page numbers 1, 3, 5 are zero-based indices 0, 2, 4.
+    for index in [0, 2, 4] {
+        assert!(matches(
+            &parity_selector(PageParity::Odd),
+            &entry_on_page(index)
+        ));
+    }
+    for index in [1, 3, 5] {
+        assert!(!matches(
+            &parity_selector(PageParity::Odd),
+            &entry_on_page(index)
+        ));
+    }
+}
+
+#[test]
+fn parity_even_matches_second_fourth_sixth_pages() {
+    // One-based page numbers 2, 4, 6 are zero-based indices 1, 3, 5.
+    for index in [1, 3, 5] {
+        assert!(matches(
+            &parity_selector(PageParity::Even),
+            &entry_on_page(index)
+        ));
+    }
+    for index in [0, 2, 4] {
+        assert!(!matches(
+            &parity_selector(PageParity::Even),
+            &entry_on_page(index)
+        ));
+    }
+}
+
+#[test]
+fn range_matches_inclusive_on_both_ends() {
+    let selector = page_match_selector(PageMatcher::Range {
+        start: PageIndex(4),
+        end: PageIndex(9),
+    });
+    assert!(matches(&selector, &entry_on_page(4)));
+    assert!(matches(&selector, &entry_on_page(9)));
+    assert!(matches(&selector, &entry_on_page(6)));
+    assert!(!matches(&selector, &entry_on_page(3)));
+    assert!(!matches(&selector, &entry_on_page(10)));
+}
+
+#[test]
+fn range_with_equal_ends_matches_only_that_page() {
+    let selector = page_match_selector(PageMatcher::Range {
+        start: PageIndex(7),
+        end: PageIndex(7),
+    });
+    assert!(matches(&selector, &entry_on_page(7)));
+    assert!(!matches(&selector, &entry_on_page(6)));
+    assert!(!matches(&selector, &entry_on_page(8)));
+}
+
+#[test]
+fn range_matches_nothing_when_start_is_greater_than_end() {
+    let selector = page_match_selector(PageMatcher::Range {
+        start: PageIndex(9),
+        end: PageIndex(4),
+    });
+    for index in [3, 4, 6, 9, 10] {
+        assert!(!matches(&selector, &entry_on_page(index)));
+    }
+}
+
+#[test]
+fn set_matches_membership_independent_of_order_and_duplicates() {
+    let selector = page_match_selector(PageMatcher::Set {
+        pages: vec![PageIndex(12), PageIndex(1), PageIndex(5), PageIndex(1)],
+    });
+    for index in [1, 5, 12] {
+        assert!(matches(&selector, &entry_on_page(index)));
+    }
+    for index in [0, 2, 11, 13] {
+        assert!(!matches(&selector, &entry_on_page(index)));
+    }
+}
+
+#[test]
+fn empty_set_matches_nothing() {
+    let selector = page_match_selector(PageMatcher::Set { pages: Vec::new() });
+    for index in [0, 1, 5, 12] {
+        assert!(!matches(&selector, &entry_on_page(index)));
+    }
 }

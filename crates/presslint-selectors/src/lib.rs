@@ -55,6 +55,11 @@ pub enum Predicate {
         /// Page index to match.
         page: PageIndex,
     },
+    /// Match a page by parity, inclusive index range, or explicit index set.
+    PageMatch {
+        /// Page matcher applied to `entry.id.page`.
+        matcher: PageMatcher,
+    },
     /// Match entries that advertise an edit capability.
     Editable {
         /// Required edit capability.
@@ -70,6 +75,82 @@ pub enum Predicate {
         /// Color usage to match.
         usage: ColorUsage,
     },
+}
+
+/// Page matcher for the [`Predicate::PageMatch`] leaf predicate.
+///
+/// All variants match against a zero-based [`PageIndex`]. Parity is the only
+/// variant defined against the one-based page number; see [`PageParity`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "match", rename_all = "snake_case")]
+pub enum PageMatcher {
+    /// Match by one-based page-number parity.
+    Parity {
+        /// Parity to match.
+        parity: PageParity,
+    },
+    /// Match an inclusive zero-based page-index range.
+    ///
+    /// Both ends are inclusive; the matcher matches nothing when
+    /// `start > end`.
+    Range {
+        /// First matching page index (inclusive).
+        start: PageIndex,
+        /// Last matching page index (inclusive).
+        end: PageIndex,
+    },
+    /// Match an explicit set of zero-based page indexes.
+    ///
+    /// Membership is by [`PageIndex`] equality and is independent of order and
+    /// duplicates in `pages`.
+    Set {
+        /// Page indexes to match by equality.
+        pages: Vec<PageIndex>,
+    },
+}
+
+impl PageMatcher {
+    /// Return whether `page` satisfies this matcher.
+    ///
+    /// Parity and range checks are O(1); set membership is a linear scan over
+    /// the caller-owned `pages` with no per-call allocation.
+    #[must_use]
+    fn matches(&self, page: PageIndex) -> bool {
+        match self {
+            Self::Parity { parity } => parity.matches(page),
+            Self::Range { start, end } => start.0 <= page.0 && page.0 <= end.0,
+            Self::Set { pages } => pages.contains(&page),
+        }
+    }
+}
+
+/// Parity of the one-based page number.
+///
+/// Parity is computed on the one-based page number (`PageIndex` value + 1), so
+/// `Odd` matches the first, third, and fifth page (indices 0, 2, 4) and `Even`
+/// matches the second, fourth, and sixth page (indices 1, 3, 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageParity {
+    /// Odd one-based page number: pages 1, 3, 5 (indices 0, 2, 4).
+    Odd,
+    /// Even one-based page number: pages 2, 4, 6 (indices 1, 3, 5).
+    Even,
+}
+
+impl PageParity {
+    /// Return whether `page` has this one-based-page-number parity.
+    #[must_use]
+    const fn matches(self, page: PageIndex) -> bool {
+        // The one-based page number (index + 1) and the zero-based index always
+        // have opposite low bits, so test the index directly to stay panic-free
+        // even at `u32::MAX`.
+        let index_is_even = page.0.is_multiple_of(2);
+        match self {
+            Self::Odd => index_is_even,
+            Self::Even => !index_is_even,
+        }
+    }
 }
 
 /// Evaluate a selector against one inventory entry.
@@ -90,6 +171,7 @@ fn matches_predicate(predicate: &Predicate, entry: &InventoryEntry) -> bool {
         Predicate::ObjectKind { object_kind } => entry.kind == *object_kind,
         Predicate::ColorSpace { space } => entry.colors.iter().any(|color| color.space == *space),
         Predicate::Page { page } => entry.id.page == *page,
+        Predicate::PageMatch { matcher } => matcher.matches(entry.id.page),
         Predicate::Editable { capability } => entry.capabilities.contains(capability),
         Predicate::Scope { scope } => entry.provenance.scope == *scope,
         Predicate::ColorUsage { usage } => entry.colors.iter().any(|color| color.usage == *usage),
