@@ -31,6 +31,22 @@
 - The color-usage predicate matches when any `ColorObservation` on the entry
   carries the requested `ColorUsage`, mirroring the color-space predicate's
   any-observation semantics.
+- The color-components predicate has serde shape
+  `{ "kind": "color_components", "space": <ColorSpace>, "usage"?: <ColorUsage>,
+  "components": [<f64>...], "tolerance"?: <f64> }`. It scans `entry.colors`
+  and matches only when one `ColorObservation` supplies the requested color
+  space, optional usage, and component vector together. It does not combine
+  color space from one observation with usage or components from another.
+- Component matching requires equal vector lengths. With no tolerance, matching
+  uses exact `f64` equality; with `tolerance`, every absolute per-component
+  difference must be less than or equal to that non-negative tolerance. Non-finite
+  predicate components or tolerance values are clean non-matches.
+- `Selector` and `Predicate` expose `PartialEq` but not `Eq`, because the
+  serde-stable color-components payload can contain constructible `f64` values
+  such as `NaN` even though matching rejects non-finite predicate values.
+- The color-components matcher borrows predicate and entry component slices,
+  performs a bounded linear scan over `entry.colors`, and allocates nothing per
+  `matches` call.
 - Focused serde tests lock the public JSON shape for selector boolean variants
   and predicate fixtures, including page, page-match (parity/range/set),
   named form-XObject, and annotation appearance scope fixtures. Matcher tests
@@ -43,8 +59,6 @@
 
 ## Follow-Ups
 
-- The color-component predicate is the next selector slice; it is intentionally
-  deferred to keep the page-match slice atomic and report-only.
 - Keep selector JSON compatibility explicit when adding future predicates or
   consumer-facing recipes.
 - A categorical "any form regardless of name" scope matcher is intentionally

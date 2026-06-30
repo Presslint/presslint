@@ -2,7 +2,9 @@
 //!
 //! This harness keeps the focused serde shape tests dependency-free: it
 //! reflects values into a structural [`Json`] tree and back, so tests can lock
-//! byte-stable field order without pulling in a JSON crate.
+//! byte-stable field order without pulling in a JSON crate. It supports the
+//! small scalar set selector contracts currently expose, including `f64`
+//! component predicates.
 
 #![allow(clippy::expect_used, clippy::missing_errors_doc)]
 
@@ -13,12 +15,13 @@ use serde::{
     ser::{self, SerializeSeq, SerializeStruct},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) enum Json {
     Object(Vec<(String, Self)>),
     Array(Vec<Self>),
     String(String),
     U32(u32),
+    F64(f64),
 }
 
 impl Json {
@@ -123,15 +126,11 @@ impl ser::Serializer for JsonSerializer {
     }
 
     fn serialize_f32(self, value: f32) -> Result<Self::Ok, Self::Error> {
-        Err(Self::Error::custom(format!(
-            "unsupported f32 JSON value {value}"
-        )))
+        self.serialize_f64(f64::from(value))
     }
 
     fn serialize_f64(self, value: f64) -> Result<Self::Ok, Self::Error> {
-        Err(Self::Error::custom(format!(
-            "unsupported f64 JSON value {value}"
-        )))
+        Ok(Json::F64(value))
     }
 
     fn serialize_char(self, value: char) -> Result<Self::Ok, Self::Error> {
@@ -393,6 +392,7 @@ impl<'de> de::Deserializer<'de> for Json {
             }),
             Self::String(value) => visitor.visit_string(value),
             Self::U32(value) => visitor.visit_u32(value),
+            Self::F64(value) => visitor.visit_f64(value),
         }
     }
 

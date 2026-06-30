@@ -7,7 +7,7 @@ use presslint_types::{ColorSpace, ColorUsage, ContentScope, ObjectKind, PageInde
 use serde::{Deserialize, Serialize};
 
 /// Boolean selector expression.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Selector {
     /// Match every entry.
@@ -37,7 +37,7 @@ pub enum Selector {
 }
 
 /// Selector leaf predicate.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Predicate {
     /// Match object kind.
@@ -74,6 +74,19 @@ pub enum Predicate {
     ColorUsage {
         /// Color usage to match.
         usage: ColorUsage,
+    },
+    /// Match one observed color by color space, optional usage, and components.
+    ColorComponents {
+        /// Color space to match on the same observation as `components`.
+        space: ColorSpace,
+        /// Optional color usage to match on the same observation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<ColorUsage>,
+        /// Source-space components to match in order.
+        components: Vec<f64>,
+        /// Optional absolute per-component tolerance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tolerance: Option<f64>,
     },
 }
 
@@ -175,6 +188,36 @@ fn matches_predicate(predicate: &Predicate, entry: &InventoryEntry) -> bool {
         Predicate::Editable { capability } => entry.capabilities.contains(capability),
         Predicate::Scope { scope } => entry.provenance.scope == *scope,
         Predicate::ColorUsage { usage } => entry.colors.iter().any(|color| color.usage == *usage),
+        Predicate::ColorComponents {
+            space,
+            usage,
+            components,
+            tolerance,
+        } => entry.colors.iter().any(|color| {
+            color.space == *space
+                && usage.is_none_or(|usage| color.usage == usage)
+                && components_match(components, &color.components, *tolerance)
+        }),
+    }
+}
+
+fn components_match(expected: &[f64], actual: &[f64], tolerance: Option<f64>) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+
+    match tolerance {
+        None => expected.iter().zip(actual).all(|(expected, actual)| {
+            expected.is_finite()
+                && actual.is_finite()
+                && expected.partial_cmp(actual) == Some(std::cmp::Ordering::Equal)
+        }),
+        Some(tolerance) if tolerance.is_finite() && tolerance >= 0.0 => {
+            expected.iter().zip(actual).all(|(expected, actual)| {
+                expected.is_finite() && actual.is_finite() && (expected - actual).abs() <= tolerance
+            })
+        }
+        Some(_) => false,
     }
 }
 

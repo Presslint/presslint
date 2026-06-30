@@ -272,6 +272,49 @@ fn color_usage_predicate_has_stable_json_shape() {
 }
 
 #[test]
+fn color_components_predicate_has_stable_json_shape() {
+    assert_predicate_json(
+        &Predicate::ColorComponents {
+            space: ColorSpace::DeviceCmyk,
+            usage: Some(ColorUsage::Stroke),
+            components: vec![0.0, 0.0, 0.0, 1.0],
+            tolerance: None,
+        },
+        Json::object([
+            ("kind", Json::string("color_components")),
+            ("space", Json::string("device_cmyk")),
+            ("usage", Json::string("stroke")),
+            (
+                "components",
+                Json::array([
+                    Json::F64(0.0),
+                    Json::F64(0.0),
+                    Json::F64(0.0),
+                    Json::F64(1.0),
+                ]),
+            ),
+        ]),
+    );
+    assert_predicate_json(
+        &Predicate::ColorComponents {
+            space: ColorSpace::DeviceRgb,
+            usage: None,
+            components: vec![0.5, 0.25, 0.75],
+            tolerance: Some(0.01),
+        },
+        Json::object([
+            ("kind", Json::string("color_components")),
+            ("space", Json::string("device_rgb")),
+            (
+                "components",
+                Json::array([Json::F64(0.5), Json::F64(0.25), Json::F64(0.75)]),
+            ),
+            ("tolerance", Json::F64(0.01)),
+        ]),
+    );
+}
+
+#[test]
 fn page_match_predicate_has_stable_json_shape() {
     assert_predicate_json(
         &Predicate::PageMatch {
@@ -380,10 +423,18 @@ fn page_match_predicate_round_trips_through_selector() {
 }
 
 fn color_observation(usage: ColorUsage) -> ColorObservation {
+    color_observation_with(usage, ColorSpace::DeviceCmyk, Vec::new())
+}
+
+fn color_observation_with(
+    usage: ColorUsage,
+    space: ColorSpace,
+    components: Vec<f64>,
+) -> ColorObservation {
     ColorObservation {
         usage,
-        space: ColorSpace::DeviceCmyk,
-        components: Vec::new(),
+        space,
+        components,
         spot_name: None,
         source: None,
     }
@@ -418,6 +469,22 @@ fn color_usage_selector(usage: ColorUsage) -> Selector {
     }
 }
 
+fn color_components_selector(
+    space: ColorSpace,
+    usage: Option<ColorUsage>,
+    components: Vec<f64>,
+    tolerance: Option<f64>,
+) -> Selector {
+    Selector::Predicate {
+        predicate: Predicate::ColorComponents {
+            space,
+            usage,
+            components,
+            tolerance,
+        },
+    }
+}
+
 #[test]
 fn color_usage_predicate_matches_single_matching_observation() {
     let entry = entry_with_colors(vec![color_observation(ColorUsage::Fill)]);
@@ -443,6 +510,145 @@ fn color_usage_predicate_matches_one_of_multiple_observations() {
 fn color_usage_predicate_does_not_match_entry_without_observations() {
     let entry = entry_with_colors(Vec::new());
     assert!(!matches(&color_usage_selector(ColorUsage::Fill), &entry));
+}
+
+#[test]
+fn color_components_predicate_matches_exact_device_cmyk_k100() {
+    let entry = entry_with_colors(vec![color_observation_with(
+        ColorUsage::Stroke,
+        ColorSpace::DeviceCmyk,
+        vec![0.0, 0.0, 0.0, 1.0],
+    )]);
+    let selector = color_components_selector(
+        ColorSpace::DeviceCmyk,
+        Some(ColorUsage::Stroke),
+        vec![0.0, 0.0, 0.0, 1.0],
+        None,
+    );
+    assert!(matches(&selector, &entry));
+
+    let selector =
+        color_components_selector(ColorSpace::DeviceCmyk, None, vec![0.0, 0.0, 0.0, 1.0], None);
+    assert!(matches(&selector, &entry));
+}
+
+#[test]
+fn color_components_predicate_matches_with_absolute_tolerance() {
+    let entry = entry_with_colors(vec![color_observation_with(
+        ColorUsage::Fill,
+        ColorSpace::DeviceRgb,
+        vec![0.49, 0.25, 0.751],
+    )]);
+    let selector = color_components_selector(
+        ColorSpace::DeviceRgb,
+        Some(ColorUsage::Fill),
+        vec![0.5, 0.25, 0.75],
+        Some(0.011),
+    );
+    assert!(matches(&selector, &entry));
+
+    let selector = color_components_selector(
+        ColorSpace::DeviceRgb,
+        Some(ColorUsage::Fill),
+        vec![0.5, 0.25, 0.75],
+        Some(0.009),
+    );
+    assert!(!matches(&selector, &entry));
+}
+
+#[test]
+fn color_components_predicate_does_not_match_wrong_space() {
+    let entry = entry_with_colors(vec![color_observation_with(
+        ColorUsage::Stroke,
+        ColorSpace::DeviceRgb,
+        vec![0.0, 0.0, 0.0, 1.0],
+    )]);
+    let selector = color_components_selector(
+        ColorSpace::DeviceCmyk,
+        Some(ColorUsage::Stroke),
+        vec![0.0, 0.0, 0.0, 1.0],
+        None,
+    );
+    assert!(!matches(&selector, &entry));
+}
+
+#[test]
+fn color_components_predicate_does_not_match_wrong_usage() {
+    let entry = entry_with_colors(vec![color_observation_with(
+        ColorUsage::Fill,
+        ColorSpace::DeviceCmyk,
+        vec![0.0, 0.0, 0.0, 1.0],
+    )]);
+    let selector = color_components_selector(
+        ColorSpace::DeviceCmyk,
+        Some(ColorUsage::Stroke),
+        vec![0.0, 0.0, 0.0, 1.0],
+        None,
+    );
+    assert!(!matches(&selector, &entry));
+}
+
+#[test]
+fn color_components_predicate_does_not_match_wrong_component_length() {
+    let entry = entry_with_colors(vec![color_observation_with(
+        ColorUsage::Stroke,
+        ColorSpace::DeviceCmyk,
+        vec![0.0, 0.0, 1.0],
+    )]);
+    let selector = color_components_selector(
+        ColorSpace::DeviceCmyk,
+        Some(ColorUsage::Stroke),
+        vec![0.0, 0.0, 0.0, 1.0],
+        Some(1.0),
+    );
+    assert!(!matches(&selector, &entry));
+}
+
+#[test]
+fn color_components_predicate_does_not_cross_match_multiple_observations() {
+    let entry = entry_with_colors(vec![
+        color_observation_with(
+            ColorUsage::Stroke,
+            ColorSpace::DeviceRgb,
+            vec![0.0, 0.0, 0.0],
+        ),
+        color_observation_with(
+            ColorUsage::Fill,
+            ColorSpace::DeviceCmyk,
+            vec![0.0, 0.0, 0.0, 1.0],
+        ),
+    ]);
+    let selector = color_components_selector(
+        ColorSpace::DeviceCmyk,
+        Some(ColorUsage::Stroke),
+        vec![0.0, 0.0, 0.0, 1.0],
+        None,
+    );
+    assert!(!matches(&selector, &entry));
+}
+
+#[test]
+fn color_components_predicate_rejects_non_finite_predicate_values() {
+    let entry = entry_with_colors(vec![color_observation_with(
+        ColorUsage::Stroke,
+        ColorSpace::DeviceCmyk,
+        vec![0.0, 0.0, 0.0, 1.0],
+    )]);
+    let selector = color_components_selector(
+        ColorSpace::DeviceCmyk,
+        Some(ColorUsage::Stroke),
+        vec![0.0, f64::NAN, 0.0, 1.0],
+        None,
+    );
+    assert!(!matches(&selector, &entry));
+
+    let selector = color_components_selector(
+        ColorSpace::DeviceCmyk,
+        Some(ColorUsage::Stroke),
+        vec![0.0, 0.0, 0.0, 1.0],
+        Some(f64::INFINITY),
+    );
+    assert!(!matches(&selector, &entry));
 }
 
 fn entry_with_scope(scope: ContentScope) -> InventoryEntry {
