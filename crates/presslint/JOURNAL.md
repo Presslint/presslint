@@ -1,5 +1,29 @@
 # presslint Journal
 
+## T112 - Surface Image `XObject` Dictionary Metadata
+
+- `PdfInventoryPage` now exposes `image_xobjects:
+  Vec<presslint_pdf::PageXObjectResourceTarget>`: the top-level page-scope image
+  `XObject` targets for the page, each carrying the resolved reference/offset
+  and the structural `ImageXObjectMetadata` (dimensions + colour-space family)
+  added on the `presslint-pdf` side. Callers can now read image `/Width`,
+  `/Height`, `/BitsPerComponent`, and a mapped `/ColorSpace` device family
+  without decoding any image samples. Form targets are not surfaced here.
+- The bridge fills the new field from the already-computed page
+  `XObject`-resource report (`resources.image_xobjects.clone()`); when the
+  resource pass is absent for a page the vector is empty. No new object reads,
+  resolutions, or stream decodes; the page inventory result and skip shapes are
+  unchanged. The `image_xobjects` vector serde-round-trips with the rest of
+  `PdfInventoryPage`.
+- Copy budget: only the small structural target records (name bytes, indirect
+  reference, offset, scalar image metadata) already produced by the resource
+  pass are cloned into the report; no PDF bytes, object/stream bodies, resource
+  dictionaries, or decoded image data are retained.
+- Note: adding the required `image_xobjects` field to `PdfInventoryPage`
+  rippled to the two `PdfInventoryPage { .. }` test constructors in
+  `src/tests/preflight.rs` (mechanical `image_xobjects: Vec::new()` only, no
+  behaviour change).
+
 ## T111 - Bounded Recursive Form Inventory + ACT Coverage Hardening
 
 - Raised the bridge walk from one-level to bounded recursive descent:

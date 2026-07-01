@@ -1,5 +1,6 @@
 use crate::{
-    ClassicXrefTableInspection, IndirectRef, ObjectLookup, PageXObjectResourceTarget, PdfName,
+    ClassicXrefTableInspection, ImageColorSpaceMetadata, ImageIntegerMetadata,
+    ImageXObjectMetadata, IndirectRef, ObjectLookup, PageXObjectResourceTarget, PdfName,
     SkippedPageXObjectResourceReason, inspect_classic_xref_table, inspect_form_xobject_resources,
 };
 
@@ -49,6 +50,7 @@ fn fixture(objects: &[&[u8]]) -> Fixture {
     }
 }
 
+/// Form target helper: forms never carry image metadata.
 fn target(name: &[u8], object_number: u32, object_byte_offset: usize) -> PageXObjectResourceTarget {
     PageXObjectResourceTarget {
         name: PdfName(name.to_vec()),
@@ -57,6 +59,38 @@ fn target(name: &[u8], object_number: u32, object_byte_offset: usize) -> PageXOb
             generation: 0,
         },
         object_byte_offset,
+        image_metadata: None,
+    }
+}
+
+/// Image target helper carrying the structural image dictionary metadata.
+fn image_target(
+    name: &[u8],
+    object_number: u32,
+    object_byte_offset: usize,
+    image_metadata: ImageXObjectMetadata,
+) -> PageXObjectResourceTarget {
+    PageXObjectResourceTarget {
+        name: PdfName(name.to_vec()),
+        reference: IndirectRef {
+            object_number,
+            generation: 0,
+        },
+        object_byte_offset,
+        image_metadata: Some(image_metadata),
+    }
+}
+
+/// Metadata for a `/Width w /Height h /BitsPerComponent bpc` image with no
+/// `/ColorSpace` entry.
+fn wh_bpc_no_colorspace(width: u32, height: u32, bits_per_component: u32) -> ImageXObjectMetadata {
+    ImageXObjectMetadata {
+        width: ImageIntegerMetadata::Value { value: width },
+        height: ImageIntegerMetadata::Value { value: height },
+        bits_per_component: ImageIntegerMetadata::Value {
+            value: bits_per_component,
+        },
+        color_space: ImageColorSpaceMetadata::Missing,
     }
 }
 
@@ -73,7 +107,12 @@ fn form_own_resources_classify_nested_image_and_form_targets() {
     assert_eq!(report.object_byte_offset, pdf.object_offset(1));
     assert_eq!(
         report.image_xobjects,
-        vec![target(b"In", 2, pdf.object_offset(2))]
+        vec![image_target(
+            b"In",
+            2,
+            pdf.object_offset(2),
+            wh_bpc_no_colorspace(1, 1, 8)
+        )]
     );
     assert_eq!(
         report.form_xobjects,
@@ -82,6 +121,31 @@ fn form_own_resources_classify_nested_image_and_form_targets() {
     assert_eq!(report.image_xobject_names, vec![PdfName(b"In".to_vec())]);
     assert_eq!(report.form_xobject_names, vec![PdfName(b"Fn".to_vec())]);
     assert!(report.skipped.is_empty());
+}
+
+#[test]
+fn form_image_target_carries_direct_colorspace_metadata() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 7 /Resources << /XObject << /In 2 0 R >> >> >>\nstream\n/In Do\nendstream\nendobj\n",
+        b"2 0 obj\n<< /Type /XObject /Subtype /Image /Width 4 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceCMYK >>\nstream\nx\nendstream\nendobj\n",
+    ]);
+
+    let report = inspect_form_xobject_resources(&pdf.source, pdf.lookup(), pdf.object_offset(1));
+
+    assert_eq!(
+        report.image_xobjects,
+        vec![image_target(
+            b"In",
+            2,
+            pdf.object_offset(2),
+            ImageXObjectMetadata {
+                width: ImageIntegerMetadata::Value { value: 4 },
+                height: ImageIntegerMetadata::Value { value: 2 },
+                bits_per_component: ImageIntegerMetadata::Value { value: 8 },
+                color_space: ImageColorSpaceMetadata::DeviceCmyk,
+            }
+        )]
+    );
 }
 
 #[test]

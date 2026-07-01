@@ -32,6 +32,7 @@ mod dictionary_extent;
 mod document_access;
 mod document_page_content_extents;
 mod form_xobject_resources;
+mod image_xobject;
 mod indirect_reference;
 mod integer_object;
 mod object_body;
@@ -121,6 +122,10 @@ pub use document_page_content_extents::{
     inspect_document_page_content_extents, inspect_document_page_content_extents_with_lookup,
 };
 pub use form_xobject_resources::{FormXObjectResourcesInspection, inspect_form_xobject_resources};
+pub use image_xobject::{
+    ImageColorSpaceMetadata, ImageIntegerMetadata, ImageXObjectMetadata,
+    inspect_image_xobject_metadata,
+};
 pub use indirect_reference::{
     IndirectReferenceByteRange, IndirectReferenceInspection, IndirectReferenceInspectionError,
     IndirectReferenceInspectionRejection, parse_indirect_reference,

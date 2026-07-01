@@ -83,6 +83,7 @@ fn inventoried_page_with_form_skipped(
             entry_count,
             form_skipped,
         },
+        image_xobjects: Vec::new(),
         xobject_resource_skipped: Vec::new(),
     }
 }
@@ -93,6 +94,7 @@ fn skipped_page(page: u32) -> PdfInventoryPage {
         result: PdfInventoryPageResult::Skipped {
             reason: PdfInventorySkip::NoContentStreams,
         },
+        image_xobjects: Vec::new(),
         xobject_resource_skipped: Vec::new(),
     }
 }

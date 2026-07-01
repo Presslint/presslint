@@ -4,6 +4,44 @@ Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.
 
 ## Current State
 
+### T112 - Image `XObject` Dictionary Metadata
+
+- Added the `image_xobject` module with
+  `inspect_image_xobject_metadata(input, entries) -> ImageXObjectMetadata`, a
+  pure structural scan over the shallow entries of an already-resolved
+  `/Subtype /Image` dictionary. It reads only the four dictionary-level entries
+  `/Width`, `/Height`, `/BitsPerComponent`, and `/ColorSpace`.
+- `ImageIntegerMetadata` (for the three scalar dimensions/depth) maps to
+  `Value { value: u32 }`, or one of the explicit shapes `Missing`,
+  `Duplicate { .. }`, `Unsupported { value_kind }` (present but not a
+  number-shaped scalar), or `Malformed` (number-shaped but not a non-negative
+  32-bit integer: a real, a signed value, or an out-of-range magnitude).
+- `ImageColorSpaceMetadata` maps the three direct device names to
+  `DeviceGray` / `DeviceRgb` / `DeviceCmyk`. Every other shape stays explicit
+  and is never guessed: `Missing`, `Duplicate { .. }`, `OtherName { name }` (a
+  direct name other than the three devices, raw bytes including the leading
+  slash), or `Unsupported { value_kind }` for any non-name value (an array such
+  as `[/ICCBased ...]` / `[/Indexed ...]`, an indirect reference, a dictionary).
+  Indirect and array colour spaces are deliberately not resolved in this slice.
+- `PageXObjectResourceTarget` gained an `image_metadata:
+  Option<ImageXObjectMetadata>` field: `Some(..)` for `/Subtype /Image`
+  targets, `None` for `/Subtype /Form` targets. The metadata is computed inside
+  the existing `classify_xobject_entry` path in both `page_xobject_resources`
+  and `form_xobject_resources`, reusing the `target.entries` already inspected
+  during subtype classification — no extra object read or resolution. Existing
+  image/form resource-name classification and target ordering are unchanged.
+- Image targets stay classified even when metadata is incomplete or
+  unsupported: every unsupported shape is reported in-band rather than dropping
+  the target.
+- Copy budget: the metadata copies only small scalar values (`u32`,
+  `DictionaryEntryByteRange`, `DictionaryValueKind`) plus, for a non-device
+  colour space, the raw `/ColorSpace` name bytes already at the report
+  boundary. It retains no PDF source bytes, object bodies, stream bodies,
+  resource dictionaries, decoded image data, or ICC/profile bytes; a
+  no-source-leak test asserts a `/Secret (..)` literal never reaches the debug
+  report. No benchmark target: one bounded shallow scan per already-classified
+  image target, no image-sample decode or buffer allocation.
+
 ### T110 - Single-Object Form `XObject` Resource Inspector
 
 - Added `form_xobject_resources` module with

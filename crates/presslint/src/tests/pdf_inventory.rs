@@ -413,6 +413,42 @@ fn neutral_public_surface_accepts_classic_fixture_helper() -> Result<(), PdfInve
 }
 
 #[test]
+fn page_image_xobjects_expose_structural_metadata() -> Result<(), String> {
+    use crate::pdf::{ImageColorSpaceMetadata, ImageIntegerMetadata};
+
+    let source = classic_pdf(&[
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [ 3 0 R ] /Count 1 >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Im 5 0 R /Fm 6 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        b"4 0 obj\n<< /Length 13 >>\nstream\n/Im Do /Fm Do\nendstream\nendobj\n",
+        b"5 0 obj\n<< /Type /XObject /Subtype /Image /Width 8 /Height 4 /BitsPerComponent 8 /ColorSpace /DeviceCMYK >>\nstream\nx\nendstream\nendobj\n",
+        b"6 0 obj\n<< /Type /XObject /Subtype /Form /Length 1 >>\nstream\nq\nendstream\nendobj\n",
+    ]);
+
+    let report = build_pdf_inventory(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    // Only the page-scope image target is surfaced here; the form target is not.
+    assert_eq!(report.pages[0].image_xobjects.len(), 1);
+    let image = &report.pages[0].image_xobjects[0];
+    assert_eq!(image.name.0, b"Im");
+    let metadata = image
+        .image_metadata
+        .as_ref()
+        .ok_or("image target should carry metadata")?;
+    assert_eq!(metadata.width, ImageIntegerMetadata::Value { value: 8 });
+    assert_eq!(metadata.height, ImageIntegerMetadata::Value { value: 4 });
+    assert_eq!(
+        metadata.bits_per_component,
+        ImageIntegerMetadata::Value { value: 8 }
+    );
+    assert_eq!(metadata.color_space, ImageColorSpaceMetadata::DeviceCmyk);
+
+    // Serde round-trips the enriched page shape.
+    round_trip::<PdfInventoryPage>(&report.pages[0].clone())?;
+    Ok(())
+}
+
+#[test]
 fn real_pdf_do_operators_become_image_and_form_inventory_entries() -> Result<(), String> {
     let source = classic_pdf(&[
         b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",

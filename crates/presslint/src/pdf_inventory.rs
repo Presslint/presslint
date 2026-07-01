@@ -43,6 +43,11 @@ pub struct PdfInventoryPage {
     pub page_index: PageIndex,
     /// Page inventory result or structured skip.
     pub result: PdfInventoryPageResult,
+    /// Top-level page-scope image `XObject` targets, each carrying the resolved
+    /// image reference/offset and structural
+    /// [`ImageXObjectMetadata`](presslint_pdf::ImageXObjectMetadata) (image
+    /// dimensions and colour-space family) without decoding image samples.
+    pub image_xobjects: Vec<presslint_pdf::PageXObjectResourceTarget>,
     /// Page-local `XObject` resource diagnostics.
     pub xobject_resource_skipped: Vec<presslint_pdf::SkippedPageXObjectResource>,
 }
@@ -270,14 +275,11 @@ pub fn build_pdf_inventory(
         let resources = xobject_pages
             .as_ref()
             .and_then(|pages| pages.get(page.ordinal));
-        let image_xobject_names = resources.map_or_else(Vec::new, |resources| {
-            inventory_names(&resources.image_xobject_names)
-        });
-        let form_xobject_names = resources.map_or_else(Vec::new, |resources| {
-            inventory_names(&resources.form_xobject_names)
-        });
-        let form_targets =
-            resources.map_or(&[][..], |resources| resources.form_xobjects.as_slice());
+        let image_xobject_names =
+            resources.map_or_else(Vec::new, |r| inventory_names(&r.image_xobject_names));
+        let form_xobject_names =
+            resources.map_or_else(Vec::new, |r| inventory_names(&r.form_xobject_names));
+        let form_targets = resources.map_or(&[][..], |r| r.form_xobjects.as_slice());
         let result = match build_page_inventory_with_forms(
             input,
             lookup,
@@ -308,6 +310,8 @@ pub fn build_pdf_inventory(
         pages.push(PdfInventoryPage {
             page_index,
             result,
+            image_xobjects: resources
+                .map_or_else(Vec::new, |resources| resources.image_xobjects.clone()),
             xobject_resource_skipped: resources
                 .map_or_else(Vec::new, |resources| resources.skipped.clone()),
         });

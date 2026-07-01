@@ -625,6 +625,7 @@ fn classify_xobject_entries(
                     name,
                     reference: classification.reference,
                     object_byte_offset: classification.object_byte_offset,
+                    image_metadata: classification.image_metadata,
                 };
                 match classification.subtype {
                     PageXObjectResourceSubtype::Image => {
@@ -734,10 +735,12 @@ fn classify_xobject_entry(
             }
         })?;
     let subtype = classify_subtype(input, object_byte_offset, &target.entries)?;
+    let image_metadata = subtype.image_metadata(input, &target.entries);
     Ok(ClassifiedPageXObjectResource {
         subtype,
         reference: reference.reference,
         object_byte_offset,
+        image_metadata,
     })
 }
 
