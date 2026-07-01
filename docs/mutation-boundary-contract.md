@@ -37,7 +37,21 @@ PDF indirect references.
 
 `dictionary_entry` identifies a dictionary edit in a concrete indirect object.
 It carries the target `IndirectRef`, key, replace/insert operation, value
-locator, non-optional ownership decision, and planned value provenance.
+locator, non-optional ownership decision, and planned value provenance. The
+stored `PdfName` key bytes are slashless; slash-prefixed names are literal PDF
+syntax only.
+
+The `SetPageBox` action plans `dictionary_entry` boundaries through
+`plan_set_page_box_boundaries`. Given the action, a leaf page `IndirectRef`, a
+proven ownership decision, and an optional value locator per box, it emits one
+`dictionary_entry` per requested-and-located box (`MediaBox` before `CropBox`).
+The operation is derived from the locator: `existing_value` plans a
+`replace`, `insertion_point` plans an `insert`. This is planning metadata only:
+the helper never calls `presslint-write`, reads PDF bytes, or applies an edit.
+The actual byte writing lives in `presslint-write::set_page_boxes_incremental`,
+which independently re-derives the same boundaries from
+`presslint_pdf::inspect_document_page_boxes` and appends a classic incremental
+revision.
 
 `whole_stream` identifies replacement of an indirect stream object's payload. It
 carries the target `IndirectRef`, optional existing stream-data range,
@@ -87,4 +101,3 @@ Those contracts are intentionally deferred to F3b:
 the incremental-update writer design note. F3b will build on this boundary
 model and on the PDF incremental-update concepts around indirect objects,
 dictionaries, streams, cross-reference sections, and trailers.
-

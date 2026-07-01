@@ -1,11 +1,12 @@
 use presslint_pdf::{
-    IndirectObjectEditDecision, IndirectObjectEditDisposition, IndirectObjectOwnership, IndirectRef,
+    IndirectObjectEditDecision, IndirectObjectEditDisposition, IndirectObjectOwnership,
+    IndirectRef, PageRectangle,
 };
 use presslint_types::{ByteRange, ContentScope, EditCapability, ObjectKind, PageIndex, PdfName};
 
 use super::super::{
     Action, DictionaryEntryOp, DictionaryValueLocator, MutationBoundary, PlannedObjectAllocation,
-    PlannedPatch, PlannedValueProvenance,
+    PlannedPatch, PlannedValueProvenance, SetPageBox, plan_set_page_box_boundaries,
 };
 use super::*;
 
@@ -619,5 +620,130 @@ fn action_plan_with_patch_boundary_has_stable_json_shape() {
             ("patches", Json::array([planned_patch_json(1, 0, 5, 12)])),
             ("skipped", Json::array([])),
         ]),
+    );
+}
+
+fn page_rect(llx: f64, lly: f64, urx: f64, ury: f64) -> PageRectangle {
+    PageRectangle { llx, lly, urx, ury }
+}
+
+#[test]
+fn set_page_box_plans_replace_and_insert_dictionary_entries() {
+    let target = indirect_ref(4, 0);
+    let ownership = single_use_ownership(target, indirect_ref(2, 0));
+    let action = SetPageBox {
+        media_box: Some(page_rect(0.0, 0.0, 612.0, 792.0)),
+        crop_box: Some(page_rect(10.0, 10.0, 400.0, 400.0)),
+    };
+    let media_locator = DictionaryValueLocator::ExistingValue {
+        key_range: ByteRange { start: 10, end: 19 },
+        value_range: ByteRange { start: 20, end: 42 },
+    };
+    let crop_locator = DictionaryValueLocator::InsertionPoint {
+        dictionary_range: ByteRange { start: 8, end: 60 },
+    };
+
+    let boundaries = plan_set_page_box_boundaries(
+        &action,
+        target,
+        &ownership,
+        Some(media_locator),
+        Some(crop_locator),
+    );
+
+    // MediaBox precedes CropBox; the op is derived from the locator variant.
+    assert_eq!(
+        boundaries,
+        vec![
+            MutationBoundary::DictionaryEntry {
+                target,
+                key: PdfName(b"MediaBox".to_vec()),
+                op: DictionaryEntryOp::Replace,
+                value_locator: media_locator,
+                ownership: ownership.clone(),
+                value_provenance: PlannedValueProvenance::ActionGenerated {
+                    action: Action::SetPageBox(action),
+                },
+            },
+            MutationBoundary::DictionaryEntry {
+                target,
+                key: PdfName(b"CropBox".to_vec()),
+                op: DictionaryEntryOp::Insert,
+                value_locator: crop_locator,
+                ownership,
+                value_provenance: PlannedValueProvenance::ActionGenerated {
+                    action: Action::SetPageBox(action),
+                },
+            },
+        ]
+    );
+}
+
+#[test]
+fn set_page_box_emits_boundary_only_when_requested_and_located() {
+    let target = indirect_ref(4, 0);
+    let ownership = single_use_ownership(target, indirect_ref(2, 0));
+    let media_locator = DictionaryValueLocator::ExistingValue {
+        key_range: ByteRange { start: 10, end: 19 },
+        value_range: ByteRange { start: 20, end: 42 },
+    };
+    let crop_locator = DictionaryValueLocator::InsertionPoint {
+        dictionary_range: ByteRange { start: 8, end: 60 },
+    };
+
+    // Media requested but not located: no boundary. Crop located but not
+    // requested: no boundary. Result is empty.
+    let media_only = SetPageBox {
+        media_box: Some(page_rect(0.0, 0.0, 612.0, 792.0)),
+        crop_box: None,
+    };
+    assert!(
+        plan_set_page_box_boundaries(&media_only, target, &ownership, None, Some(crop_locator))
+            .is_empty()
+    );
+
+    // Media requested and located; crop neither requested nor located.
+    let boundaries =
+        plan_set_page_box_boundaries(&media_only, target, &ownership, Some(media_locator), None);
+    assert_eq!(boundaries.len(), 1);
+    assert!(matches!(
+        &boundaries[0],
+        MutationBoundary::DictionaryEntry {
+            key,
+            op: DictionaryEntryOp::Replace,
+            ..
+        } if *key == PdfName(b"MediaBox".to_vec())
+    ));
+}
+
+#[test]
+fn set_page_box_carries_shared_ownership_for_report_only_planning() {
+    let target = indirect_ref(9, 0);
+    let ownership = shared_ownership(target, vec![indirect_ref(2, 0), indirect_ref(5, 0)]);
+    let action = SetPageBox {
+        media_box: None,
+        crop_box: Some(page_rect(0.0, 0.0, 100.0, 100.0)),
+    };
+    let crop_locator = DictionaryValueLocator::InsertionPoint {
+        dictionary_range: ByteRange { start: 8, end: 60 },
+    };
+
+    let boundaries =
+        plan_set_page_box_boundaries(&action, target, &ownership, None, Some(crop_locator));
+
+    // The planner records the ownership decision verbatim; it does not gate on
+    // the disposition (that is the writer's responsibility) and it never writes.
+    assert_eq!(
+        boundaries,
+        vec![MutationBoundary::DictionaryEntry {
+            target,
+            key: PdfName(b"CropBox".to_vec()),
+            op: DictionaryEntryOp::Insert,
+            value_locator: crop_locator,
+            ownership,
+            value_provenance: PlannedValueProvenance::ActionGenerated {
+                action: Action::SetPageBox(action),
+            },
+        }]
     );
 }

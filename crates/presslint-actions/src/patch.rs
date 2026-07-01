@@ -4,7 +4,10 @@ use presslint_pdf::{IndirectObjectEditDecision, IndirectRef};
 use presslint_types::{ByteRange, ContentScope, PageIndex, PdfName};
 use serde::{Deserialize, Serialize};
 
-use crate::Action;
+use crate::{Action, SetPageBox};
+
+const MEDIA_BOX_KEY: &[u8] = b"MediaBox";
+const CROP_BOX_KEY: &[u8] = b"CropBox";
 
 /// Serializable boundary for a future mutation.
 ///
@@ -124,6 +127,80 @@ pub enum PlannedValueProvenance {
         /// Stable policy name.
         name: String,
     },
+}
+
+/// Plan report-only [`MutationBoundary::DictionaryEntry`] records for a
+/// `SetPageBox` action against one leaf page dictionary.
+///
+/// This is a planning contract only: it emits mutation-boundary metadata and
+/// never calls `presslint-write`, reads PDF bytes, or mutates a document. A
+/// boundary is emitted for `MediaBox` and/or `CropBox` only when the action
+/// requests that box *and* a value locator is supplied for it. `MediaBox`
+/// always precedes `CropBox` in the returned order. Boundary keys are stored
+/// as slashless [`PdfName`] bytes; slash-prefixed names are PDF syntax only.
+///
+/// Each supplied [`DictionaryValueLocator`] determines the operation:
+/// [`DictionaryValueLocator::ExistingValue`] plans a
+/// [`DictionaryEntryOp::Replace`], and [`DictionaryValueLocator::InsertionPoint`]
+/// plans a [`DictionaryEntryOp::Insert`]. Every boundary carries the caller's
+/// proven ownership decision and records the value provenance as the requesting
+/// `SetPageBox` action.
+#[must_use]
+pub fn plan_set_page_box_boundaries(
+    action: &SetPageBox,
+    target: IndirectRef,
+    ownership: &IndirectObjectEditDecision,
+    media_locator: Option<DictionaryValueLocator>,
+    crop_locator: Option<DictionaryValueLocator>,
+) -> Vec<MutationBoundary> {
+    let mut boundaries = Vec::new();
+    if action.media_box.is_some() {
+        if let Some(locator) = media_locator {
+            boundaries.push(dictionary_entry_boundary(
+                target,
+                MEDIA_BOX_KEY,
+                locator,
+                ownership,
+                action,
+            ));
+        }
+    }
+    if action.crop_box.is_some() {
+        if let Some(locator) = crop_locator {
+            boundaries.push(dictionary_entry_boundary(
+                target,
+                CROP_BOX_KEY,
+                locator,
+                ownership,
+                action,
+            ));
+        }
+    }
+    boundaries
+}
+
+/// Build one dictionary-entry boundary, deriving the operation from the locator.
+fn dictionary_entry_boundary(
+    target: IndirectRef,
+    key: &[u8],
+    locator: DictionaryValueLocator,
+    ownership: &IndirectObjectEditDecision,
+    action: &SetPageBox,
+) -> MutationBoundary {
+    let op = match locator {
+        DictionaryValueLocator::ExistingValue { .. } => DictionaryEntryOp::Replace,
+        DictionaryValueLocator::InsertionPoint { .. } => DictionaryEntryOp::Insert,
+    };
+    MutationBoundary::DictionaryEntry {
+        target,
+        key: PdfName(key.to_vec()),
+        op,
+        value_locator: locator,
+        ownership: ownership.clone(),
+        value_provenance: PlannedValueProvenance::ActionGenerated {
+            action: Action::SetPageBox(*action),
+        },
+    }
 }
 
 /// Allocation plan for a future indirect-object clone.

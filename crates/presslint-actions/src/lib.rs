@@ -5,13 +5,14 @@
 mod patch;
 
 use presslint_inventory::{Inventory, InventoryEntry};
+use presslint_pdf::PageRectangle;
 use presslint_selectors::{Selector, matches as selector_matches};
 use presslint_types::{ColorSpace, EditCapability, ObjectId};
 use serde::{Deserialize, Serialize};
 
 pub use patch::{
     DictionaryEntryOp, DictionaryValueLocator, MutationBoundary, PlannedObjectAllocation,
-    PlannedValueProvenance,
+    PlannedValueProvenance, plan_set_page_box_boundaries,
 };
 
 /// Versioned recipe document.
@@ -42,16 +43,29 @@ pub enum Action {
     SpreadText(SpreadText),
     /// Enforce a minimum vector stroke width.
     MinimumStrokeWidth(MinimumStrokeWidth),
+    /// Set `/MediaBox` and/or `/CropBox` on a leaf page dictionary.
+    ///
+    /// This is a page-dictionary action, not a content-inventory action: it is
+    /// planned through [`plan_set_page_box_boundaries`] against page-box
+    /// provenance, not through [`plan_recipe`] against an [`Inventory`]. It is a
+    /// report-only planning contract and never writes bytes.
+    SetPageBox(SetPageBox),
 }
 
 impl Action {
-    /// Return the inventory edit capability required to plan this action.
+    /// Return the inventory edit capability required to plan this action, or
+    /// `None` for actions that do not target content-inventory entries.
+    ///
+    /// [`Action::SetPageBox`] returns `None`: it edits page dictionaries rather
+    /// than inventory entries, so it is not selected through the inventory recipe
+    /// planner.
     #[must_use]
-    pub const fn required_capability(&self) -> EditCapability {
+    pub const fn required_capability(&self) -> Option<EditCapability> {
         match self {
-            Self::ConvertColor(_) => EditCapability::RewriteColorOperand,
-            Self::SpreadText(_) => EditCapability::AddTextSpreadStroke,
-            Self::MinimumStrokeWidth(_) => EditCapability::AdjustStrokeWidth,
+            Self::ConvertColor(_) => Some(EditCapability::RewriteColorOperand),
+            Self::SpreadText(_) => Some(EditCapability::AddTextSpreadStroke),
+            Self::MinimumStrokeWidth(_) => Some(EditCapability::AdjustStrokeWidth),
+            Self::SetPageBox(_) => None,
         }
     }
 }
@@ -77,6 +91,19 @@ pub struct SpreadText {
 pub struct MinimumStrokeWidth {
     /// Minimum stroke width in points.
     pub width_pt: f64,
+}
+
+/// Page-box action payload.
+///
+/// At least one of `media_box` / `crop_box` is expected to be set. The rectangle
+/// values are the requested page boundaries; normalization and geometric
+/// validation live in the writer, not in this report-only contract.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SetPageBox {
+    /// Requested `/MediaBox`, when set.
+    pub media_box: Option<PageRectangle>,
+    /// Requested `/CropBox`, when set.
+    pub crop_box: Option<PageRectangle>,
 }
 
 /// Explicit patch-plan mode.
@@ -235,7 +262,7 @@ fn plan_patch_for_action(
                 boundary,
             }))
         }
-        Action::SpreadText(_) | Action::MinimumStrokeWidth(_) => Ok(None),
+        Action::SpreadText(_) | Action::MinimumStrokeWidth(_) | Action::SetPageBox(_) => Ok(None),
     }
 }
 
@@ -267,7 +294,17 @@ pub fn plan_recipe(recipe: &Recipe, inventory: &Inventory) -> PatchPlan {
 }
 
 fn plan_step(step: &RecipeStep, inventory: &Inventory) -> ActionPlan {
-    let required = step.action.required_capability();
+    // Actions without an inventory capability (for example page-dictionary
+    // actions) are not selected through the inventory recipe planner; they emit
+    // an empty plan here and are planned through their dedicated helper instead.
+    let Some(required) = step.action.required_capability() else {
+        return ActionPlan {
+            action: step.action.clone(),
+            targets: Vec::new(),
+            patches: Vec::new(),
+            skipped: Vec::new(),
+        };
+    };
     let mut targets = Vec::new();
     let mut patches = Vec::new();
     let mut skipped = Vec::new();

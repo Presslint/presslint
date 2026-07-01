@@ -1,8 +1,21 @@
 //! Append-only incremental-update PDF writing.
 //!
 //! This crate holds the first byte-writing slice of the presslint F3 patch
-//! executor: a deterministic classic-xref *incremental append* writer. Its only
-//! current capability is a semantic **no-op**: it copies the caller's input
+//! executor: a deterministic classic-xref *incremental append* writer.
+//!
+//! [`write_incremental_revision`] is the foundational semantic **no-op**: it
+//! copies the caller's input verbatim and appends one classic incremental
+//! revision that rewrites selected uncompressed objects with caller-supplied
+//! body bytes. [`set_page_boxes_incremental`] is the first *semantic* mutation
+//! built on it: it sets `/MediaBox` and/or `/CropBox` on selected uncompressed
+//! leaf page dictionaries, reading leaf references and box provenance from
+//! [`presslint_pdf::inspect_document_page_boxes`], deciding ownership with
+//! [`presslint_pdf::decide_indirect_object_edit`], and rewriting only the edited
+//! leaf bodies before delegating xref/trailer assembly to
+//! [`write_incremental_revision`].
+//!
+//! The append mechanics prove what the semantic writer needs: it copies the
+//! caller's input
 //! verbatim as the output prefix, then appends one classic incremental revision
 //! that rewrites selected existing uncompressed indirect objects with
 //! caller-supplied body bytes, followed by a classic cross-reference table and a
@@ -26,8 +39,14 @@
 
 #![forbid(unsafe_code)]
 
+mod page_boxes;
 mod writer;
 
+pub use page_boxes::{
+    AppliedBox, DictionaryEntryWrite, EditedPage, PageBoxEdit, SetPageBoxSkipReason,
+    SetPageBoxesError, SetPageBoxesOutput, SetPageBoxesRequest, SkippedPageEdit,
+    set_page_boxes_incremental,
+};
 pub use writer::{ActiveTrailerError, DirtyObjectBytes, WriteError, write_incremental_revision};
 
 #[cfg(test)]

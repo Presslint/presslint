@@ -3,7 +3,93 @@
 ## Current State
 
 `presslint-write` is the first byte-writing crate: a deterministic classic-xref
-**incremental append** writer whose only capability is a semantic **no-op**.
+**incremental append** writer. It offers the foundational semantic **no-op**
+(`write_incremental_revision`) and the first *semantic* mutation built on it,
+`set_page_boxes_incremental`.
+
+## Semantic page-box writing (T119)
+
+### Public API
+
+- `set_page_boxes_incremental(input: &[u8], request: &SetPageBoxesRequest)
+  -> Result<SetPageBoxesOutput, SetPageBoxesError>` — sets `/MediaBox` and/or
+  `/CropBox` on selected uncompressed leaf pages and appends exactly one classic
+  incremental revision through `write_incremental_revision`.
+- `SetPageBoxesRequest { pages: Vec<PageBoxEdit> }`, where
+  `PageBoxEdit { page_index, media_box: Option<PageRectangle>,
+  crop_box: Option<PageRectangle> }`. Rectangles reuse
+  `presslint_pdf::PageRectangle`; no second rectangle type is introduced.
+- `SetPageBoxesOutput { bytes, edited: Vec<EditedPage>,
+  skipped: Vec<SkippedPageEdit> }`. `EditedPage` carries the page index, leaf
+  reference, and per-box `AppliedBox { kind, rectangle, op }` where
+  `DictionaryEntryWrite` is `Replace` or `Insert`.
+- `SetPageBoxSkipReason` (document conditions → structured skips) and
+  `SetPageBoxesError` (request/geometry/inspection/write failures).
+
+### Behavior proven
+
+- **Verbatim prefix**: `output.bytes[..input.len()] == input`; only the edited
+  leaf objects are appended (multi-page tests assert unselected leaves are never
+  rewritten).
+- **Replace vs insert**: a direct leaf entry is replaced from
+  `key_range.start .. value_range.end` (provenance from
+  `inspect_document_page_boxes`); an absent/inherited/defaulted entry is inserted
+  immediately after the leaf dictionary `<<`. Inherited boxes become explicit
+  leaf entries; ancestor `/Pages` dictionaries are never mutated.
+- **Multiple edits per body** are applied in descending start-offset order;
+  equal-start inserts are ordered so `/MediaBox` precedes `/CropBox`.
+- **Minimal serialization**: `/MediaBox [0 0 612 792]`-style literals via `f64`
+  `Display` (shortest round-trip, no exponent, no trailing zeros), with `0` for
+  negative zero. Every unrelated byte inside the leaf dictionary body is
+  preserved.
+- **Normalization/validation**: requested rectangles are ordered lower-left /
+  upper-right; non-finite, zero-area, and crop-outside-(effective/requested)-media
+  requests are hard errors (no auto-intersect). Duplicate request page indexes
+  and empty page edits are also errors.
+- **Ownership**: only a leaf enumerated exactly once whose ownership decision is
+  `InPlaceMutation` is rewritten. Ownership is decided with
+  `decide_indirect_object_edit` over the leaf's single `/Parent`; a leaf reached
+  by more than one page-tree slot (occurrence count > 1) or lacking a provable
+  `/Parent` is an `OwnershipNotProven` skip. Compressed leaves, duplicate/
+  malformed/indirect box entries, and missing pages map from the inspector's
+  own skip taxonomy.
+- **Reopen + idempotence**: output reopens through `inspect_document_access` and
+  `inspect_document_page_boxes` reports the requested boxes on edited pages; a
+  second identical append re-replaces the now-direct entry and keeps the first
+  output as a verbatim prefix.
+- **Report ordering**: `SetPageBoxesOutput::edited` is returned in ascending
+  document page-index order regardless of the order pages appear in the request;
+  a reversed multi-page request (`[1, 0]`) still reports `[0, 1]`. `skipped`
+  stays in request order. Sorting `edited` is independent of the `dirty` object
+  vector, which the append writer keys by object.
+
+### Skip reasons (unsupported shapes)
+
+`PageNotFound`, `CompressedLeafDictionary`, `OwnershipNotProven`,
+`DuplicateBoxKey`, `UnsupportedBoxValue` (e.g. indirect box value),
+`MalformedBoxValue`, `MissingEffectiveMediaBox`, `LeafUnreadable`. Because
+compressed leaves only occur behind object streams / xref streams (which the
+classic append writer rejects), the compressed skip mapping is covered by a
+focused unit test rather than an end-to-end classic-doc write.
+
+### Design notes
+
+- Leaf references, box provenance, and skip reasons are read once through
+  `presslint_pdf::inspect_document_page_boxes`; the leaf `<<` opener and
+  `/Parent` are read through `inspect_indirect_object_dictionary` /
+  `parse_indirect_reference`. No whole-document object cache is added.
+- Copy budget: one rewritten body `Vec<u8>` per edited leaf plus the full output
+  `Vec<u8>` from the append writer (owned-bytes API). Reports carry page indexes,
+  references, small rectangles, ranges, and structured reasons only — never PDF
+  source bytes, decoded streams, or page-tree dictionaries.
+
+## Append writer (no-op foundation)
+
+`write_incremental_revision` copies the caller's input verbatim as the output
+prefix, then appends one classic incremental revision that rewrites selected
+existing uncompressed indirect objects with caller-supplied body bytes. It is a
+semantic **no-op** when the bodies are byte-identical, and the byte-assembly
+substrate `set_page_boxes_incremental` builds on.
 
 ### Public API
 
@@ -85,11 +171,15 @@ failure folded into `DirtyObjectHeaderMismatch { reference, error }`.
 
 ## Deferred (future semantic writer)
 
-- Semantic dictionary editing, `SetMediaBox`/`SetPageBox`, content-operand
-  rewriting, whole-stream re-encoding, and color conversion.
+- Other page-box keys (`TrimBox`/`BleedBox`/`ArtBox`), `/Rotate` compensation,
+  and page-geometry normalization beyond rectangle ordering.
+- Private-copy cloning / `/Kids` reference rewiring for shared or unproven leaf
+  pages (currently a structured skip); editing ancestor `/Pages` dictionaries.
+- Content-operand rewriting, whole-stream re-encoding, and color conversion.
 - Xref-stream and hybrid `/XRefStm` incremental-revision support; object-stream
-  / compressed-object mutation.
-- Private-copy cloning of shared objects, object deletion, free-list repair,
-  garbage collection, encryption preservation, full rewrite, and PDF repair.
+  / compressed-object (type-2) mutation.
+- Object deletion, free-list repair, garbage collection, encryption
+  preservation, full rewrite, and PDF repair.
 - Plan-to-writer wiring from `presslint-actions` (the `MutationBoundary` /
-  `IncrementalRevisionPlan` bridge).
+  `IncrementalRevisionPlan` bridge); `set_page_boxes_incremental` and the
+  `SetPageBox` planner currently re-derive boundaries independently.

@@ -90,6 +90,27 @@
   `IncrementalRevisionPlan` / dirty-object revision-plan contracts plus
   `docs/incremental-update-contract.md`, still contract-only and with no byte
   mutation until an explicit go-ahead.
+- T119 added a report-only `Action::SetPageBox(SetPageBox)` variant.
+  `SetPageBox { media_box: Option<PageRectangle>, crop_box: Option<PageRectangle> }`
+  reuses `presslint_pdf::PageRectangle`. It is a page-dictionary action, not a
+  content-inventory action, so `Action::required_capability` now returns
+  `Option<EditCapability>` (`None` for `SetPageBox`) and `plan_step` emits an
+  empty plan for capability-less actions — the inventory recipe planner does not
+  select page-dictionary edits.
+- `plan_set_page_box_boundaries(action, target, ownership, media_locator,
+  crop_locator) -> Vec<MutationBoundary>` plans `dictionary_entry` boundaries:
+  one per requested-and-located box (`MediaBox` before `CropBox`). Keys are
+  stored as slashless `PdfName` bytes, the op is derived from the locator
+  (`existing_value` → `replace`, `insertion_point` → `insert`), the caller's
+  ownership decision is recorded verbatim, and the value provenance is set to
+  the `SetPageBox` action. It is planning metadata only: it never calls
+  `presslint-write`, reads PDF bytes, or gates on the disposition (that is the
+  writer's responsibility). The byte writer lives in
+  `presslint-write::set_page_boxes_incremental`.
+- The `SetPageBox` action JSON shape is locked by
+  `action_variants_have_stable_json_shape`; planner behavior (replace+insert,
+  request/locator gating, verbatim ownership) is covered by `set_page_box`
+  tests in `src/tests/patch_boundary.rs`.
 
 ## Follow-Ups
 

@@ -6,6 +6,7 @@ mod patch_boundary;
 use std::fmt::Debug;
 
 use presslint_inventory::{Inventory, InventoryEntry};
+use presslint_pdf::PageRectangle;
 use presslint_selectors::{Predicate, Selector};
 use presslint_types::{
     ByteRange, ColorObservation, ColorSpace, ColorUsage, ContentScope, EditCapability, ObjectId,
@@ -16,7 +17,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use self::json::{Json, JsonSerializer};
 use super::{
     Action, ActionPlan, ConvertColor, MinimumStrokeWidth, PatchPlan, PatchPlanMode, Recipe,
-    RecipeStep, SkipReason, SkippedTarget, SpreadText, plan_recipe,
+    RecipeStep, SetPageBox, SkipReason, SkippedTarget, SpreadText, plan_recipe,
 };
 
 fn object_id(sequence: u32) -> ObjectId {
@@ -553,6 +554,30 @@ fn action_variants_have_stable_json_shape() {
         Json::object([
             ("action", Json::string("minimum_stroke_width")),
             ("width_pt", Json::F64(0.5)),
+        ]),
+    );
+    assert_json_round_trip(
+        &Action::SetPageBox(SetPageBox {
+            media_box: Some(PageRectangle {
+                llx: 0.0,
+                lly: 0.0,
+                urx: 612.0,
+                ury: 792.0,
+            }),
+            crop_box: None,
+        }),
+        Json::object([
+            ("action", Json::string("set_page_box")),
+            (
+                "media_box",
+                Json::object([
+                    ("llx", Json::F64(0.0)),
+                    ("lly", Json::F64(0.0)),
+                    ("urx", Json::F64(612.0)),
+                    ("ury", Json::F64(792.0)),
+                ]),
+            ),
+            ("crop_box", Json::Null),
         ]),
     );
 }
