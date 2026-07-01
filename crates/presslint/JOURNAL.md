@@ -1,5 +1,35 @@
 # presslint Journal
 
+## T106 - Document-Level Selector Query Over PDF Inventory
+
+- Added `query_pdf_inventory(input, selector, max_decoded_stream_bytes)` in the
+  new `pdf_query.rs` module: the first end-to-end "query a real PDF" path. It
+  reuses `build_pdf_inventory` verbatim for the neutral document/page path, then
+  scans the merged, page-ordered `report.inventory.entries` once, calling the
+  already-benchmarked `presslint_selectors::matches` per entry.
+- New public report types `PdfInventoryQuery { report, matches }` and
+  `PdfInventoryMatch { entry_index, page_index }`. `entry_index` is a stable
+  index into `report.inventory.entries`; `page_index` is the matched entry's own
+  `entry.id.page` (the zero-based document-order ordinal threaded by
+  `build_pdf_inventory`). Both derive `Debug, Clone, PartialEq, Serialize,
+  Deserialize`; `PdfInventoryMatch` additionally derives `Copy, Eq`. The query
+  result stays `PartialEq`-only because `PdfInventory` carries float
+  bounds/components and is not `Eq`.
+- Index-not-clone contract: matched entries are never cloned into the result.
+  `matches` holds only `PdfInventoryMatch { usize, PageIndex }` (both `Copy`) and
+  the full report is moved into `PdfInventoryQuery.report` exactly once. No
+  source bytes, decoded streams, or entry payloads are copied by the query.
+- The query is a strict superset (build, then select), so top-level failures
+  surface as the same `PdfInventoryError` as `build_pdf_inventory`, unchanged.
+  Matches are pushed in ascending `entry_index` order.
+- No new abstraction beyond the query result pair; no new selector predicate, no
+  JSON parsing, no CLI. `build_pdf_inventory` / `build_classic_pdf_inventory`
+  behavior and serde shapes are untouched.
+- No new benchmark target: this slice is a build-once + scan-once composition
+  with no new hot loop; selector-matching throughput is already covered by the
+  `presslint-selectors` Criterion bench. Stated here per the performance note
+  rather than adding a bench.
+
 ## T105 - Multi-Stream Page Content Inventory
 
 - `build_page_inventory` now inventories pages with multiple located content

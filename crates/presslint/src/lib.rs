@@ -17,6 +17,7 @@
 mod document_inventory;
 mod page_content;
 mod pdf_inventory;
+mod pdf_query;
 
 pub use presslint_types::*;
 
@@ -29,6 +30,7 @@ pub use pdf_inventory::{
     PdfInventory, PdfInventoryError, PdfInventoryPage, PdfInventoryPageResult,
     PdfInventoryRejection, PdfInventorySkip, build_pdf_inventory,
 };
+pub use pdf_query::{PdfInventoryMatch, PdfInventoryQuery, query_pdf_inventory};
 
 pub use presslint_actions as actions;
 pub use presslint_color as color;
