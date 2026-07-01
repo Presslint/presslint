@@ -1,0 +1,15 @@
+[package]
+name = "presslint-write"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Append-only incremental-update PDF writing for presslint."
+
+[dependencies]
+presslint-pdf.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true
