@@ -2,9 +2,14 @@
 //!
 //! This crate provides byte-preserving structural inspection for PDF sources:
 //! source classification, classic xref parsing, single-section xref-stream
-//! decoding, indirect object lookup, stream extent access, page-tree traversal,
-//! and small planning contracts used by higher-level crates. The APIs carry
-//! structural metadata and byte ranges rather than retaining source payloads.
+//! decoding, a backend-neutral [`ObjectLookup`] over either backend, object
+//! resolution, stream extent access, page-tree traversal, and the
+//! page-content-target/extent path threaded through the same lookup, plus small
+//! planning contracts used by higher-level crates. Classic helpers are preserved
+//! as thin wrappers over their neutral `_with_lookup` variants, so both
+//! classic-xref and single-section xref-stream documents locate page content
+//! stream byte extents through one API. The APIs carry structural metadata and
+//! byte ranges rather than retaining source payloads.
 
 #![forbid(unsafe_code)]
 
@@ -66,7 +71,8 @@ pub use catalog_pages::{
 pub use classic_xref::inspect_classic_xref_table;
 pub use content_stream_extent::{
     ContentStreamDataExtentInspection, ContentStreamDataExtentInspectionError,
-    ContentStreamDataExtentInspectionRejection, inspect_content_stream_data_extent,
+    ContentStreamDataExtentInspectionRejection, LookupIndirectLengthRejection,
+    inspect_content_stream_data_extent, inspect_content_stream_data_extent_with_lookup,
 };
 pub use content_stream_filter::{
     ContentStreamFilterClassification, ContentStreamFilterClassificationError,
@@ -97,7 +103,7 @@ pub use document_access::{
 pub use document_page_content_extents::{
     DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
     DocumentPageContentExtentsInspection, DocumentPageContentExtentsInspectionError,
-    inspect_document_page_content_extents,
+    inspect_document_page_content_extents, inspect_document_page_content_extents_with_lookup,
 };
 pub use indirect_reference::{
     IndirectReferenceByteRange, IndirectReferenceInspection, IndirectReferenceInspectionError,
@@ -140,10 +146,11 @@ pub use object_stream::{
 };
 pub use page_content_extents::{
     PageContentExtentInspection, PageContentExtentsInspection, inspect_page_content_extents,
+    inspect_page_content_extents_with_lookup,
 };
 pub use page_content_targets::{
     PageContentTargetInspection, PageContentTargetsInspection, SkippedPageContentTargetReason,
-    inspect_page_content_targets,
+    inspect_page_content_targets, inspect_page_content_targets_with_lookup,
 };
 pub use page_contents::{
     PageContentReference, PageContentsInspection, PageContentsInspectionError,

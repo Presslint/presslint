@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ClassicXrefTableInspection, ContentStreamDataExtentInspection,
-    ContentStreamDataExtentInspectionError, PageContentReference, PageContentTargetInspection,
-    PageContentTargetsInspection, SkippedPageContentTargetReason,
-    inspect_content_stream_data_extent,
+    ContentStreamDataExtentInspectionError, ObjectLookup, PageContentReference,
+    PageContentTargetInspection, PageContentTargetsInspection, SkippedPageContentTargetReason,
+    inspect_content_stream_data_extent_with_lookup,
 };
 
 /// Locate-only report for the ordered content-stream data byte extents of a
@@ -71,15 +71,33 @@ pub enum PageContentExtentInspection {
     },
 }
 
-/// Locate the ordered content-stream data byte extents for a leaf page.
+/// Locate the ordered content-stream data byte extents for a leaf page through
+/// a classic xref inspection.
+///
+/// This is a thin classic wrapper over
+/// [`inspect_page_content_extents_with_lookup`]: it delegates through
+/// [`ObjectLookup::ClassicXref`] and therefore keeps every located extent,
+/// delegated failure, and carried-through skip byte-identical to the
+/// pre-`_with_lookup` behavior.
+#[must_use]
+pub fn inspect_page_content_extents(
+    input: &[u8],
+    xref: &ClassicXrefTableInspection,
+    targets: &PageContentTargetsInspection,
+) -> PageContentExtentsInspection {
+    inspect_page_content_extents_with_lookup(input, ObjectLookup::ClassicXref(xref), targets)
+}
+
+/// Locate the ordered content-stream data byte extents for a leaf page through
+/// any [`ObjectLookup`] backend.
 ///
 /// The helper performs a deterministic locate-only pass over `targets.entries`
 /// in source order, producing exactly one source-ordered result per target and
 /// never reordering or deduplicating. Each
 /// [`PageContentTargetInspection::Resolved`] target is delegated to
-/// [`inspect_content_stream_data_extent`] at its resolved `object_byte_offset`
-/// with `Some(xref)`: on success the entry carries the original
-/// [`PageContentReference`], the resolved offset, and the delegated
+/// [`inspect_content_stream_data_extent_with_lookup`] at its resolved
+/// `object_byte_offset` with `Some(lookup)`: on success the entry carries the
+/// original [`PageContentReference`], the resolved offset, and the delegated
 /// [`ContentStreamDataExtentInspection`]; on failure the entry preserves the
 /// underlying [`ContentStreamDataExtentInspectionError`] and the resolved offset
 /// without aborting the remaining targets. Each
@@ -88,22 +106,22 @@ pub enum PageContentExtentInspection {
 /// [`SkippedPageContentTargetReason`], without attempting extent inspection.
 ///
 /// For a given input the per-target located extent equals byte-for-byte what
-/// [`inspect_content_stream_data_extent`] returns for the same resolved object
-/// offset and xref table; this helper reimplements no `/Length`,
+/// [`inspect_content_stream_data_extent_with_lookup`] returns for the same
+/// resolved object offset and backend; this helper reimplements no `/Length`,
 /// indirect-resolution, or `endstream` logic and only iterates targets and
 /// dispatches. It reads, copies, slices, decodes, concatenates, and tokenizes no
 /// stream-data bytes, builds no concatenated content buffer, follows no `/Prev`,
 /// parses no xref or object streams, and builds no object map or cache.
 #[must_use]
-pub fn inspect_page_content_extents(
+pub fn inspect_page_content_extents_with_lookup(
     input: &[u8],
-    xref: &ClassicXrefTableInspection,
+    lookup: ObjectLookup<'_>,
     targets: &PageContentTargetsInspection,
 ) -> PageContentExtentsInspection {
     let entries = targets
         .entries
         .iter()
-        .map(|target| locate_target_extent(input, xref, target))
+        .map(|target| locate_target_extent(input, lookup, target))
         .collect();
 
     PageContentExtentsInspection {
@@ -114,7 +132,7 @@ pub fn inspect_page_content_extents(
 
 fn locate_target_extent(
     input: &[u8],
-    xref: &ClassicXrefTableInspection,
+    lookup: ObjectLookup<'_>,
     target: &PageContentTargetInspection,
 ) -> PageContentExtentInspection {
     match target {
@@ -122,7 +140,11 @@ fn locate_target_extent(
             content_reference,
             object_byte_offset,
             ..
-        } => match inspect_content_stream_data_extent(input, Some(xref), *object_byte_offset) {
+        } => match inspect_content_stream_data_extent_with_lookup(
+            input,
+            Some(lookup),
+            *object_byte_offset,
+        ) {
             Ok(extent) => PageContentExtentInspection::Located {
                 content_reference: *content_reference,
                 object_byte_offset: *object_byte_offset,

@@ -2,18 +2,46 @@ mod serde_harness;
 
 use serde_harness::{from_serde_value, serde_value};
 
+use super::{xref_stream_section, xref_stream_uncompressed};
 use crate::{
     ClassicXrefEntry, ClassicXrefEntryState, ClassicXrefSubsection, ClassicXrefTableInspection,
     ContentStreamDataExtentInspection, ContentStreamDataExtentInspectionError,
     ContentStreamDataExtentInspectionRejection, ContentStreamStartInspectionRejection,
     DictionaryValueKind, DirectLengthContentStreamDataExtentInspectionRejection,
     IndirectLengthContentStreamDataExtentInspectionRejection, IndirectRef,
-    PageContentTargetInspection, StreamEolIssue, inspect_catalog_pages, inspect_classic_xref_table,
+    LookupIndirectLengthRejection, ObjectLookup, ObjectLookupLocation, ObjectResolutionRejection,
+    PageContentTargetInspection, StreamEolIssue, XrefStreamEntry, XrefStreamEntryRecord,
+    XrefStreamSection, inspect_catalog_pages, inspect_classic_xref_table,
     inspect_classic_xref_trailer_root, inspect_content_stream_data_extent,
+    inspect_content_stream_data_extent_with_lookup,
     inspect_direct_length_content_stream_data_extent,
     inspect_indirect_length_content_stream_data_extent, inspect_page_content_targets,
     inspect_page_contents, inspect_page_tree_kids, inspect_page_tree_reference_target,
 };
+
+/// Build an uncompressed-entry cross-reference-stream section pointing each
+/// object number at its byte offset, sorted as `locate_xref_object` requires.
+fn uncompressed_section(entries: &[(usize, usize)]) -> XrefStreamSection {
+    let mut entries: Vec<_> = entries
+        .iter()
+        .map(|&(object_number, byte_offset)| XrefStreamEntry {
+            object_number,
+            record: xref_stream_uncompressed(byte_offset),
+        })
+        .collect();
+    entries.sort_by_key(|entry| entry.object_number);
+    xref_stream_section(entries)
+}
+
+/// Byte offset recorded for an object number in the classic indirect fixture.
+fn classic_entry_offset(xref: &ClassicXrefTableInspection, object_number: u32) -> usize {
+    xref.subsections[0]
+        .entries
+        .iter()
+        .find(|entry| entry.object_number == object_number)
+        .expect("entry present")
+        .byte_offset
+}
 
 struct IndirectLengthFixture {
     source: Vec<u8>,
@@ -411,4 +439,286 @@ fn content_stream_extent_composes_from_resolved_page_content_targets() {
             ..indirect_extent.stream_data_end_byte_offset()],
         b"LMNOPQR"
     );
+}
+
+#[test]
+fn lookup_locates_direct_length_via_xref_stream_section() {
+    let source = b"5 0 obj\n<< /Length 12 >>\nstream\nhello world!\nendstream\nendobj\n";
+    let section = uncompressed_section(&[(5, 0)]);
+
+    let report = inspect_content_stream_data_extent_with_lookup(
+        source,
+        Some(ObjectLookup::XrefStreamSection(&section)),
+        0,
+    )
+    .expect("direct-length extent should locate through xref-stream lookup");
+
+    assert!(matches!(
+        report,
+        ContentStreamDataExtentInspection::DirectLength(_)
+    ));
+    assert_eq!(report.length(), 12);
+    assert_eq!(
+        &source[report.stream_data_start_byte_offset()..report.stream_data_end_byte_offset()],
+        b"hello world!"
+    );
+}
+
+#[test]
+fn lookup_locates_indirect_length_via_xref_stream_section() {
+    let fixture = indirect_length_fixture(b"ABCDEFG", b"7");
+    let length_offset = classic_entry_offset(&fixture.xref_table, 8);
+    let section = uncompressed_section(&[(5, fixture.content_offset), (8, length_offset)]);
+
+    let report = inspect_content_stream_data_extent_with_lookup(
+        &fixture.source,
+        Some(ObjectLookup::XrefStreamSection(&section)),
+        fixture.content_offset,
+    )
+    .expect("indirect-length extent should locate through xref-stream lookup");
+
+    assert!(matches!(
+        report,
+        ContentStreamDataExtentInspection::IndirectLength(_)
+    ));
+    if let ContentStreamDataExtentInspection::IndirectLength(indirect) = &report {
+        assert_eq!(indirect.length, 7);
+        assert_eq!(indirect.length_resolution.value, 7);
+        assert_eq!(
+            indirect.length_resolution.reference,
+            IndirectRef {
+                object_number: 8,
+                generation: 0,
+            }
+        );
+        assert_eq!(indirect.length_resolution.object_byte_offset, length_offset);
+    }
+    assert_eq!(
+        &fixture.source
+            [report.stream_data_start_byte_offset()..report.stream_data_end_byte_offset()],
+        b"ABCDEFG"
+    );
+}
+
+#[test]
+fn lookup_indirect_length_matches_classic_backend_byte_for_byte() {
+    let fixture = indirect_length_fixture(b"ABCDEFG", b"7");
+    let length_offset = classic_entry_offset(&fixture.xref_table, 8);
+    let section = uncompressed_section(&[(5, fixture.content_offset), (8, length_offset)]);
+
+    let classic_wrapper = inspect_content_stream_data_extent(
+        &fixture.source,
+        Some(&fixture.xref_table),
+        fixture.content_offset,
+    )
+    .expect("classic wrapper should locate");
+    let classic_lookup = inspect_content_stream_data_extent_with_lookup(
+        &fixture.source,
+        Some(ObjectLookup::ClassicXref(&fixture.xref_table)),
+        fixture.content_offset,
+    )
+    .expect("classic lookup should locate");
+    let stream_lookup = inspect_content_stream_data_extent_with_lookup(
+        &fixture.source,
+        Some(ObjectLookup::XrefStreamSection(&section)),
+        fixture.content_offset,
+    )
+    .expect("xref-stream lookup should locate");
+
+    assert_eq!(classic_wrapper, classic_lookup);
+    assert_eq!(classic_wrapper, stream_lookup);
+}
+
+#[test]
+fn lookup_indirect_length_without_backend_rejects() {
+    let fixture = indirect_length_fixture(b"ABCDEFG", b"7");
+
+    let error = inspect_content_stream_data_extent_with_lookup(
+        &fixture.source,
+        None,
+        fixture.content_offset,
+    )
+    .expect_err("indirect length without backend should reject");
+
+    assert_eq!(
+        error.reason,
+        ContentStreamDataExtentInspectionRejection::IndirectLengthRequiresXrefTable
+    );
+}
+
+#[test]
+fn lookup_indirect_length_reports_compressed_length_object_as_structured_failure() {
+    let fixture = indirect_length_fixture(b"ABCDEFG", b"7");
+    let section = xref_stream_section(vec![
+        XrefStreamEntry {
+            object_number: 5,
+            record: xref_stream_uncompressed(fixture.content_offset),
+        },
+        XrefStreamEntry {
+            object_number: 8,
+            record: XrefStreamEntryRecord::Compressed {
+                object_stream_number: 9,
+                index_within_object_stream: 1,
+            },
+        },
+    ]);
+
+    let error = inspect_content_stream_data_extent_with_lookup(
+        &fixture.source,
+        Some(ObjectLookup::XrefStreamSection(&section)),
+        fixture.content_offset,
+    )
+    .expect_err("compressed /Length object should reject");
+
+    assert_eq!(
+        error.reason,
+        ContentStreamDataExtentInspectionRejection::LookupIndirectLength {
+            lookup_indirect_length_reason: LookupIndirectLengthRejection::ObjectResolution {
+                object_resolution_reason:
+                    ObjectResolutionRejection::UnsupportedCompressedXrefStreamEntry {
+                        object_number: 8,
+                        object_stream_number: 9,
+                        index_within_object_stream: 1,
+                    },
+            },
+        }
+    );
+}
+
+#[test]
+fn lookup_indirect_length_reports_missing_length_object_as_structured_failure() {
+    let fixture = indirect_length_fixture(b"ABCDEFG", b"7");
+    let section = uncompressed_section(&[(5, fixture.content_offset)]);
+
+    let error = inspect_content_stream_data_extent_with_lookup(
+        &fixture.source,
+        Some(ObjectLookup::XrefStreamSection(&section)),
+        fixture.content_offset,
+    )
+    .expect_err("absent /Length object should reject");
+
+    assert_eq!(
+        error.reason,
+        ContentStreamDataExtentInspectionRejection::LookupIndirectLength {
+            lookup_indirect_length_reason: LookupIndirectLengthRejection::ObjectResolution {
+                object_resolution_reason: ObjectResolutionRejection::UnresolvedXrefLocation {
+                    location: ObjectLookupLocation::XrefStreamNotFound { object_number: 8 },
+                },
+            },
+        }
+    );
+}
+
+#[test]
+fn lookup_indirect_length_reports_generation_mismatch_as_structured_failure() {
+    let fixture = indirect_length_fixture(b"ABCDEFG", b"7");
+    let length_offset = classic_entry_offset(&fixture.xref_table, 8);
+    let section = xref_stream_section(vec![
+        XrefStreamEntry {
+            object_number: 5,
+            record: xref_stream_uncompressed(fixture.content_offset),
+        },
+        XrefStreamEntry {
+            object_number: 8,
+            record: XrefStreamEntryRecord::Uncompressed {
+                byte_offset: length_offset,
+                generation: 1,
+            },
+        },
+    ]);
+
+    let error = inspect_content_stream_data_extent_with_lookup(
+        &fixture.source,
+        Some(ObjectLookup::XrefStreamSection(&section)),
+        fixture.content_offset,
+    )
+    .expect_err("generation-mismatched /Length object should reject");
+
+    assert_eq!(
+        error.reason,
+        ContentStreamDataExtentInspectionRejection::LookupIndirectLength {
+            lookup_indirect_length_reason: LookupIndirectLengthRejection::ObjectResolution {
+                object_resolution_reason: ObjectResolutionRejection::GenerationMismatch {
+                    requested_generation: 0,
+                    xref_generation: 1,
+                },
+            },
+        }
+    );
+}
+
+#[test]
+fn lookup_indirect_length_reports_malformed_and_non_integer_length_bodies() {
+    let malformed = indirect_length_fixture(b"ABCDEFG", b"1.0");
+    let malformed_offset = classic_entry_offset(&malformed.xref_table, 8);
+    let malformed_section =
+        uncompressed_section(&[(5, malformed.content_offset), (8, malformed_offset)]);
+    let malformed_error = inspect_content_stream_data_extent_with_lookup(
+        &malformed.source,
+        Some(ObjectLookup::XrefStreamSection(&malformed_section)),
+        malformed.content_offset,
+    )
+    .expect_err("malformed integer /Length body should reject");
+    assert_eq!(
+        malformed_error.reason,
+        ContentStreamDataExtentInspectionRejection::LookupIndirectLength {
+            lookup_indirect_length_reason: LookupIndirectLengthRejection::MalformedInteger,
+        }
+    );
+
+    let non_integer = indirect_length_fixture(b"ABCDEFG", b"/Seven");
+    let non_integer_offset = classic_entry_offset(&non_integer.xref_table, 8);
+    let non_integer_section =
+        uncompressed_section(&[(5, non_integer.content_offset), (8, non_integer_offset)]);
+    let non_integer_error = inspect_content_stream_data_extent_with_lookup(
+        &non_integer.source,
+        Some(ObjectLookup::XrefStreamSection(&non_integer_section)),
+        non_integer.content_offset,
+    )
+    .expect_err("non-integer /Length body should reject");
+    assert!(matches!(
+        non_integer_error.reason,
+        ContentStreamDataExtentInspectionRejection::LookupIndirectLength {
+            lookup_indirect_length_reason: LookupIndirectLengthRejection::NonIntegerBody { .. },
+        }
+    ));
+}
+
+#[test]
+fn lookup_indirect_length_reports_out_of_bounds_stream_data_end() {
+    let fixture = indirect_length_fixture(b"ABCDEFG", b"99");
+    let length_offset = classic_entry_offset(&fixture.xref_table, 8);
+    let section = uncompressed_section(&[(5, fixture.content_offset), (8, length_offset)]);
+
+    let error = inspect_content_stream_data_extent_with_lookup(
+        &fixture.source,
+        Some(ObjectLookup::XrefStreamSection(&section)),
+        fixture.content_offset,
+    )
+    .expect_err("over-long /Length should reject");
+
+    assert_eq!(
+        error.reason,
+        ContentStreamDataExtentInspectionRejection::LookupIndirectLength {
+            lookup_indirect_length_reason: LookupIndirectLengthRejection::StreamDataEndOutOfBounds,
+        }
+    );
+}
+
+#[test]
+fn lookup_indirect_length_rejection_serde_round_trips() {
+    let fixture = indirect_length_fixture(b"ABCDEFG", b"7");
+    let section = uncompressed_section(&[(5, fixture.content_offset)]);
+
+    let error = inspect_content_stream_data_extent_with_lookup(
+        &fixture.source,
+        Some(ObjectLookup::XrefStreamSection(&section)),
+        fixture.content_offset,
+    )
+    .expect_err("absent /Length object should reject");
+
+    let serialized = serde_value(&error).expect("lookup rejection should serialize");
+    let round_tripped: ContentStreamDataExtentInspectionError =
+        from_serde_value(serialized).expect("lookup rejection should deserialize");
+    assert_eq!(round_tripped, error);
 }

@@ -1,10 +1,15 @@
-use super::{classic_entry, classic_inspection, classic_subsection};
+use super::{
+    classic_entry, classic_inspection, classic_subsection, xref_stream_entry, xref_stream_section,
+    xref_stream_uncompressed,
+};
 
 use crate::{
     ClassicXrefAmbiguousObjectEntry, ClassicXrefEntryState, ClassicXrefObjectLocation,
-    PageContentTargetInspection, SkippedPageContentTargetReason, inspect_catalog_pages,
+    ObjectLookup, ObjectLookupLocation, PageContentTargetInspection,
+    SkippedPageContentTargetReason, XrefStreamEntryRecord, inspect_catalog_pages,
     inspect_classic_xref_table, inspect_classic_xref_trailer_root, inspect_page_content_targets,
-    inspect_page_contents, inspect_page_tree_kids, inspect_page_tree_reference_target,
+    inspect_page_content_targets_with_lookup, inspect_page_contents, inspect_page_tree_kids,
+    inspect_page_tree_reference_target,
 };
 
 #[test]
@@ -176,6 +181,140 @@ fn page_content_targets_reports_free_not_found_and_ambiguous_xref_results() {
                 },
             },
         ]
+    );
+}
+
+#[test]
+fn page_content_targets_with_lookup_resolves_through_xref_stream_section() {
+    let source = b"4 0 obj\n<< /Contents [ 5 0 R 6 0 R ] >>\nendobj\n";
+    let contents = inspect_page_contents(source, 0).expect("contents should inspect");
+    let section = xref_stream_section(vec![
+        xref_stream_entry(5, xref_stream_uncompressed(500)),
+        xref_stream_entry(6, xref_stream_uncompressed(600)),
+    ]);
+
+    let report = inspect_page_content_targets_with_lookup(
+        source,
+        ObjectLookup::XrefStreamSection(&section),
+        &contents,
+    );
+
+    assert_eq!(
+        report.entries,
+        vec![
+            PageContentTargetInspection::Resolved {
+                content_reference: contents.contents[0],
+                object_byte_offset: 500,
+                xref_generation: 0,
+            },
+            PageContentTargetInspection::Resolved {
+                content_reference: contents.contents[1],
+                object_byte_offset: 600,
+                xref_generation: 0,
+            },
+        ]
+    );
+}
+
+#[test]
+fn page_content_targets_classic_wrapper_equals_classic_lookup() {
+    let source = b"4 0 obj\n<< /Contents [ 5 0 R 6 0 R ] >>\nendobj\n";
+    let contents = inspect_page_contents(source, 0).expect("contents should inspect");
+    let xref = classic_inspection(vec![classic_subsection(
+        5,
+        vec![
+            classic_entry(5, 0, 500, ClassicXrefEntryState::InUse),
+            classic_entry(6, 0, 0, ClassicXrefEntryState::Free),
+        ],
+    )]);
+
+    let wrapper = inspect_page_content_targets(source, &xref, &contents);
+    let lookup = inspect_page_content_targets_with_lookup(
+        source,
+        ObjectLookup::ClassicXref(&xref),
+        &contents,
+    );
+
+    assert_eq!(wrapper, lookup);
+}
+
+#[test]
+fn page_content_targets_with_lookup_reports_unresolved_and_compressed_xref_stream_entries() {
+    let source = b"4 0 obj\n<< /Contents [ 5 0 R 6 0 R 7 0 R ] >>\nendobj\n";
+    let contents = inspect_page_contents(source, 0).expect("contents should inspect");
+    let section = xref_stream_section(vec![
+        xref_stream_entry(5, xref_stream_uncompressed(500)),
+        xref_stream_entry(
+            7,
+            XrefStreamEntryRecord::Compressed {
+                object_stream_number: 9,
+                index_within_object_stream: 2,
+            },
+        ),
+    ]);
+
+    let report = inspect_page_content_targets_with_lookup(
+        source,
+        ObjectLookup::XrefStreamSection(&section),
+        &contents,
+    );
+
+    assert_eq!(
+        report.entries,
+        vec![
+            PageContentTargetInspection::Resolved {
+                content_reference: contents.contents[0],
+                object_byte_offset: 500,
+                xref_generation: 0,
+            },
+            PageContentTargetInspection::Skipped {
+                content_reference: contents.contents[1],
+                reason: SkippedPageContentTargetReason::UnresolvedLookupLocation {
+                    location: ObjectLookupLocation::XrefStreamNotFound { object_number: 6 },
+                },
+            },
+            PageContentTargetInspection::Skipped {
+                content_reference: contents.contents[2],
+                reason: SkippedPageContentTargetReason::UnresolvedLookupLocation {
+                    location: ObjectLookupLocation::XrefStreamCompressed {
+                        object_number: 7,
+                        object_stream_number: 9,
+                        index_within_object_stream: 2,
+                    },
+                },
+            },
+        ]
+    );
+}
+
+#[test]
+fn page_content_targets_with_lookup_reports_generation_mismatch_over_xref_stream() {
+    let source = b"4 0 obj\n<< /Contents 5 0 R >>\nendobj\n";
+    let contents = inspect_page_contents(source, 0).expect("contents should inspect");
+    let section = xref_stream_section(vec![xref_stream_entry(
+        5,
+        XrefStreamEntryRecord::Uncompressed {
+            byte_offset: 500,
+            generation: 1,
+        },
+    )]);
+
+    let report = inspect_page_content_targets_with_lookup(
+        source,
+        ObjectLookup::XrefStreamSection(&section),
+        &contents,
+    );
+
+    assert_eq!(
+        report.entries,
+        vec![PageContentTargetInspection::Skipped {
+            content_reference: contents.contents[0],
+            reason: SkippedPageContentTargetReason::GenerationMismatch {
+                requested_generation: 0,
+                xref_generation: 1,
+                object_byte_offset: 500,
+            },
+        }]
     );
 }
 

@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ClassicXrefTableInspection, PageContentExtentsInspection, PageContentTargetsInspection,
-    PageContentsInspection, PageContentsInspectionError, PageTreeLeaf, PageTreeLeavesInspection,
-    PageTreeLeavesInspectionError, inspect_page_content_extents, inspect_page_content_targets,
-    inspect_page_contents, inspect_page_tree_leaves,
+    ClassicXrefTableInspection, ObjectLookup, PageContentExtentsInspection,
+    PageContentTargetsInspection, PageContentsInspection, PageContentsInspectionError,
+    PageTreeLeaf, PageTreeLeavesInspection, PageTreeLeavesInspectionError,
+    inspect_page_content_extents_with_lookup, inspect_page_content_targets_with_lookup,
+    inspect_page_contents, inspect_page_tree_leaves_with_lookup,
 };
 
 /// Document-order locate-only report for page content-stream data extents.
@@ -104,26 +105,13 @@ pub struct DocumentPageContentExtentsInspectionError {
 }
 
 /// Inspect document-ordered page content-stream data extents from a page-tree
-/// root.
+/// root through a classic xref inspection.
 ///
-/// The helper first delegates to [`inspect_page_tree_leaves`]. If root leaf
-/// enumeration fails, that delegated failure is returned as the only top-level
-/// error. For each enumerated [`PageTreeLeaf`] in document order, it delegates
-/// to [`inspect_page_contents`], [`inspect_page_content_targets`], and
-/// [`inspect_page_content_extents`] in that order. A `/Contents` inspection
-/// failure is recorded as a structured per-page result and does not stop later
-/// leaves from being processed.
-///
-/// Skipped leaf-tree diagnostics and truncation markers remain in the delegated
-/// [`PageTreeLeavesInspection`] carried by the report. This helper does not
-/// reinterpret, promote, or drop them, and it reimplements no page-tree
-/// traversal, `/Contents` parsing, xref target resolution, `/Length` parsing, or
-/// `endstream` validation.
-///
-/// It performs no filesystem I/O, stream decoding, stream concatenation,
-/// content tokenization, resource inspection, xref stream parsing, object stream
-/// parsing, `/Prev` traversal, cache construction, object-map construction, or
-/// mutation.
+/// This is a thin classic wrapper over
+/// [`inspect_document_page_content_extents_with_lookup`]: it delegates through
+/// [`ObjectLookup::ClassicXref`] and therefore keeps the leaf enumeration, the
+/// per-page `/Contents`/target/extent results, and every error byte-identical to
+/// the pre-`_with_lookup` behavior.
 ///
 /// # Errors
 ///
@@ -134,13 +122,50 @@ pub fn inspect_document_page_content_extents(
     xref: &ClassicXrefTableInspection,
     root_node_object_offset: usize,
 ) -> Result<DocumentPageContentExtentsInspection, DocumentPageContentExtentsInspectionError> {
-    let leaves =
-        inspect_page_tree_leaves(input, xref, root_node_object_offset).map_err(|error| {
-            DocumentPageContentExtentsInspectionError {
-                root_node_byte_offset: root_node_object_offset,
-                byte_len: input.len(),
-                error,
-            }
+    inspect_document_page_content_extents_with_lookup(
+        input,
+        ObjectLookup::ClassicXref(xref),
+        root_node_object_offset,
+    )
+}
+
+/// Inspect document-ordered page content-stream data extents from a page-tree
+/// root through any [`ObjectLookup`] backend.
+///
+/// The helper first delegates to [`inspect_page_tree_leaves_with_lookup`]. If
+/// root leaf enumeration fails, that delegated failure is returned as the only
+/// top-level error. For each enumerated [`PageTreeLeaf`] in document order, it
+/// delegates to [`inspect_page_contents`],
+/// [`inspect_page_content_targets_with_lookup`], and
+/// [`inspect_page_content_extents_with_lookup`] in that order, threading the same
+/// backend through target resolution and extent location. A `/Contents`
+/// inspection failure is recorded as a structured per-page result and does not
+/// stop later leaves from being processed.
+///
+/// Skipped leaf-tree diagnostics and truncation markers remain in the delegated
+/// [`PageTreeLeavesInspection`] carried by the report. This helper does not
+/// reinterpret, promote, or drop them, and it reimplements no page-tree
+/// traversal, `/Contents` parsing, xref target resolution, `/Length` parsing, or
+/// `endstream` validation.
+///
+/// It performs no filesystem I/O, stream decoding, stream concatenation,
+/// content tokenization, resource inspection, object stream parsing, `/Prev`
+/// traversal, cache construction, object-map construction, or mutation.
+///
+/// # Errors
+///
+/// Returns [`DocumentPageContentExtentsInspectionError`] only when delegated
+/// root leaf enumeration fails at `root_node_object_offset`.
+pub fn inspect_document_page_content_extents_with_lookup(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    root_node_object_offset: usize,
+) -> Result<DocumentPageContentExtentsInspection, DocumentPageContentExtentsInspectionError> {
+    let leaves = inspect_page_tree_leaves_with_lookup(input, lookup, root_node_object_offset)
+        .map_err(|error| DocumentPageContentExtentsInspectionError {
+            root_node_byte_offset: root_node_object_offset,
+            byte_len: input.len(),
+            error,
         })?;
 
     let pages = leaves
@@ -148,7 +173,7 @@ pub fn inspect_document_page_content_extents(
         .iter()
         .copied()
         .enumerate()
-        .map(|(ordinal, leaf)| inspect_leaf_page(input, xref, ordinal, leaf))
+        .map(|(ordinal, leaf)| inspect_leaf_page(input, lookup, ordinal, leaf))
         .collect();
 
     Ok(DocumentPageContentExtentsInspection {
@@ -160,14 +185,14 @@ pub fn inspect_document_page_content_extents(
 
 fn inspect_leaf_page(
     input: &[u8],
-    xref: &ClassicXrefTableInspection,
+    lookup: ObjectLookup<'_>,
     ordinal: usize,
     leaf: PageTreeLeaf,
 ) -> DocumentPageContentExtentInspection {
     let result = match inspect_page_contents(input, leaf.object_byte_offset) {
         Ok(contents) => {
-            let targets = inspect_page_content_targets(input, xref, &contents);
-            let extents = inspect_page_content_extents(input, xref, &targets);
+            let targets = inspect_page_content_targets_with_lookup(input, lookup, &contents);
+            let extents = inspect_page_content_extents_with_lookup(input, lookup, &targets);
             DocumentPageContentExtentResult::Inspected {
                 contents,
                 targets,
