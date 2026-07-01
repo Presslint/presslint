@@ -49,6 +49,7 @@ mod page_tree_leaves;
 mod page_tree_node;
 mod page_tree_node_type;
 mod page_tree_reference;
+mod page_xobject_resource_targets;
 mod page_xobject_resources;
 mod source;
 mod source_utils;
@@ -198,6 +199,7 @@ pub use page_tree_reference::{
     PageTreeReferenceTargetInspectionRejection, inspect_page_tree_reference_target,
     inspect_page_tree_reference_target_with_lookup,
 };
+pub use page_xobject_resource_targets::PageXObjectResourceTarget;
 pub use page_xobject_resources::{
     DocumentPageXObjectResourcesInspection, DocumentPageXObjectResourcesInspectionError,
     PageXObjectResourcesInspection, PdfName, SkippedPageXObjectResource,

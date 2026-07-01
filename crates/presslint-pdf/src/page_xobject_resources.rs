@@ -4,13 +4,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::page_resource_inheritance::{
     ResolveReferenceError, ResourceContext, resolve_reference, unique_entry,
 };
+use crate::page_xobject_resource_targets::{
+    ClassifiedPageXObjectResource, PageXObjectResourceSubtype,
+};
 use crate::{
     ClassicXrefTableInspection, DictionaryEntryByteRange, DictionaryEntryInspectionError,
     DictionaryEntrySpan, DictionaryValueKind, IndirectObjectDictionaryInspectionError, IndirectRef,
     IndirectReferenceInspectionRejection, ObjectLookup, ObjectLookupLocation,
     PageTreeKidTargetInspection, PageTreeKidTargetsInspection, PageTreeKidTargetsInspectionError,
-    PageTreeLeavesTruncation, PageTreeNodeType, SkippedPageTreeLeafEntry,
-    SkippedPageTreeLeafReason, parse_indirect_reference,
+    PageTreeLeavesTruncation, PageTreeNodeType, PageXObjectResourceTarget,
+    SkippedPageTreeLeafEntry, SkippedPageTreeLeafReason, parse_indirect_reference,
 };
 
 /// PDF resource name represented as raw bytes without the leading slash.
@@ -45,7 +48,7 @@ impl DocumentPageXObjectResourcesInspection {
     }
 }
 
-/// Per-page classified page-scope `XObject` resource names.
+/// Per-page classified page-scope `XObject` resource targets and legacy names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageXObjectResourcesInspection {
     /// Zero-based document-order page ordinal.
@@ -54,6 +57,10 @@ pub struct PageXObjectResourcesInspection {
     pub page_reference: IndirectRef,
     /// Resolved page object byte offset.
     pub page_object_byte_offset: usize,
+    /// Sorted/deduplicated targets whose resolved `XObject` subtype is `/Image`.
+    pub image_xobjects: Vec<PageXObjectResourceTarget>,
+    /// Sorted/deduplicated targets whose resolved `XObject` subtype is `/Form`.
+    pub form_xobjects: Vec<PageXObjectResourceTarget>,
     /// Sorted/deduplicated names whose resolved `XObject` subtype is `/Image`.
     pub image_xobject_names: Vec<PdfName>,
     /// Sorted/deduplicated names whose resolved `XObject` subtype is `/Form`.
@@ -229,7 +236,7 @@ pub struct DocumentPageXObjectResourcesInspectionError {
     pub error: PageTreeKidTargetsInspectionError,
 }
 
-/// Inspect page-scope `XObject` resource names through a classic xref table.
+/// Inspect page-scope `XObject` resource targets through a classic xref table.
 ///
 /// This is a thin wrapper over
 /// [`inspect_document_page_xobject_resources_with_lookup`] via
@@ -251,7 +258,7 @@ pub fn inspect_document_page_xobject_resources(
     )
 }
 
-/// Inspect page-scope `XObject` resource names through any object lookup backend.
+/// Inspect page-scope `XObject` resource targets through any object lookup backend.
 ///
 /// The walk follows the page tree root-down in document order, carrying the
 /// effective inheritable `/Resources` dictionary. A child page or page-tree node
@@ -260,8 +267,8 @@ pub fn inspect_document_page_xobject_resources(
 /// Only direct `/XObject` dictionaries are scanned. Each direct `/XObject`
 /// entry must be an indirect reference whose resolved target dictionary has
 /// `/Subtype /Image` or `/Subtype /Form`; every other shape becomes a
-/// structured page-local skip. The returned name vectors are sorted and
-/// deduplicated for deterministic downstream inventory.
+/// structured page-local skip. The returned target and name vectors are sorted
+/// and deduplicated for deterministic downstream inventory.
 ///
 /// # Errors
 ///
@@ -526,12 +533,7 @@ fn inspect_effective_xobjects(
             None,
             SkippedPageXObjectResourceReason::MissingResources,
         ));
-        return page_report(
-            page_object_byte_offset,
-            skipped,
-            BTreeSet::new(),
-            BTreeSet::new(),
-        );
+        return empty_page_report(page_object_byte_offset, skipped);
     };
 
     let Some(xobject_entry) = (match unique_entry(input, &resources.entries, b"/XObject") {
@@ -545,12 +547,7 @@ fn inspect_effective_xobjects(
                     duplicate_key_range,
                 },
             ));
-            return page_report(
-                page_object_byte_offset,
-                skipped,
-                BTreeSet::new(),
-                BTreeSet::new(),
-            );
+            return empty_page_report(page_object_byte_offset, skipped);
         }
     }) else {
         skipped.push(skipped_page(
@@ -558,12 +555,7 @@ fn inspect_effective_xobjects(
             None,
             SkippedPageXObjectResourceReason::MissingXObject,
         ));
-        return page_report(
-            page_object_byte_offset,
-            skipped,
-            BTreeSet::new(),
-            BTreeSet::new(),
-        );
+        return empty_page_report(page_object_byte_offset, skipped);
     };
 
     if xobject_entry.value_kind != DictionaryValueKind::Dictionary {
@@ -574,12 +566,7 @@ fn inspect_effective_xobjects(
                 value_kind: xobject_entry.value_kind,
             },
         ));
-        return page_report(
-            page_object_byte_offset,
-            skipped,
-            BTreeSet::new(),
-            BTreeSet::new(),
-        );
+        return empty_page_report(page_object_byte_offset, skipped);
     }
 
     let xobjects = match crate::inspect_dictionary_entries(input, xobject_entry.value_range.start) {
@@ -590,12 +577,7 @@ fn inspect_effective_xobjects(
                 None,
                 SkippedPageXObjectResourceReason::XObjectDictionaryFailed { error },
             ));
-            return page_report(
-                page_object_byte_offset,
-                skipped,
-                BTreeSet::new(),
-                BTreeSet::new(),
-            );
+            return empty_page_report(page_object_byte_offset, skipped);
         }
     };
 
@@ -616,9 +598,12 @@ fn classify_xobject_entries(
     page_object_byte_offset: usize,
     entries: Vec<DictionaryEntrySpan>,
     skipped: &mut Vec<SkippedPageXObjectResource>,
-) -> (BTreeSet<PdfName>, BTreeSet<PdfName>) {
-    let mut images = BTreeSet::new();
-    let mut forms = BTreeSet::new();
+) -> (
+    Vec<PageXObjectResourceTarget>,
+    Vec<PageXObjectResourceTarget>,
+) {
+    let mut images = Vec::new();
+    let mut forms = Vec::new();
     let mut seen_names = BTreeMap::new();
     for entry in entries {
         let name = PdfName(input[entry.key_range.start + 1..entry.key_range.end].to_vec());
@@ -635,11 +620,20 @@ fn classify_xobject_entries(
         }
         seen_names.insert(name.clone(), entry.key_range);
         match classify_xobject_entry(input, lookup, entry) {
-            Ok(XObjectSubtype::Image) => {
-                images.insert(name);
-            }
-            Ok(XObjectSubtype::Form) => {
-                forms.insert(name);
+            Ok(classification) => {
+                let target = PageXObjectResourceTarget {
+                    name,
+                    reference: classification.reference,
+                    object_byte_offset: classification.object_byte_offset,
+                };
+                match classification.subtype {
+                    PageXObjectResourceSubtype::Image => {
+                        images.push(target);
+                    }
+                    PageXObjectResourceSubtype::Form => {
+                        forms.push(target);
+                    }
+                }
             }
             Err(reason) => skipped.push(skipped_page(page_object_byte_offset, Some(name), reason)),
         }
@@ -650,9 +644,13 @@ fn classify_xobject_entries(
 fn page_report(
     page_object_byte_offset: usize,
     skipped: Vec<SkippedPageXObjectResource>,
-    images: BTreeSet<PdfName>,
-    forms: BTreeSet<PdfName>,
+    mut images: Vec<PageXObjectResourceTarget>,
+    mut forms: Vec<PageXObjectResourceTarget>,
 ) -> PageXObjectResourcesInspection {
+    images.sort_by(|left, right| left.name.cmp(&right.name));
+    forms.sort_by(|left, right| left.name.cmp(&right.name));
+    let image_xobject_names = images.iter().map(|target| target.name.clone()).collect();
+    let form_xobject_names = forms.iter().map(|target| target.name.clone()).collect();
     PageXObjectResourcesInspection {
         ordinal: 0,
         page_reference: IndirectRef {
@@ -660,10 +658,19 @@ fn page_report(
             generation: 0,
         },
         page_object_byte_offset,
-        image_xobject_names: images.into_iter().collect(),
-        form_xobject_names: forms.into_iter().collect(),
+        image_xobjects: images,
+        form_xobjects: forms,
+        image_xobject_names,
+        form_xobject_names,
         skipped,
     }
+}
+
+fn empty_page_report(
+    page_object_byte_offset: usize,
+    skipped: Vec<SkippedPageXObjectResource>,
+) -> PageXObjectResourcesInspection {
+    page_report(page_object_byte_offset, skipped, Vec::new(), Vec::new())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -685,16 +692,11 @@ const fn skipped_page(
     }
 }
 
-enum XObjectSubtype {
-    Image,
-    Form,
-}
-
 fn classify_xobject_entry(
     input: &[u8],
     lookup: ObjectLookup<'_>,
     entry: DictionaryEntrySpan,
-) -> Result<XObjectSubtype, SkippedPageXObjectResourceReason> {
+) -> Result<ClassifiedPageXObjectResource, SkippedPageXObjectResourceReason> {
     if entry.value_kind != DictionaryValueKind::IndirectReferenceLike {
         return Err(SkippedPageXObjectResourceReason::NonReferenceXObject {
             value_kind: entry.value_kind,
@@ -705,8 +707,8 @@ fn classify_xobject_entry(
             reference_reason: error.reason,
         }
     })?;
-    let (xref_generation, object_byte_offset) = resolve_reference(lookup, reference.reference)
-        .map_err(|reason| match reason {
+    let (_, object_byte_offset) =
+        resolve_reference(lookup, reference.reference).map_err(|reason| match reason {
             ResolveReferenceError::Unresolved {
                 reference,
                 location,
@@ -722,7 +724,6 @@ fn classify_xobject_entry(
                 xref_generation,
             },
         })?;
-    let _ = xref_generation;
 
     let target =
         crate::inspect_indirect_object_dictionary(input, object_byte_offset).map_err(|error| {
@@ -732,14 +733,19 @@ fn classify_xobject_entry(
                 error,
             }
         })?;
-    classify_subtype(input, object_byte_offset, &target.entries)
+    let subtype = classify_subtype(input, object_byte_offset, &target.entries)?;
+    Ok(ClassifiedPageXObjectResource {
+        subtype,
+        reference: reference.reference,
+        object_byte_offset,
+    })
 }
 
 fn classify_subtype(
     input: &[u8],
     object_byte_offset: usize,
     entries: &[DictionaryEntrySpan],
-) -> Result<XObjectSubtype, SkippedPageXObjectResourceReason> {
+) -> Result<PageXObjectResourceSubtype, SkippedPageXObjectResourceReason> {
     let Some(subtype) = unique_entry(input, entries, b"/Subtype").map_err(
         |(first_key_range, duplicate_key_range)| {
             SkippedPageXObjectResourceReason::DuplicateSubtype {
@@ -761,8 +767,8 @@ fn classify_subtype(
     }
 
     match &input[subtype.value_range.start..subtype.value_range.end] {
-        b"/Image" => Ok(XObjectSubtype::Image),
-        b"/Form" => Ok(XObjectSubtype::Form),
+        b"/Image" => Ok(PageXObjectResourceSubtype::Image),
+        b"/Form" => Ok(PageXObjectResourceSubtype::Form),
         other => Err(SkippedPageXObjectResourceReason::UnknownSubtype {
             object_byte_offset,
             subtype: other.to_vec(),

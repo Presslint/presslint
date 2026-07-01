@@ -4,6 +4,27 @@ Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.
 
 ## Current State
 
+### T109 - Page `XObject` Resource Target Metadata
+
+- `PageXObjectResourcesInspection` now exposes deterministic
+  `image_xobjects` and `form_xobjects` vectors in addition to the existing
+  `image_xobject_names` and `form_xobject_names` inventory bridge fields.
+  Each `PageXObjectResourceTarget` carries the raw resource name, the indirect
+  reference stored in the page-scope `/XObject` entry, and the resolved target
+  object byte offset.
+- Target vectors use the same sorted raw resource-name order as the
+  legacy name vectors, preserving sorted/deduplicated behavior and disjoint
+  Image/Form classification based on the resolved target `/Subtype`.
+- Duplicate raw names remain first occurrence wins. Later repeated names are
+  still emitted as structured `DuplicateXObjectName` skips before any
+  conflicting classification can add the duplicate target.
+- Copy budget: the additive report records own only small structural metadata
+  already derived during classification (`PdfName`, `IndirectRef`, and `usize`
+  offsets). The inspector still retains no source bytes, object bodies,
+  dictionaries, stream bodies, decoded streams, or per-page lookup caches.
+- Deferred: this does not recurse into Form XObject content streams. It only
+  exposes the resolved page-scope targets needed by a follow-up recursion slice.
+
 ### T107 - Page `XObject` Resource Classification
 
 - Added `inspect_document_page_xobject_resources_with_lookup(input, lookup,
