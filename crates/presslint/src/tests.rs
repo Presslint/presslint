@@ -5,6 +5,7 @@ use crate::{
     build_classic_pdf_inventory,
 };
 
+mod color_audit;
 mod form_inventory;
 mod pdf_inventory;
 mod pdf_query;

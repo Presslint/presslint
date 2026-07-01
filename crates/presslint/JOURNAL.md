@@ -1,5 +1,68 @@
 # presslint Journal
 
+## T115 - Read-Only Document Color-Usage Audit (CHK2)
+
+- Added `audit_color_usage(input, max_decoded_stream_bytes) -> Result<ColorUsageAudit, PdfInventoryError>`
+  in the new `color_audit.rs` module: the second report-only prepress
+  deliverable. It builds the neutral inventory with `build_pdf_inventory`
+  verbatim, then scans the merged, page-ordered inventory once by borrow and
+  moves it into the report. This is CHK2 — a DESCRIPTIVE color-usage audit, NOT
+  a print-safe/pass-fail preflight and NOT an ink-limit/TAC check. It is a
+  companion to the fixed-policy `check_no_rgb_in_print`, not a replacement; it
+  plans nothing and mutates nothing.
+- New public surface: `ColorUsageAudit { status, document, pages, spot_names,
+  rgb_findings, coverage_gaps, inventory }`, `ColorAuditStatus`
+  (`Complete | Incomplete` only — no pass/fail or print-safety claim),
+  `ColorUsageSummary` + `ColorSpaceCount` / `ColorUsageCount` / `ObjectKindCount`,
+  `PageColorUsage`, `RgbFinding`, and `CoverageGap` + `CoverageGapKind`.
+  `build_color_usage_audit(inventory)` is the module-internal pure
+  inventory-to-report split (exercised by synthetic tests), not re-exported.
+- Counts are counted in a documented way: `ColorSpace` and `ColorUsage` counts
+  are per `ColorObservation`; `ObjectKind` counts are per `InventoryEntry`;
+  per-page summaries use each inventoried page's contiguous entry run, matching
+  the `preflight.rs` cursor discipline. Because `ColorSpace`/`ColorUsage`/
+  `ObjectKind` do not implement `Ord`, counts are deterministic sorted
+  `Vec<...Count>` records ordered by a fixed variant rank (color spaces break
+  `Resource` ties by raw `PdfName` bytes), not maps. One `PageColorUsage` is
+  emitted per enumerated page in document order (empty summary for a skipped
+  page).
+- Spot extraction is conservative: `ColorObservation.spot_name` is collected
+  only when the observation space is `Separation` or `DeviceN`. A `BTreeSet`
+  both deduplicates and sorts by raw `PdfName` bytes.
+- `DeviceRgb` observations are reported as explicit `RgbFinding`s (page, object
+  identity, entry index, object kind, usage). RGB is a MODELED device space, so
+  an RGB-only document is still `Complete`: findings describe observed color,
+  they are not coverage gaps.
+- Completeness semantics: `status` is `Incomplete` iff at least one coverage gap
+  exists, else `Complete`. Coverage-gap policy — gaps are recorded for skipped
+  pages, image `Unknown` observations (image color undecoded), `form_skipped`
+  per-form expansion skips, page `xobject_resource_skipped`, the top-level
+  `xobject_resource_error`, and any unmodeled/unresolved color space (`IccBased`,
+  `CalGray`, `CalRgb`, `Lab`, `Indexed`, `Separation`, `DeviceN`, `Pattern`,
+  `Resource(_)`, and non-image `Unknown`). `DeviceCmyk`/`DeviceGray` are the
+  modeled process spaces and produce neither a finding nor a gap.
+- Resource-skip nuance: `MissingResources`/`MissingXObject` skips mean the page
+  simply has no `/Resources` or no `/XObject` dictionary — there is no XObject
+  color to miss — so they are NOT gaps; every other resource-skip reason
+  (present-but-unclassifiable target) is a `PageResourceSkipped` gap. This keeps
+  a clean CMYK/Gray page (whose minimal fixture has no `/Resources`) `Complete`
+  instead of noisily `Incomplete`.
+- Copy budget: the full `PdfInventory` is moved into `ColorUsageAudit.inventory`
+  exactly once (scanned by borrow, never cloned). Counts, findings, and gaps
+  own only `Copy`/enum discriminants plus cloned `ObjectId`, `ColorSpace`, and
+  spot `PdfName` boundary values; `ColorObservation.components`, decoded
+  streams, image samples, ICC/profile bytes, and PDF source bytes are never
+  copied into the report. No new benchmark target: this is a build-once +
+  scan-once aggregation over the already-timed `build_pdf_inventory` path, the
+  same shape as `query_pdf_inventory` and `check_no_rgb_in_print`.
+- Tests (`src/tests/color_audit.rs`) cover clean CMYK/Gray completeness through
+  the real PDF entry point, RGB finding collection (and RGB-stays-`Complete`),
+  per-page/document counts + fixed-order determinism, spot-name dedup/sorting
+  with a dropped non-`Separation` name, coverage-gap incompleteness (skipped
+  page, unmodeled space, image `Unknown`, form skip, page resource skip,
+  resource-inspection error), the benign `MissingResources`/`MissingXObject`
+  non-gap case, and serde round-trips of every new public report contract.
+
 ## T112 - Surface Image `XObject` Dictionary Metadata
 
 - `PdfInventoryPage` now exposes `image_xobjects:

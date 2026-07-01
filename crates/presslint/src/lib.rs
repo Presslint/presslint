@@ -14,6 +14,7 @@
 //! presslint::color       // color policy and transform planning
 //! ```
 
+mod color_audit;
 mod document_inventory;
 mod form_inventory;
 mod page_content;
@@ -23,6 +24,10 @@ mod preflight;
 
 pub use presslint_types::*;
 
+pub use color_audit::{
+    ColorAuditStatus, ColorSpaceCount, ColorUsageAudit, ColorUsageCount, ColorUsageSummary,
+    CoverageGap, CoverageGapKind, ObjectKindCount, PageColorUsage, RgbFinding, audit_color_usage,
+};
 pub use document_inventory::{
     ClassicPdfInventory, ClassicPdfInventoryError, ClassicPdfInventoryPage,
     ClassicPdfInventoryPageResult, ClassicPdfInventoryRejection, ClassicPdfInventorySkip,
