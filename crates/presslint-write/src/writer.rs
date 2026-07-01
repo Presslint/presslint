@@ -11,6 +11,7 @@ use presslint_pdf::{
 
 const ENCRYPT_KEY: &[u8] = b"/Encrypt";
 const ID_KEY: &[u8] = b"/ID";
+const INFO_KEY: &[u8] = b"/Info";
 const XREF_STM_KEY: &[u8] = b"/XRefStm";
 
 /// Largest byte offset that fits the fixed 10-digit classic xref offset field.
@@ -203,6 +204,7 @@ pub fn write_incremental_revision(
         chain.root_reference,
         startxref.byte_offset,
         active_trailer.id_bytes(input),
+        active_trailer.info_bytes(input),
     );
     writer.push_startxref(xref_byte_offset);
 
@@ -310,12 +312,13 @@ pub enum ActiveTrailerError {
     },
 }
 
-/// `/Encrypt`/`/XRefStm` presence plus the byte range of a single top-level
-/// `/ID` value in the active trailer dictionary.
+/// `/Encrypt`/`/XRefStm` presence plus byte ranges of single top-level `/ID`
+/// and `/Info` values in the active trailer dictionary.
 struct ActiveTrailerScan {
     has_encrypt: bool,
     has_xref_stm: bool,
     id_value_range: Option<(usize, usize)>,
+    info_value_range: Option<(usize, usize)>,
 }
 
 impl ActiveTrailerScan {
@@ -324,14 +327,22 @@ impl ActiveTrailerScan {
         self.id_value_range
             .and_then(|(start, end)| input.get(start..end))
     }
+
+    /// Borrow the preserved `/Info` value bytes from the source, if present.
+    fn info_bytes<'a>(&self, input: &'a [u8]) -> Option<&'a [u8]> {
+        self.info_value_range
+            .and_then(|(start, end)| input.get(start..end))
+    }
 }
 
-/// Scan the newest trailer dictionary for `/Encrypt`, `/XRefStm`, and `/ID`.
+/// Scan the newest trailer dictionary for `/Encrypt`, `/XRefStm`, `/ID`, and
+/// `/Info`.
 ///
 /// This reuses the same bounded dictionary inspectors the classic chain already
 /// ran over this trailer, so it copies no trailer bytes and only records small
 /// offsets. Present `/Encrypt` and `/XRefStm` keys are rejected upstream; a
-/// present `/ID` value range is preserved verbatim into the appended trailer.
+/// present `/ID` or `/Info` value range is preserved verbatim into the appended
+/// trailer.
 fn scan_active_trailer(
     input: &[u8],
     trailer_byte_offset: usize,
@@ -349,6 +360,7 @@ fn scan_active_trailer(
         has_encrypt: false,
         has_xref_stm: false,
         id_value_range: None,
+        info_value_range: None,
     };
     for entry in &entries.entries {
         let key = input.get(entry.key_range.start..entry.key_range.end);
@@ -358,6 +370,8 @@ fn scan_active_trailer(
             scan.has_xref_stm = true;
         } else if key == Some(ID_KEY) && scan.id_value_range.is_none() {
             scan.id_value_range = Some((entry.value_range.start, entry.value_range.end));
+        } else if key == Some(INFO_KEY) && scan.info_value_range.is_none() {
+            scan.info_value_range = Some((entry.value_range.start, entry.value_range.end));
         }
     }
 
@@ -488,6 +502,7 @@ impl AppendRevisionWriter {
         root: IndirectRef,
         prev_byte_offset: usize,
         id_bytes: Option<&[u8]>,
+        info_bytes: Option<&[u8]>,
     ) {
         let root_number = root.object_number;
         let root_generation = root.generation;
@@ -502,6 +517,10 @@ impl AppendRevisionWriter {
         if let Some(id) = id_bytes {
             self.out.extend_from_slice(b" /ID ");
             self.out.extend_from_slice(id);
+        }
+        if let Some(info) = info_bytes {
+            self.out.extend_from_slice(b" /Info ");
+            self.out.extend_from_slice(info);
         }
         self.out.extend_from_slice(b" >>\n");
     }

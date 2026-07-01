@@ -4,6 +4,38 @@ Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.
 
 ## Current State
 
+### T118 - Page Box Inspection
+
+- Added `inspect_document_page_boxes(input) ->
+  Result<DocumentPageBoxesInspection, PageBoxInspectionError>` plus compact
+  report types for document-level page boxes, per-page effective boxes,
+  rectangles, provenance, and structured skips.
+- The inspector walks the page tree root-down and carries inherited
+  `/MediaBox` and `/CropBox` metadata. A leaf direct value overrides inherited
+  state. An absent leaf `/CropBox` resolves as `DefaultedToMediaBox` using the
+  effective `/MediaBox`.
+- This is read-only structural inspection. It accepts only direct rectangle
+  arrays of four finite numeric literals. Duplicate keys, malformed arrays,
+  non-array values, indirect values, absent effective `/MediaBox`, resolution
+  failures, traversal truncation, and compressed leaf page dictionaries are
+  reported as structured skips.
+- Compressed leaf page dictionaries are not inspected with synthetic source
+  offsets and are not presented as editable page-box records. Their skip carries
+  the object-stream number and member index only.
+- Copy budget: reports carry only source byte ranges, indirect references,
+  object positions, enums, and four `f64` rectangle values. The inspector
+  retains no source slices, object bodies, stream bodies, decoded object-stream
+  bytes, or dictionaries; any object-stream decoding remains the existing
+  bounded transient document-access path.
+- Focused tests cover direct boxes, inherited `/MediaBox`, leaf override,
+  `/CropBox` defaulting, duplicate/malformed/non-array/indirect/missing media
+  skips, malformed crop skip, compressed leaf skip, and debug output not leaking
+  source body bytes.
+- Deferred: this deliberately adds no `SetPageBox` action, dictionary rewrite,
+  ancestor mutation, compressed page editing, TrimBox/BleedBox/ArtBox handling,
+  or page-geometry normalization. The next writer slice can build the first
+  semantic `SetPageBox` mutation for uncompressed leaf page dictionaries.
+
 ### T114 - Resolved Object-Aware Document Access Spine
 
 - Added `ResolvedObjectPosition` with `Uncompressed { object_byte_offset,

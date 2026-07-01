@@ -122,6 +122,21 @@ fn preserves_existing_id() {
 }
 
 #[test]
+fn preserves_existing_info() {
+    let input = sample_pdf_with_trailer_tail(" /Info 9 0 R");
+    let output = write_incremental_revision(&input, &[dirty(3, 0, PAGE_BODY)]).expect("append");
+
+    // The original /Info value bytes are copied verbatim into the appended trailer.
+    let info = b"/Info 9 0 R";
+    let occurrences = output
+        .windows(info.len())
+        .filter(|window| *window == info)
+        .count();
+    assert_eq!(occurrences, 2);
+    reopen(&output);
+}
+
+#[test]
 fn second_append_lengthens_the_prev_chain() {
     let input = sample_pdf();
     let first = write_incremental_revision(&input, &[dirty(3, 0, PAGE_BODY)]).expect("first");

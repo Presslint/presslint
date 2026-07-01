@@ -33,9 +33,10 @@
   (`XrefOffsetTooLarge`) rather than truncated. Consecutive dirty object numbers
   are grouped into subsections.
 - **Trailer**: preserves `/Root` from the newest trailer, preserves `/ID`
-  verbatim when present, sets `/Prev` to exactly the previous `startxref` target,
-  and sets `/Size` from the **whole classic `/Prev` chain** (max object number +
-  1, floored by the max declared `/Size`) — not the newest section or dirty set.
+  verbatim when present, preserves the active trailer `/Info` value verbatim
+  when present, sets `/Prev` to exactly the previous `startxref` target, and
+  sets `/Size` from the **whole classic `/Prev` chain** (max object number + 1,
+  floored by the max declared `/Size`) — not the newest section or dirty set.
   This is the concrete `PDFBOX-5945` pitfall, and a two-revision fixture whose
   newest section understates `/Size` proves the older section's higher object
   number still counts.
@@ -75,9 +76,11 @@ failure folded into `DirtyObjectHeaderMismatch { reference, error }`.
   `AppendRevisionWriter`, owns byte assembly and offset accounting.
 - Copy budget: the returned `Vec<u8>` necessarily contains a full copy of the
   input (owned-bytes API) plus the caller-supplied bodies and small trailer/xref
-  metadata. No PDF source bytes, object bodies, stream bodies, decoded streams,
-  or whole-document object cache are copied. Depends only on `presslint-pdf`
-  (plus `serde` for the error contract); it does **not** depend on the umbrella
+  metadata. `/ID` and `/Info` trailer values are borrowed from the input while
+  assembling the appended trailer and copied only into the returned output
+  buffer. No PDF source bytes, object bodies, stream bodies, decoded streams, or
+  whole-document object cache are copied. Depends only on `presslint-pdf` (plus
+  `serde` for the error contract); it does **not** depend on the umbrella
   `presslint` crate.
 
 ## Deferred (future semantic writer)

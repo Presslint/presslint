@@ -25,6 +25,7 @@ mod object_lookup;
 mod object_resolver;
 mod object_stream;
 mod object_stream_objects;
+mod page_boxes;
 mod page_content_extents;
 mod page_content_targets;
 mod page_contents;
