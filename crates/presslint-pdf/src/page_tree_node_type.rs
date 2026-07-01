@@ -1,8 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DictionaryEntryByteRange, DictionaryEntrySpan, DictionaryValueKind,
-    IndirectObjectDictionaryInspection, IndirectObjectDictionaryInspectionRejection,
+    DictionaryEntryByteRange, DictionaryValueKind, IndirectObjectDictionaryInspection,
+    IndirectObjectDictionaryInspectionRejection, ResolvedObjectData,
+    ResolvedObjectDictionaryInspection, inspect_object_dictionary,
+    object_dictionary::{
+        compressed_dictionary_as_indirect_object_dictionary,
+        resolved_dictionary_rejection_as_indirect,
+    },
 };
 
 const TYPE_KEY: &[u8] = b"/Type";
@@ -122,10 +127,72 @@ pub fn inspect_page_tree_node_type(
                 error.error_byte_offset,
             )
         })?;
-    let object_header_byte_offset = Some(object_dictionary.header_range.start);
-    let dictionary_close = object_dictionary.dictionary_close_byte_offset;
+    page_tree_node_type_from_entries(
+        input,
+        input,
+        object_offset,
+        Some(object_dictionary.header_range.start),
+        object_dictionary,
+    )
+}
 
-    let type_entry = find_unique_entry(input, &object_dictionary.entries, TYPE_KEY)
+/// Classify a page-tree object's `/Type` from body-aware resolved object data.
+///
+/// # Errors
+///
+/// Returns [`PageTreeNodeTypeInspectionError`] for the same object dictionary
+/// and `/Type` shape failures as [`inspect_page_tree_node_type`].
+pub fn inspect_page_tree_node_type_resolved(
+    input: &[u8],
+    resolved: &ResolvedObjectData,
+) -> Result<PageTreeNodeTypeInspection, PageTreeNodeTypeInspectionError> {
+    match resolved {
+        ResolvedObjectData::Uncompressed { resolved } => {
+            inspect_page_tree_node_type(input, resolved.object_byte_offset)
+        }
+        ResolvedObjectData::Compressed {
+            decoded_object_stream,
+            object_body_span,
+            ..
+        } => {
+            let dictionary = inspect_object_dictionary(input, resolved).map_err(|error| {
+                page_tree_node_type_error(
+                    input,
+                    0,
+                    None,
+                    PageTreeNodeTypeInspectionRejection::ObjectDictionary {
+                        object_dictionary_reason: resolved_dictionary_rejection_as_indirect(
+                            error.reason,
+                        ),
+                    },
+                    error.error_byte_offset,
+                )
+            })?;
+            let body = decoded_object_stream
+                .get(object_body_span.start..object_body_span.end)
+                .unwrap_or(&[]);
+            let ResolvedObjectDictionaryInspection::Compressed(compressed) = dictionary else {
+                unreachable!("compressed resolved object must inspect as compressed")
+            };
+            page_tree_node_type_from_entries(
+                input,
+                body,
+                0,
+                None,
+                compressed_dictionary_as_indirect_object_dictionary(compressed),
+            )
+        }
+    }
+}
+
+fn page_tree_node_type_from_entries(
+    input: &[u8],
+    dictionary_source: &[u8],
+    object_offset: usize,
+    object_header_byte_offset: Option<usize>,
+    object_dictionary: IndirectObjectDictionaryInspection,
+) -> Result<PageTreeNodeTypeInspection, PageTreeNodeTypeInspectionError> {
+    let type_entry = find_unique_entry(dictionary_source, &object_dictionary.entries, TYPE_KEY)
         .map_err(|(first, duplicate)| {
             page_tree_node_type_error(
                 input,
@@ -144,7 +211,7 @@ pub fn inspect_page_tree_node_type(
                 object_offset,
                 object_header_byte_offset,
                 PageTreeNodeTypeInspectionRejection::MissingType,
-                Some(dictionary_close),
+                Some(object_dictionary.dictionary_close_byte_offset),
             )
         })?;
 
@@ -160,7 +227,7 @@ pub fn inspect_page_tree_node_type(
         ));
     }
 
-    let node_type = classify_type_name(input, type_entry.value_range);
+    let node_type = classify_type_name(dictionary_source, type_entry.value_range);
 
     Ok(PageTreeNodeTypeInspection {
         object_dictionary,
@@ -186,10 +253,11 @@ fn classify_type_name(input: &[u8], value_range: DictionaryEntryByteRange) -> Pa
 /// ranges when more than one entry matches.
 fn find_unique_entry(
     input: &[u8],
-    entries: &[DictionaryEntrySpan],
+    entries: &[crate::DictionaryEntrySpan],
     key: &[u8],
-) -> Result<Option<DictionaryEntrySpan>, (DictionaryEntryByteRange, DictionaryEntryByteRange)> {
-    let mut found: Option<DictionaryEntrySpan> = None;
+) -> Result<Option<crate::DictionaryEntrySpan>, (DictionaryEntryByteRange, DictionaryEntryByteRange)>
+{
+    let mut found: Option<crate::DictionaryEntrySpan> = None;
     for entry in entries {
         if input.get(entry.key_range.start..entry.key_range.end) != Some(key) {
             continue;

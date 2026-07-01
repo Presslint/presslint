@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ClassicXrefTableInspection, ObjectLookup, PageTreeKidReference, PageTreeKidsInspection,
     PageTreeKidsInspectionRejection, PageTreeReferenceTargetInspection,
-    PageTreeReferenceTargetInspectionError, inspect_page_tree_kids,
+    PageTreeReferenceTargetInspectionError, ResolvedObjectData, inspect_page_tree_kids,
+    inspect_page_tree_node_resolved, inspect_page_tree_reference_target_resolved,
     inspect_page_tree_reference_target_with_lookup,
 };
 
@@ -163,12 +164,113 @@ pub fn inspect_page_tree_kid_targets_with_lookup(
     })
 }
 
+/// Resolve and classify direct `/Kids` references from body-aware page-tree
+/// node data.
+///
+/// # Errors
+///
+/// Returns [`PageTreeKidTargetsInspectionError`] only when the resolved node's
+/// own `/Kids` inspection cannot be completed. Per-child target failures remain
+/// non-fatal entries.
+pub fn inspect_page_tree_kid_targets_resolved(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    resolved: &ResolvedObjectData,
+    max_decoded_object_stream_bytes: usize,
+) -> Result<PageTreeKidTargetsInspection, PageTreeKidTargetsInspectionError> {
+    match resolved {
+        ResolvedObjectData::Uncompressed { resolved } => {
+            let kids =
+                inspect_page_tree_kids(input, resolved.object_byte_offset).map_err(|error| {
+                    PageTreeKidTargetsInspectionError {
+                        byte_offset: resolved.object_byte_offset,
+                        byte_len: input.len(),
+                        node_header_byte_offset: error.node_header_byte_offset,
+                        error_byte_offset: error.error_byte_offset,
+                        reason: PageTreeKidTargetsInspectionRejection::PageTreeKids {
+                            kids_reason: error.reason,
+                        },
+                    }
+                })?;
+
+            let entries = kids
+                .kids
+                .iter()
+                .copied()
+                .map(|kid| {
+                    inspect_kid_target_resolved(input, lookup, kid, max_decoded_object_stream_bytes)
+                })
+                .collect();
+
+            Ok(PageTreeKidTargetsInspection {
+                byte_len: input.len(),
+                kids,
+                entries,
+            })
+        }
+        ResolvedObjectData::Compressed {
+            decoded_object_stream,
+            object_body_span,
+            ..
+        } => {
+            let node = inspect_page_tree_node_resolved(input, resolved).map_err(|error| {
+                PageTreeKidTargetsInspectionError {
+                    byte_offset: 0,
+                    byte_len: input.len(),
+                    node_header_byte_offset: error.node_header_byte_offset,
+                    error_byte_offset: error.error_byte_offset,
+                    reason: PageTreeKidTargetsInspectionRejection::PageTreeKids {
+                        kids_reason: PageTreeKidsInspectionRejection::PageTreeNode {
+                            node_reason: error.reason,
+                        },
+                    },
+                }
+            })?;
+            let body = decoded_object_stream
+                .get(object_body_span.start..object_body_span.end)
+                .unwrap_or(&[]);
+            let kids = crate::page_tree_kids::inspect_page_tree_kids_from_node(body, node);
+            let entries = kids
+                .kids
+                .iter()
+                .copied()
+                .map(|kid| {
+                    inspect_kid_target_resolved(input, lookup, kid, max_decoded_object_stream_bytes)
+                })
+                .collect();
+
+            Ok(PageTreeKidTargetsInspection {
+                byte_len: input.len(),
+                kids,
+                entries,
+            })
+        }
+    }
+}
+
 fn inspect_kid_target(
     input: &[u8],
     lookup: ObjectLookup<'_>,
     kid: PageTreeKidReference,
 ) -> PageTreeKidTargetInspection {
     match inspect_page_tree_reference_target_with_lookup(input, lookup, kid.reference) {
+        Ok(target) => PageTreeKidTargetInspection::Resolved { kid, target },
+        Err(error) => PageTreeKidTargetInspection::Failed { kid, error },
+    }
+}
+
+fn inspect_kid_target_resolved(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    kid: PageTreeKidReference,
+    max_decoded_object_stream_bytes: usize,
+) -> PageTreeKidTargetInspection {
+    match inspect_page_tree_reference_target_resolved(
+        input,
+        lookup,
+        kid.reference,
+        max_decoded_object_stream_bytes,
+    ) {
         Ok(target) => PageTreeKidTargetInspection::Resolved { kid, target },
         Err(error) => PageTreeKidTargetInspection::Failed { kid, error },
     }

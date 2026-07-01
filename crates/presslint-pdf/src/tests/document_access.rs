@@ -668,6 +668,8 @@ fn neutral_spine_serde_round_trips_classic_report() {
     let access = inspect_document_access(&source).expect("classic spine should compose");
 
     let value = serde_value(&access).expect("classic neutral report should serialize");
+    let value_debug = format!("{value:?}");
+    assert!(value_debug.contains(r#"("kind", String("uncompressed"))"#));
     let restored: DocumentAccess =
         from_serde_value(value).expect("classic neutral report should deserialize");
     assert_eq!(restored, access);

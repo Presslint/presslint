@@ -8,12 +8,12 @@ use crate::{
     ClassicXrefTrailerPrevInspectionError, ClassicXrefTrailerRootInspection,
     ClassicXrefTrailerRootInspectionError, IndirectRef, ObjectLookup, ObjectResolutionError,
     PageTreeLeavesInspection, PageTreeLeavesInspectionError, PdfSourceDiagnostic, PdfStartXref,
-    ResolvedObject, XrefSection, XrefStreamChain, XrefStreamChainError, XrefStreamSection,
-    XrefStreamSectionError, build_classic_xref_chain, build_xref_stream_chain,
-    decode_xref_stream_section, inspect_catalog_pages, inspect_classic_xref_table,
-    inspect_classic_xref_trailer_prev, inspect_classic_xref_trailer_root, inspect_page_tree_leaves,
-    inspect_page_tree_leaves_with_lookup, resolve_classic_xref_object_offset,
-    resolve_xref_object_offset,
+    ResolvedObject, ResolvedObjectData, XrefSection, XrefStreamChain, XrefStreamChainError,
+    XrefStreamSection, XrefStreamSectionError, build_classic_xref_chain, build_xref_stream_chain,
+    decode_xref_stream_section, inspect_catalog_pages, inspect_catalog_pages_resolved,
+    inspect_classic_xref_table, inspect_classic_xref_trailer_prev,
+    inspect_classic_xref_trailer_root, inspect_page_tree_leaves, inspect_page_tree_leaves_resolved,
+    resolve_classic_xref_object_offset, resolve_object,
 };
 
 /// Report-only structural access summary for a classic-xref PDF.
@@ -239,6 +239,92 @@ const fn document_access_error(
 /// realistic single-section documents.
 pub const MAX_XREF_STREAM_SECTION_DECODED_BYTES: usize = 8 * 1024 * 1024;
 
+/// Resolved structural object position without fabricating source offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResolvedObjectPosition {
+    /// Ordinary uncompressed indirect object located in the source bytes.
+    Uncompressed {
+        /// Resolved in-use object byte offset.
+        object_byte_offset: usize,
+        /// Generation number reported by the matching in-use cross-reference
+        /// entry.
+        xref_generation: u16,
+    },
+    /// Type-2 compressed object stream member.
+    Compressed {
+        /// Object number of the containing object stream.
+        object_stream_number: usize,
+        /// Index of this object inside the object stream.
+        index_within_object_stream: usize,
+    },
+}
+
+/// Structural object resolved by the neutral document-access spine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedStructuralObject {
+    /// Requested indirect reference.
+    pub reference: IndirectRef,
+    /// Tagged resolved position without fabricated compressed offsets.
+    pub position: ResolvedObjectPosition,
+    /// Resolved in-use object byte offset for uncompressed objects. Compressed
+    /// objects carry `0` for compatibility with existing offset-only callers;
+    /// [`Self::position`] is authoritative.
+    pub object_byte_offset: usize,
+    /// Xref generation for uncompressed objects, or `0` for compressed objects.
+    pub xref_generation: u16,
+}
+
+impl ResolvedObjectPosition {
+    pub(crate) const fn from_resolved_object(resolved: ResolvedObject) -> Self {
+        Self::Uncompressed {
+            object_byte_offset: resolved.object_byte_offset,
+            xref_generation: resolved.xref_generation,
+        }
+    }
+
+    pub(crate) const fn from_resolved_data(resolved: &ResolvedObjectData) -> Self {
+        match resolved {
+            ResolvedObjectData::Uncompressed { resolved } => Self::from_resolved_object(*resolved),
+            ResolvedObjectData::Compressed {
+                object_stream_number,
+                index_within_object_stream,
+                ..
+            } => Self::Compressed {
+                object_stream_number: *object_stream_number,
+                index_within_object_stream: *index_within_object_stream,
+            },
+        }
+    }
+}
+
+impl ResolvedStructuralObject {
+    const fn from_resolved_data(resolved: &ResolvedObjectData) -> Self {
+        match resolved {
+            ResolvedObjectData::Uncompressed { resolved } => Self {
+                reference: resolved.reference,
+                position: ResolvedObjectPosition::from_resolved_object(*resolved),
+                object_byte_offset: resolved.object_byte_offset,
+                xref_generation: resolved.xref_generation,
+            },
+            ResolvedObjectData::Compressed {
+                reference,
+                object_stream_number,
+                index_within_object_stream,
+                ..
+            } => Self {
+                reference: *reference,
+                position: ResolvedObjectPosition::Compressed {
+                    object_stream_number: *object_stream_number,
+                    index_within_object_stream: *index_within_object_stream,
+                },
+                object_byte_offset: 0,
+                xref_generation: 0,
+            },
+        }
+    }
+}
+
 /// Report-only structural access summary for a PDF, backend neutral over a
 /// classic xref table, one decoded cross-reference-stream section, or a bounded
 /// same-type xref-stream `/Prev` chain.
@@ -265,13 +351,14 @@ pub struct DocumentAccess {
     pub backend: DocumentAccessBackend,
     /// Document catalog `/Root` reference read from the matching trailer.
     pub root_reference: IndirectRef,
-    /// Catalog object resolved from the trailer `/Root` reference.
-    pub catalog: ResolvedObject,
+    /// Catalog object position resolved from the trailer `/Root` reference.
+    pub catalog: ResolvedStructuralObject,
     /// Catalog `/Pages` inspection, including the parsed page-tree-root
     /// reference.
     pub catalog_pages: CatalogPagesInspection,
-    /// Page-tree-root object resolved from the catalog `/Pages` reference.
-    pub page_tree_root: ResolvedObject,
+    /// Page-tree-root object position resolved from the catalog `/Pages`
+    /// reference.
+    pub page_tree_root: ResolvedStructuralObject,
     /// Document-ordered leaf `/Page` enumeration, including non-fatal skips.
     pub page_leaves: PageTreeLeavesInspection,
 }
@@ -456,9 +543,9 @@ pub fn inspect_document_access(input: &[u8]) -> Result<DocumentAccess, DocumentA
 /// Walk the catalog, `/Pages`, page-tree root, and leaves through a selected
 /// backend, holding the four shared stage results.
 struct SpineWalk {
-    catalog: ResolvedObject,
+    catalog: ResolvedStructuralObject,
     catalog_pages: CatalogPagesInspection,
-    page_tree_root: ResolvedObject,
+    page_tree_root: ResolvedStructuralObject,
     page_leaves: PageTreeLeavesInspection,
 }
 
@@ -469,26 +556,37 @@ fn walk_spine(
     lookup: ObjectLookup<'_>,
     root_reference: IndirectRef,
 ) -> Result<SpineWalk, DocumentAccessError> {
-    let catalog = resolve_xref_object_offset(input, lookup, root_reference)
-        .map_err(|error| access_error(input, DocumentAccessRejection::RootObject { error }))?;
+    let catalog = resolve_object(
+        input,
+        lookup,
+        root_reference,
+        MAX_XREF_STREAM_SECTION_DECODED_BYTES,
+    )
+    .map_err(|error| access_error(input, DocumentAccessRejection::RootObject { error }))?;
 
-    let catalog_pages = inspect_catalog_pages(input, catalog.object_byte_offset)
+    let catalog_pages = inspect_catalog_pages_resolved(input, &catalog)
         .map_err(|error| access_error(input, DocumentAccessRejection::CatalogPages { error }))?;
 
-    let page_tree_root =
-        resolve_xref_object_offset(input, lookup, catalog_pages.pages_reference)
-            .map_err(|error| access_error(input, DocumentAccessRejection::PagesObject { error }))?;
+    let page_tree_root = resolve_object(
+        input,
+        lookup,
+        catalog_pages.pages_reference,
+        MAX_XREF_STREAM_SECTION_DECODED_BYTES,
+    )
+    .map_err(|error| access_error(input, DocumentAccessRejection::PagesObject { error }))?;
 
-    let page_leaves =
-        inspect_page_tree_leaves_with_lookup(input, lookup, page_tree_root.object_byte_offset)
-            .map_err(|error| {
-                access_error(input, DocumentAccessRejection::PageTreeLeaves { error })
-            })?;
+    let page_leaves = inspect_page_tree_leaves_resolved(
+        input,
+        lookup,
+        &page_tree_root,
+        MAX_XREF_STREAM_SECTION_DECODED_BYTES,
+    )
+    .map_err(|error| access_error(input, DocumentAccessRejection::PageTreeLeaves { error }))?;
 
     Ok(SpineWalk {
-        catalog,
+        catalog: ResolvedStructuralObject::from_resolved_data(&catalog),
         catalog_pages,
-        page_tree_root,
+        page_tree_root: ResolvedStructuralObject::from_resolved_data(&page_tree_root),
         page_leaves,
     })
 }

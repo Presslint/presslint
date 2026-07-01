@@ -208,6 +208,20 @@ pub struct CompressedObjectDictionaryInspection {
     pub entries: Vec<DictionaryEntrySpan>,
 }
 
+pub fn compressed_dictionary_as_indirect_object_dictionary(
+    dictionary: CompressedObjectDictionaryInspection,
+) -> IndirectObjectDictionaryInspection {
+    IndirectObjectDictionaryInspection {
+        reference: dictionary.reference,
+        header_range: IndirectObjectHeaderByteRange { start: 0, end: 0 },
+        dictionary_open_byte_offset: dictionary.dictionary_open_byte_offset,
+        dictionary_close_byte_offset: dictionary.dictionary_close_byte_offset,
+        after_dictionary_close_byte_offset: dictionary.after_dictionary_close_byte_offset,
+        max_observed_dictionary_depth: dictionary.max_observed_dictionary_depth,
+        entries: dictionary.entries,
+    }
+}
+
 /// Dictionary inspection over body-aware resolved object data.
 ///
 /// Uncompressed data delegates to [`inspect_indirect_object_dictionary`];
@@ -262,6 +276,27 @@ pub enum ResolvedObjectDictionaryInspectionRejection {
         /// Underlying dictionary entry rejection reason.
         dictionary_entries_reason: DictionaryEntryInspectionRejection,
     },
+}
+
+pub const fn resolved_dictionary_rejection_as_indirect(
+    reason: ResolvedObjectDictionaryInspectionRejection,
+) -> IndirectObjectDictionaryInspectionRejection {
+    match reason {
+        ResolvedObjectDictionaryInspectionRejection::Uncompressed {
+            object_dictionary_reason,
+        } => object_dictionary_reason,
+        ResolvedObjectDictionaryInspectionRejection::CompressedBodyToken { body_token_reason } => {
+            IndirectObjectDictionaryInspectionRejection::BodyToken { body_token_reason }
+        }
+        ResolvedObjectDictionaryInspectionRejection::CompressedNonDictionaryBody { token_kind } => {
+            IndirectObjectDictionaryInspectionRejection::NonDictionaryBody { token_kind }
+        }
+        ResolvedObjectDictionaryInspectionRejection::CompressedDictionaryEntries {
+            dictionary_entries_reason,
+        } => IndirectObjectDictionaryInspectionRejection::DictionaryEntries {
+            dictionary_entries_reason,
+        },
+    }
 }
 
 /// Inspect the top-level dictionary entries of body-aware resolved object data.

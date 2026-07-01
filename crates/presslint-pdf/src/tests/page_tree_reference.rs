@@ -1,14 +1,21 @@
+#[path = "content_stream_extent/serde_harness.rs"]
+#[allow(clippy::duplicate_mod)]
+mod serde_harness;
+
 use super::{
     classic_entry, classic_inspection, classic_subsection, indirect_ref, xref_stream_entry,
     xref_stream_section,
 };
 
+use serde_harness::{from_serde_value, serde_value};
+
 use crate::{
     ClassicXrefAmbiguousObjectEntry, ClassicXrefEntryState, ClassicXrefObjectLocation,
     ObjectLookup, ObjectLookupLocation, PageTreeNodeType, PageTreeNodeTypeInspectionRejection,
-    PageTreeReferenceTargetInspectionRejection, XrefStreamEntryRecord, inspect_catalog_pages,
-    inspect_classic_xref_table, inspect_classic_xref_trailer_root, inspect_page_tree_kids,
-    inspect_page_tree_reference_target, inspect_page_tree_reference_target_with_lookup,
+    PageTreeReferenceTargetInspection, PageTreeReferenceTargetInspectionRejection,
+    XrefStreamEntryRecord, inspect_catalog_pages, inspect_classic_xref_table,
+    inspect_classic_xref_trailer_root, inspect_page_tree_kids, inspect_page_tree_reference_target,
+    inspect_page_tree_reference_target_with_lookup,
 };
 
 #[test]
@@ -26,6 +33,12 @@ fn page_tree_reference_target_resolves_intermediate_pages_node() {
     assert_eq!(report.object_byte_offset, 0);
     assert_eq!(report.xref_generation, 0);
     assert_eq!(report.node_type.node_type, PageTreeNodeType::Pages);
+
+    let value = serde_value(&report).expect("reference target should serialize");
+    assert!(format!("{value:?}").contains(r#"("kind", String("uncompressed"))"#));
+    let restored: PageTreeReferenceTargetInspection =
+        from_serde_value(value).expect("reference target should deserialize");
+    assert_eq!(restored, report);
 }
 
 #[test]

@@ -2,17 +2,14 @@
 //!
 //! This crate provides byte-preserving structural inspection for PDF sources:
 //! source classification, classic xref parsing, single-section xref-stream
-//! decoding, bounded `/Prev` multi-section chaining for both classic tables and
-//! xref streams as parallel same-type newest-wins builders, a backend-neutral
-//! [`ObjectLookup`] over supported backends, object resolution, stream extent
-//! access, page-tree traversal, and the page-content-target/extent path threaded
-//! through the same lookup, plus small planning contracts used by higher-level
-//! crates. Classic helpers are preserved as thin wrappers over their neutral
-//! `_with_lookup` variants, so classic-xref, classic incrementally updated,
-//! single-section xref-stream, and same-type incrementally updated xref-stream
-//! documents all locate page content stream byte extents through one API. The
-//! APIs carry structural metadata and byte ranges rather than retaining source
-//! payloads.
+//! decoding, bounded `/Prev` same-type chaining, backend-neutral [`ObjectLookup`]
+//! views, bounded object-stream member resolution for structural objects,
+//! page-tree traversal, stream extent access, and small planning contracts used
+//! by higher-level crates. Classic helpers remain thin wrappers over neutral
+//! lookup-aware or resolved-object-aware variants, so classic-xref,
+//! incrementally updated same-type chains, and xref-stream documents share the
+//! same structural access spine where supported. The APIs carry structural
+//! metadata and byte ranges rather than retaining source payloads.
 
 #![forbid(unsafe_code)]
 
@@ -78,7 +75,7 @@ pub use array_extent::{
 };
 pub use catalog_pages::{
     CatalogPagesInspection, CatalogPagesInspectionError, CatalogPagesInspectionRejection,
-    inspect_catalog_pages,
+    inspect_catalog_pages, inspect_catalog_pages_resolved,
 };
 pub use classic_xref::inspect_classic_xref_table;
 pub use classic_xref_chain::{
@@ -114,8 +111,8 @@ pub use dictionary_extent::{
 pub use document_access::{
     ClassicDocumentAccess, ClassicDocumentAccessError, ClassicDocumentAccessRejection,
     DocumentAccess, DocumentAccessBackend, DocumentAccessError, DocumentAccessRejection,
-    MAX_XREF_STREAM_SECTION_DECODED_BYTES, inspect_classic_document_access,
-    inspect_document_access,
+    MAX_XREF_STREAM_SECTION_DECODED_BYTES, ResolvedObjectPosition, ResolvedStructuralObject,
+    inspect_classic_document_access, inspect_document_access,
 };
 pub use document_page_content_extents::{
     DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
@@ -189,7 +186,7 @@ pub use page_contents::{
 pub use page_tree_kid_targets::{
     PageTreeKidTargetInspection, PageTreeKidTargetsInspection, PageTreeKidTargetsInspectionError,
     PageTreeKidTargetsInspectionRejection, inspect_page_tree_kid_targets,
-    inspect_page_tree_kid_targets_with_lookup,
+    inspect_page_tree_kid_targets_resolved, inspect_page_tree_kid_targets_with_lookup,
 };
 pub use page_tree_kids::{
     PageTreeKidReference, PageTreeKidsInspection, PageTreeKidsInspectionError,
@@ -199,20 +196,22 @@ pub use page_tree_kids::{
 pub use page_tree_leaves::{
     MAX_PAGE_TREE_DEPTH, MAX_VISITED_PAGE_TREE_NODES, PageTreeLeaf, PageTreeLeavesInspection,
     PageTreeLeavesInspectionError, PageTreeLeavesTruncation, SkippedPageTreeLeafEntry,
-    SkippedPageTreeLeafReason, inspect_page_tree_leaves, inspect_page_tree_leaves_with_lookup,
+    SkippedPageTreeLeafReason, inspect_page_tree_leaves, inspect_page_tree_leaves_resolved,
+    inspect_page_tree_leaves_with_lookup,
 };
 pub use page_tree_node::{
     PageTreeNodeInspection, PageTreeNodeInspectionError, PageTreeNodeInspectionRejection,
-    inspect_page_tree_node,
+    inspect_page_tree_node, inspect_page_tree_node_resolved,
 };
 pub use page_tree_node_type::{
     PageTreeNodeType, PageTreeNodeTypeInspection, PageTreeNodeTypeInspectionError,
     PageTreeNodeTypeInspectionRejection, inspect_page_tree_node_type,
+    inspect_page_tree_node_type_resolved,
 };
 pub use page_tree_reference::{
     PageTreeReferenceTargetInspection, PageTreeReferenceTargetInspectionError,
     PageTreeReferenceTargetInspectionRejection, inspect_page_tree_reference_target,
-    inspect_page_tree_reference_target_with_lookup,
+    inspect_page_tree_reference_target_resolved, inspect_page_tree_reference_target_with_lookup,
 };
 pub use page_xobject_resource_targets::PageXObjectResourceTarget;
 pub use page_xobject_resources::{

@@ -280,6 +280,7 @@ fn page_tree_leaves_serde_round_trips_report_with_skips() {
         inspect_page_tree_leaves(&source, &xref, 0).expect("leaf enumeration should inspect");
 
     let value = serde_value(&report).expect("leaves report should serialize");
+    assert!(format!("{value:?}").contains(r#"("kind", String("uncompressed"))"#));
     let restored: PageTreeLeavesInspection =
         from_serde_value(value).expect("leaves report should deserialize");
     assert_eq!(restored, report);

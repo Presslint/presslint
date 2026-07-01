@@ -2,8 +2,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ArrayExtentInspection, ArrayExtentInspectionRejection, DictionaryEntryByteRange,
-    DictionaryEntrySpan, DictionaryValueKind, IndirectObjectDictionaryInspection,
-    IndirectObjectDictionaryInspectionRejection,
+    DictionaryValueKind, IndirectObjectDictionaryInspection,
+    IndirectObjectDictionaryInspectionRejection, ResolvedObjectData,
+    ResolvedObjectDictionaryInspection, inspect_object_dictionary,
+    object_dictionary::{
+        compressed_dictionary_as_indirect_object_dictionary,
+        resolved_dictionary_rejection_as_indirect,
+    },
 };
 
 const KIDS_KEY: &[u8] = b"/Kids";
@@ -128,10 +133,72 @@ pub fn inspect_page_tree_node(
                 error.error_byte_offset,
             )
         })?;
-    let node_header_byte_offset = Some(node_dictionary.header_range.start);
-    let dictionary_close = node_dictionary.dictionary_close_byte_offset;
+    page_tree_node_from_entries(
+        input,
+        input,
+        node_object_offset,
+        Some(node_dictionary.header_range.start),
+        node_dictionary,
+    )
+}
 
-    let kids_entry = find_unique_entry(input, &node_dictionary.entries, KIDS_KEY)
+/// Inspect a page-tree node from body-aware resolved object data.
+///
+/// # Errors
+///
+/// Returns [`PageTreeNodeInspectionError`] for the same node dictionary,
+/// `/Kids`, and `/Count` shape failures as [`inspect_page_tree_node`].
+pub fn inspect_page_tree_node_resolved(
+    input: &[u8],
+    resolved: &ResolvedObjectData,
+) -> Result<PageTreeNodeInspection, PageTreeNodeInspectionError> {
+    match resolved {
+        ResolvedObjectData::Uncompressed { resolved } => {
+            inspect_page_tree_node(input, resolved.object_byte_offset)
+        }
+        ResolvedObjectData::Compressed {
+            decoded_object_stream,
+            object_body_span,
+            ..
+        } => {
+            let dictionary = inspect_object_dictionary(input, resolved).map_err(|error| {
+                page_tree_node_error(
+                    input,
+                    0,
+                    None,
+                    PageTreeNodeInspectionRejection::NodeDictionary {
+                        node_dictionary_reason: resolved_dictionary_rejection_as_indirect(
+                            error.reason,
+                        ),
+                    },
+                    error.error_byte_offset,
+                )
+            })?;
+            let body = decoded_object_stream
+                .get(object_body_span.start..object_body_span.end)
+                .unwrap_or(&[]);
+            let ResolvedObjectDictionaryInspection::Compressed(compressed) = dictionary else {
+                unreachable!("compressed resolved object must inspect as compressed")
+            };
+            page_tree_node_from_entries(
+                input,
+                body,
+                0,
+                None,
+                compressed_dictionary_as_indirect_object_dictionary(compressed),
+            )
+        }
+    }
+}
+
+fn page_tree_node_from_entries(
+    input: &[u8],
+    dictionary_source: &[u8],
+    node_object_offset: usize,
+    node_header_byte_offset: Option<usize>,
+    node_dictionary: IndirectObjectDictionaryInspection,
+) -> Result<PageTreeNodeInspection, PageTreeNodeInspectionError> {
+    let kids_entry = find_unique_entry(dictionary_source, &node_dictionary.entries, KIDS_KEY)
         .map_err(|(first, duplicate)| {
             page_tree_node_error(
                 input,
@@ -150,7 +217,7 @@ pub fn inspect_page_tree_node(
                 node_object_offset,
                 node_header_byte_offset,
                 PageTreeNodeInspectionRejection::MissingKids,
-                Some(dictionary_close),
+                Some(node_dictionary.dictionary_close_byte_offset),
             )
         })?;
 
@@ -166,20 +233,22 @@ pub fn inspect_page_tree_node(
         ));
     }
 
-    let kids_array_extent = crate::inspect_array_extent(input, kids_entry.value_range.start)
-        .map_err(|error| {
-            page_tree_node_error(
-                input,
-                node_object_offset,
-                node_header_byte_offset,
-                PageTreeNodeInspectionRejection::KidsArrayExtent {
-                    array_reason: error.reason,
-                },
-                error.error_byte_offset,
-            )
-        })?;
+    let kids_array_extent =
+        crate::inspect_array_extent(dictionary_source, kids_entry.value_range.start).map_err(
+            |error| {
+                page_tree_node_error(
+                    input,
+                    node_object_offset,
+                    node_header_byte_offset,
+                    PageTreeNodeInspectionRejection::KidsArrayExtent {
+                        array_reason: error.reason,
+                    },
+                    error.error_byte_offset,
+                )
+            },
+        )?;
 
-    let count_entry = find_unique_entry(input, &node_dictionary.entries, COUNT_KEY)
+    let count_entry = find_unique_entry(dictionary_source, &node_dictionary.entries, COUNT_KEY)
         .map_err(|(first, duplicate)| {
             page_tree_node_error(
                 input,
@@ -198,7 +267,7 @@ pub fn inspect_page_tree_node(
                 node_object_offset,
                 node_header_byte_offset,
                 PageTreeNodeInspectionRejection::MissingCount,
-                Some(dictionary_close),
+                Some(node_dictionary.dictionary_close_byte_offset),
             )
         })?;
 
@@ -231,10 +300,11 @@ pub fn inspect_page_tree_node(
 /// ranges when more than one entry matches.
 fn find_unique_entry(
     input: &[u8],
-    entries: &[DictionaryEntrySpan],
+    entries: &[crate::DictionaryEntrySpan],
     key: &[u8],
-) -> Result<Option<DictionaryEntrySpan>, (DictionaryEntryByteRange, DictionaryEntryByteRange)> {
-    let mut found: Option<DictionaryEntrySpan> = None;
+) -> Result<Option<crate::DictionaryEntrySpan>, (DictionaryEntryByteRange, DictionaryEntryByteRange)>
+{
+    let mut found: Option<crate::DictionaryEntrySpan> = None;
     for entry in entries {
         if input.get(entry.key_range.start..entry.key_range.end) != Some(key) {
             continue;

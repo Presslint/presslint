@@ -733,6 +733,60 @@
   streams, page trees, or catalogs; it does not decode streams, mutate bytes,
   or connect to inventory/action planning.
 
+### T101 - Thread ObjectLookup Through Page Content Extent Inspection
+- Threads the `ObjectLookup<'_>` boundary through the page-content target and
+  extent path with `_with_lookup` variants for
+  `inspect_page_content_targets`, `inspect_page_content_extents`,
+  `inspect_document_page_content_extents`, and the combined
+  `inspect_content_stream_data_extent_with_lookup` helper. Both classic-xref and
+  single-section xref-stream documents now locate page content stream byte
+  extents through one API.
+- Existing classic helpers stay thin wrappers over neutral `_with_lookup`
+  variants, preserving classic report/error shapes. A missing backend still
+  rejects indirect `/Length` as `IndirectLengthRequiresXrefTable`.
+- `SkippedPageContentTargetReason` is neutralized like the T100 page-tree
+  rejection: classic unresolved locate results keep the verbatim
+  `UnresolvedXrefLocation { ClassicXrefObjectLocation }` variant, while
+  xref-stream-only results (free, not-found, out-of-range, compressed, reserved)
+  surface through the new backend-neutral `UnresolvedLookupLocation`. Target
+  resolution uses `locate_xref_object`, accepting only classic in-use or
+  xref-stream uncompressed entries and preserving the generation check.
+- Lookup-backed indirect `/Length` resolution reuses the shared
+  `resolve_xref_object_offset` machinery (which validates the matching
+  generation and the indirect object header at the resolved offset), reads the
+  referenced non-negative integer, then computes the checked stream-data end and
+  validates the `endstream` terminator. Direct `/Length` stays delegated to the
+  existing direct-length helper regardless of backend. Classic indirect
+  resolution stays delegated to the classic path; the xref-stream backend
+  produces a byte-identical `IndirectLength` report because
+  `ClassicXrefIntegerObjectResolution` carries only backend-neutral data.
+- New `LookupIndirectLengthRejection` taxonomy reports lookup-backed
+  indirect-length failures: reference parse, backend object resolution (carrying
+  `ObjectResolutionRejection`, so type-2 compressed, reserved, free, missing,
+  out-of-range, and generation-mismatched length objects become structured
+  skips, never fabricated offsets), non-integer/malformed/overflow integer
+  bodies, and `endstream` terminator violations.
+- Copy budget: the change is dispatch/aggregation only. Reports still own just
+  small vectors of structural records and fixed-size delegated reports; no PDF
+  source bytes, stream bytes, decoded bytes, object bodies, or concatenated
+  content buffers are retained or copied. The xref-stream backend uses the
+  existing sorted decoded section entries through `locate_xref_object` and
+  builds no per-call object map or cache. `resolve_indirect_length_via_lookup`
+  moves the already-computed start inspection into the report instead of cloning
+  it.
+- Focused tests cover xref-stream-backed direct and indirect `/Length` extents,
+  classic-vs-lookup byte-for-byte equivalence (wrapper, classic lookup, and
+  xref-stream backends), the missing-backend rejection, every structured
+  lookup-indirect failure (compressed/not-found/generation-mismatch/malformed/
+  non-integer/out-of-bounds), target `UnresolvedLookupLocation` and generation
+  skips over xref streams, carried-through skips at the extent stage, an
+  end-to-end xref-stream document spine, and serde round-trips for the new
+  rejection shape.
+- Deferred (next slice): the neutral `build_pdf_inventory` bridge in the
+  umbrella `presslint` crate. Still out of scope here: `/Prev` chaining,
+  multi-section merge, `/XRefStm`, object-stream/type-2 resolution, multi-stream
+  concatenation, filter decoding, tokenization, inventory building, and byte
+  mutation.
 ## Follow-Ups
 
 - Keep full PDF file parsing deferred until syntax, graphics-state, inventory,

@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ClassicXrefObjectLocation, ClassicXrefTableInspection, IndirectRef, ObjectLookup,
-    ObjectLookupLocation, PageTreeNodeTypeInspection, PageTreeNodeTypeInspectionRejection,
-    locate_xref_object,
+    ObjectLookupLocation, ObjectResolutionRejection, PageTreeNodeTypeInspection,
+    PageTreeNodeTypeInspectionRejection, ResolvedObjectPosition,
+    inspect_page_tree_node_type_resolved, locate_xref_object, resolve_object,
 };
 
 /// Resolved and classified target of one page-tree indirect reference.
@@ -16,11 +17,15 @@ use crate::{
 pub struct PageTreeReferenceTargetInspection {
     /// Requested page-tree indirect reference.
     pub reference: IndirectRef,
-    /// In-use object byte offset resolved from the cross-reference backend
-    /// (a classic in-use entry or a cross-reference-stream uncompressed entry).
+    /// Resolved in-use object byte offset for uncompressed targets. Compressed
+    /// targets carry `0` here for legacy callers and the precise tagged
+    /// position in [`Self::position`].
     pub object_byte_offset: usize,
-    /// Generation number reported by the matching in-use cross-reference entry.
+    /// Generation number reported by the matching in-use cross-reference entry
+    /// for uncompressed targets.
     pub xref_generation: u16,
+    /// Resolved position of the target object.
+    pub position: ResolvedObjectPosition,
     /// Delegated classification of the referenced object's `/Type`.
     pub node_type: PageTreeNodeTypeInspection,
 }
@@ -76,6 +81,12 @@ pub enum PageTreeReferenceTargetInspectionRejection {
     NodeType {
         /// Underlying page-tree node-type rejection reason.
         node_type_reason: PageTreeNodeTypeInspectionRejection,
+    },
+    /// Body-aware object resolution failed before target classification could
+    /// inspect the resolved object.
+    ObjectResolution {
+        /// Underlying object-resolution rejection reason.
+        resolution_reason: ObjectResolutionRejection,
     },
 }
 
@@ -184,6 +195,68 @@ pub fn inspect_page_tree_reference_target_with_lookup(
         reference,
         object_byte_offset,
         xref_generation,
+        position: ResolvedObjectPosition::Uncompressed {
+            object_byte_offset,
+            xref_generation,
+        },
+        node_type,
+    })
+}
+
+/// Resolve and classify one page-tree target through body-aware object
+/// resolution.
+///
+/// # Errors
+///
+/// Returns [`PageTreeReferenceTargetInspectionError`] when body-aware object
+/// resolution fails or when the resolved target's `/Type` classification fails.
+pub fn inspect_page_tree_reference_target_resolved(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    reference: IndirectRef,
+    max_decoded_object_stream_bytes: usize,
+) -> Result<PageTreeReferenceTargetInspection, PageTreeReferenceTargetInspectionError> {
+    let resolved = resolve_object(input, lookup, reference, max_decoded_object_stream_bytes)
+        .map_err(|error| {
+            page_tree_reference_target_error(
+                input,
+                reference,
+                error.object_byte_offset,
+                error.error_byte_offset,
+                object_resolution_rejection(error.reason),
+            )
+        })?;
+
+    let position = ResolvedObjectPosition::from_resolved_data(&resolved);
+    let object_byte_offset = match position {
+        ResolvedObjectPosition::Uncompressed {
+            object_byte_offset, ..
+        } => Some(object_byte_offset),
+        ResolvedObjectPosition::Compressed { .. } => None,
+    };
+
+    let node_type = inspect_page_tree_node_type_resolved(input, &resolved).map_err(|error| {
+        page_tree_reference_target_error(
+            input,
+            reference,
+            object_byte_offset,
+            error.error_byte_offset,
+            PageTreeReferenceTargetInspectionRejection::NodeType {
+                node_type_reason: error.reason,
+            },
+        )
+    })?;
+
+    Ok(PageTreeReferenceTargetInspection {
+        reference,
+        object_byte_offset: object_byte_offset.unwrap_or(0),
+        xref_generation: match position {
+            ResolvedObjectPosition::Uncompressed {
+                xref_generation, ..
+            } => xref_generation,
+            ResolvedObjectPosition::Compressed { .. } => 0,
+        },
+        position,
         node_type,
     })
 }
@@ -251,6 +324,66 @@ fn unresolved_lookup_rejection(
         other => {
             PageTreeReferenceTargetInspectionRejection::UnresolvedLookupLocation { location: other }
         }
+    }
+}
+
+fn object_resolution_rejection(
+    reason: ObjectResolutionRejection,
+) -> PageTreeReferenceTargetInspectionRejection {
+    match reason {
+        ObjectResolutionRejection::UnresolvedXrefLocation { location } => {
+            unresolved_lookup_rejection(location)
+        }
+        ObjectResolutionRejection::UnsupportedCompressedXrefStreamEntry {
+            object_number,
+            object_stream_number,
+            index_within_object_stream,
+        }
+        | ObjectResolutionRejection::CompressedObjectGenerationNotZero {
+            object_number,
+            object_stream_number,
+            index_within_object_stream,
+            ..
+        }
+        | ObjectResolutionRejection::ObjectStreamIsCompressed {
+            object_number,
+            object_stream_number,
+            index_within_object_stream,
+        }
+        | ObjectResolutionRejection::ObjectStreamObjectUnresolved {
+            object_number,
+            object_stream_number,
+            index_within_object_stream,
+        } => PageTreeReferenceTargetInspectionRejection::UnresolvedLookupLocation {
+            location: ObjectLookupLocation::XrefStreamCompressed {
+                object_number,
+                object_stream_number,
+                index_within_object_stream,
+            },
+        },
+        ObjectResolutionRejection::UnsupportedReservedXrefStreamEntry {
+            object_number,
+            entry_type,
+            field2,
+            field3,
+        } => PageTreeReferenceTargetInspectionRejection::UnresolvedLookupLocation {
+            location: ObjectLookupLocation::XrefStreamReserved {
+                object_number,
+                entry_type,
+                field2,
+                field3,
+            },
+        },
+        ObjectResolutionRejection::GenerationMismatch {
+            requested_generation,
+            xref_generation,
+        } => PageTreeReferenceTargetInspectionRejection::GenerationMismatch {
+            requested_generation,
+            xref_generation,
+        },
+        other => PageTreeReferenceTargetInspectionRejection::ObjectResolution {
+            resolution_reason: other,
+        },
     }
 }
 

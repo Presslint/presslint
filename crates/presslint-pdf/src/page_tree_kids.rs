@@ -131,18 +131,25 @@ pub fn inspect_page_tree_kids(
         }
     })?;
 
+    Ok(inspect_page_tree_kids_from_node(input, node))
+}
+
+pub fn inspect_page_tree_kids_from_node(
+    dictionary_source: &[u8],
+    node: PageTreeNodeInspection,
+) -> PageTreeKidsInspection {
     let mut kids = Vec::new();
     let mut skipped = Vec::new();
     let mut cursor = node.kids_array_extent.open_byte_offset + 1;
     let body_end = node.kids_array_extent.close_byte_offset;
 
     while cursor < body_end {
-        cursor = skip_whitespace_and_comments(input, cursor, body_end);
+        cursor = skip_whitespace_and_comments(dictionary_source, cursor, body_end);
         if cursor >= body_end {
             break;
         }
 
-        let entry = scan_kid_entry(input, cursor, body_end);
+        let entry = scan_kid_entry(dictionary_source, cursor, body_end);
         cursor = entry.after_entry;
         match entry.outcome {
             KidEntryOutcome::Reference(kid) => kids.push(kid),
@@ -150,11 +157,11 @@ pub fn inspect_page_tree_kids(
         }
     }
 
-    Ok(PageTreeKidsInspection {
+    PageTreeKidsInspection {
         node,
         kids,
         skipped,
-    })
+    }
 }
 
 struct ScannedKidEntry {

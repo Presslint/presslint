@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ClassicXrefTableInspection, IndirectRef, ObjectLookup, PageTreeKidTargetInspection,
     PageTreeKidTargetsInspection, PageTreeKidTargetsInspectionError, PageTreeNodeType,
-    PageTreeReferenceTargetInspectionError, inspect_page_tree_kid_targets_with_lookup,
+    PageTreeReferenceTargetInspectionError, PageTreeReferenceTargetInspectionRejection,
+    ResolvedObjectData, ResolvedObjectPosition, inspect_page_tree_kid_targets_resolved,
+    inspect_page_tree_kid_targets_with_lookup, resolve_object,
 };
 
 /// Maximum page-tree recursion depth.
@@ -63,8 +65,12 @@ impl PageTreeLeavesInspection {
 pub struct PageTreeLeaf {
     /// Indirect reference of the leaf `/Page` kid, as reported by `/Kids`.
     pub reference: IndirectRef,
-    /// Resolved in-use object byte offset of the leaf `/Page` object.
+    /// Resolved in-use object byte offset for uncompressed leaves. Compressed
+    /// leaves carry `0` here for legacy callers and the precise tagged position
+    /// in [`Self::position`].
     pub object_byte_offset: usize,
+    /// Resolved position of the leaf `/Page` object.
+    pub position: ResolvedObjectPosition,
 }
 
 /// One kid skipped while enumerating leaf pages.
@@ -235,15 +241,52 @@ pub fn inspect_page_tree_leaves_with_lookup(
             },
         )?;
 
-    let mut walk = LeafWalk::new();
-    walk.visited.insert(
-        root_targets
-            .kids
-            .node
-            .node_dictionary
-            .reference
-            .object_number,
-    );
+    let mut walk = LeafWalk::offset_only();
+    walk.visited
+        .insert(node_dictionary_reference(&root_targets).object_number);
+    walk.visited_node_count = 1;
+    walk.process_node(input, lookup, &root_targets, 0);
+
+    Ok(PageTreeLeavesInspection {
+        byte_len: input.len(),
+        leaves: walk.leaves,
+        skipped: walk.skipped,
+        visited_node_count: walk.visited_node_count,
+        truncated: walk.truncated,
+    })
+}
+
+/// Enumerate leaf `/Page` objects from body-aware resolved page-tree root data.
+///
+/// # Errors
+///
+/// Returns [`PageTreeLeavesInspectionError`] only when the root node expansion
+/// cannot begin. Per-child compressed-object failures remain structured skips.
+pub fn inspect_page_tree_leaves_resolved(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    resolved_root: &ResolvedObjectData,
+    max_decoded_object_stream_bytes: usize,
+) -> Result<PageTreeLeavesInspection, PageTreeLeavesInspectionError> {
+    let root_node_byte_offset = match resolved_root {
+        ResolvedObjectData::Uncompressed { resolved } => resolved.object_byte_offset,
+        ResolvedObjectData::Compressed { .. } => 0,
+    };
+    let root_targets = inspect_page_tree_kid_targets_resolved(
+        input,
+        lookup,
+        resolved_root,
+        max_decoded_object_stream_bytes,
+    )
+    .map_err(|error| PageTreeLeavesInspectionError {
+        root_node_byte_offset,
+        byte_len: input.len(),
+        error,
+    })?;
+
+    let mut walk = LeafWalk::resolved(max_decoded_object_stream_bytes);
+    walk.visited
+        .insert(node_dictionary_reference(&root_targets).object_number);
     walk.visited_node_count = 1;
     walk.process_node(input, lookup, &root_targets, 0);
 
@@ -263,16 +306,36 @@ struct LeafWalk {
     visited: BTreeSet<u32>,
     visited_node_count: usize,
     truncated: Option<PageTreeLeavesTruncation>,
+    mode: LeafWalkMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeafWalkMode {
+    OffsetOnly,
+    Resolved {
+        max_decoded_object_stream_bytes: usize,
+    },
 }
 
 impl LeafWalk {
-    const fn new() -> Self {
+    const fn offset_only() -> Self {
+        Self::new(LeafWalkMode::OffsetOnly)
+    }
+
+    const fn resolved(max_decoded_object_stream_bytes: usize) -> Self {
+        Self::new(LeafWalkMode::Resolved {
+            max_decoded_object_stream_bytes,
+        })
+    }
+
+    const fn new(mode: LeafWalkMode) -> Self {
         Self {
             leaves: Vec::new(),
             skipped: Vec::new(),
             visited: BTreeSet::new(),
             visited_node_count: 0,
             truncated: None,
+            mode,
         }
     }
 
@@ -286,7 +349,7 @@ impl LeafWalk {
         targets: &PageTreeKidTargetsInspection,
         depth: usize,
     ) {
-        let node_byte_offset = targets.kids.node.node_dictionary.header_range.start;
+        let node_byte_offset = parent_node_byte_offset(targets);
         for entry in &targets.entries {
             match entry {
                 PageTreeKidTargetInspection::Resolved { kid, target } => {
@@ -294,12 +357,13 @@ impl LeafWalk {
                         PageTreeNodeType::Page => self.leaves.push(PageTreeLeaf {
                             reference: kid.reference,
                             object_byte_offset: target.object_byte_offset,
+                            position: target.position,
                         }),
                         PageTreeNodeType::Pages => self.descend_into_child(
                             input,
                             lookup,
                             kid.reference,
-                            target.object_byte_offset,
+                            target.position,
                             node_byte_offset,
                             depth,
                         ),
@@ -330,7 +394,7 @@ impl LeafWalk {
         input: &[u8],
         lookup: ObjectLookup<'_>,
         kid: IndirectRef,
-        child_byte_offset: usize,
+        child_position: ResolvedObjectPosition,
         parent_node_byte_offset: usize,
         depth: usize,
     ) {
@@ -342,7 +406,7 @@ impl LeafWalk {
                     object_number: kid.object_number,
                 },
                 SkippedPageTreeLeafReason::Cycle {
-                    object_byte_offset: child_byte_offset,
+                    object_byte_offset: position_byte_offset(child_position),
                 },
             );
             return;
@@ -357,7 +421,7 @@ impl LeafWalk {
                     max_depth: MAX_PAGE_TREE_DEPTH,
                 },
                 SkippedPageTreeLeafReason::MaxDepthExceeded {
-                    object_byte_offset: child_byte_offset,
+                    object_byte_offset: position_byte_offset(child_position),
                     attempted_depth: child_depth,
                 },
             );
@@ -372,7 +436,7 @@ impl LeafWalk {
                     max_visited_nodes: MAX_VISITED_PAGE_TREE_NODES,
                 },
                 SkippedPageTreeLeafReason::MaxVisitedNodesExceeded {
-                    object_byte_offset: child_byte_offset,
+                    object_byte_offset: position_byte_offset(child_position),
                 },
             );
             return;
@@ -381,7 +445,52 @@ impl LeafWalk {
         self.visited.insert(kid.object_number);
         self.visited_node_count += 1;
 
-        match inspect_page_tree_kid_targets_with_lookup(input, lookup, child_byte_offset) {
+        let child_targets = match self.mode {
+            LeafWalkMode::OffsetOnly => inspect_page_tree_kid_targets_with_lookup(
+                input,
+                lookup,
+                position_byte_offset(child_position),
+            ),
+            LeafWalkMode::Resolved {
+                max_decoded_object_stream_bytes,
+            } => {
+                let resolved = match resolve_object(
+                    input,
+                    lookup,
+                    kid,
+                    max_decoded_object_stream_bytes,
+                ) {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        self.push_skip(
+                            kid,
+                            parent_node_byte_offset,
+                            SkippedPageTreeLeafReason::UnresolvedTarget {
+                                error: PageTreeReferenceTargetInspectionError {
+                                    reference: kid,
+                                    byte_len: input.len(),
+                                    object_byte_offset: error.object_byte_offset,
+                                    error_byte_offset: error.error_byte_offset,
+                                    reason:
+                                        PageTreeReferenceTargetInspectionRejection::ObjectResolution {
+                                            resolution_reason: error.reason,
+                                        },
+                                },
+                            },
+                        );
+                        return;
+                    }
+                };
+                inspect_page_tree_kid_targets_resolved(
+                    input,
+                    lookup,
+                    &resolved,
+                    max_decoded_object_stream_bytes,
+                )
+            }
+        };
+
+        match child_targets {
             Ok(child_targets) => self.process_node(input, lookup, &child_targets, child_depth),
             Err(error) => self.push_skip(
                 kid,
@@ -418,5 +527,22 @@ impl LeafWalk {
             parent_node_byte_offset,
             reason,
         });
+    }
+}
+
+const fn node_dictionary_reference(targets: &PageTreeKidTargetsInspection) -> IndirectRef {
+    targets.kids.node.node_dictionary.reference
+}
+
+const fn parent_node_byte_offset(targets: &PageTreeKidTargetsInspection) -> usize {
+    targets.kids.node.node_dictionary.header_range.start
+}
+
+const fn position_byte_offset(position: ResolvedObjectPosition) -> usize {
+    match position {
+        ResolvedObjectPosition::Uncompressed {
+            object_byte_offset, ..
+        } => object_byte_offset,
+        ResolvedObjectPosition::Compressed { .. } => 0,
     }
 }

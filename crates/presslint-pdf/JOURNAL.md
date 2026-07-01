@@ -4,6 +4,47 @@ Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.
 
 ## Current State
 
+### T114 - Resolved Object-Aware Document Access Spine
+
+- Added `ResolvedObjectPosition` with `Uncompressed { object_byte_offset,
+  xref_generation }` and `Compressed { object_stream_number,
+  index_within_object_stream }`. The neutral spine reports catalog and
+  page-tree-root objects through `ResolvedStructuralObject`, keeping `reference`
+  separate while preserving legacy uncompressed offset fields.
+- Added `inspect_catalog_pages_resolved`, `inspect_page_tree_node_resolved`,
+  `inspect_page_tree_node_type_resolved`, `inspect_page_tree_reference_target_resolved`,
+  `inspect_page_tree_kid_targets_resolved`, and
+  `inspect_page_tree_leaves_resolved`. Uncompressed branches delegate to the
+  existing offset inspectors; compressed branches inspect member-body-relative
+  entries through `inspect_object_dictionary`.
+- Rewired the neutral spine to resolve `/Root`, catalog `/Pages`, page-tree
+  root, and child page-tree references through bounded `resolve_object`.
+  Compressed-but-unresolvable root catalog or `/Pages` objects remain fatal
+  structured spine errors; compressed child failures are non-fatal page-tree
+  skips, so later siblings still enumerate.
+- Page order, DFS traversal, leaf ordering, depth/visited guards, and cycle
+  identity by object number are preserved. No `ObjectLookup` or
+  `DocumentAccessBackend` variant or umbrella bridge change was added.
+- Copy budget: the only owned structural byte buffer remains the bounded decoded
+  object-stream body from `resolve_object`; no cache or whole-document object
+  map was added. No Criterion target was added because this dispatches over
+  existing bounded resolution.
+- Tests cover compressed catalog/`/Pages`/leaf navigation, mixed uncompressed
+  root with compressed leaves, fatal compressed-root extraction, non-fatal
+  invalid compressed child skip, serde tags, and existing classic/xref-stream
+  parity.
+- Retry note: `inspect_page_tree_leaves_with_lookup` remains an offset-only
+  legacy/content-extents path. Only `inspect_page_tree_leaves_resolved` expands
+  compressed children through `resolve_object` with the bounded decode limit, so
+  compressed leaf pages are not surfaced to `/Contents` inspection with a
+  synthetic offset `0`.
+- Retry ablation: body-aware `/Kids` scanning now reuses the single scanner in
+  `page_tree_kids.rs`, and the catalog/page-tree dictionary helpers borrow
+  their entry spans from the owned report instead of cloning the entries vector.
+- Deferred: compressed page `/Contents` extents and inherited
+  `/Resources`/`/XObject` discovery remain later. The queue continues with
+  CHK2, F3 design notes, HYBRID `/XRefStm`, and SA/IMASK polish.
+
 ### Resolve Compressed Objects From Object Streams
 
 - Added the `object_stream_objects` module with
@@ -704,71 +745,3 @@ Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.
   support, object-stream extraction, type-2 compressed-object resolution,
   document-level object maps/caches/openers, and filesystem I/O remain separate
   future work.
-
-### T101 - Thread ObjectLookup Through Page Content Extent Inspection
-
-- Threads the `ObjectLookup<'_>` boundary through the page-content target and
-  extent path with `_with_lookup` variants for
-  `inspect_page_content_targets`, `inspect_page_content_extents`,
-  `inspect_document_page_content_extents`, and the combined content-stream extent
-  helper (`inspect_content_stream_data_extent_with_lookup(input, Option<ObjectLookup>, object_offset)`).
-  Both classic-xref and single-section xref-stream documents now locate page
-  content stream byte extents through one API.
-- Every existing classic helper is preserved as a thin compatibility wrapper over
-  its neutral `_with_lookup` variant (classic helpers map to
-  `ObjectLookup::ClassicXref`, and `inspect_content_stream_data_extent` maps its
-  `Option<&ClassicXrefTableInspection>` to `Option<ObjectLookup>`), so the
-  classic report and error shapes stay byte-identical. A missing backend still
-  rejects an indirect `/Length` as `IndirectLengthRequiresXrefTable`.
-- `SkippedPageContentTargetReason` is neutralized like the T100 page-tree
-  rejection: classic unresolved locate results keep the verbatim
-  `UnresolvedXrefLocation { ClassicXrefObjectLocation }` variant, while
-  xref-stream-only results (free, not-found, out-of-range, compressed, reserved)
-  surface through the new backend-neutral
-  `UnresolvedLookupLocation { ObjectLookupLocation }`. Target resolution routes
-  through `locate_xref_object`, accepting only classic in-use or xref-stream
-  uncompressed entries and preserving the generation check.
-- Lookup-backed indirect `/Length` resolution reuses the shared
-  `resolve_xref_object_offset` machinery (which validates the matching generation
-  and the indirect object header at the resolved offset), reads the referenced
-  non-negative integer, then computes the checked stream-data end and validates
-  the `endstream` terminator. Direct `/Length` stays delegated to the existing
-  direct-length helper regardless of backend. Classic indirect resolution stays
-  delegated to `inspect_indirect_length_content_stream_data_extent` so the
-  classic path is unchanged; the xref-stream backend produces a byte-identical
-  `IndirectLength` report because `ClassicXrefIntegerObjectResolution` carries
-  only backend-neutral data.
-- New `LookupIndirectLengthRejection` taxonomy reports lookup-backed
-  indirect-length failures: reference parse, backend object resolution
-  (carrying `ObjectResolutionRejection`, so type-2 compressed, reserved, free,
-  missing, out-of-range, and generation-mismatched length objects become
-  structured skips, never fabricated offsets), non-integer/malformed/overflow
-  integer bodies, and `endstream` terminator violations.
-- Copy budget: the change is dispatch/aggregation only. Reports still own just
-  small vectors of structural records and fixed-size delegated reports; no PDF
-  source bytes, stream bytes, decoded bytes, object bodies, or concatenated
-  content buffers are retained or copied. The xref-stream backend uses the
-  existing sorted decoded section entries through `locate_xref_object` and builds
-  no per-call object map or cache. `resolve_indirect_length_via_lookup` moves the
-  already-computed `ContentStreamStartInspection` into the report instead of
-  cloning it.
-- Focused tests cover xref-stream-backed direct and indirect `/Length`
-  extents, classic-vs-lookup byte-for-byte equivalence (wrapper, classic lookup,
-  and xref-stream backends), the missing-backend rejection, every structured
-  lookup-indirect failure (compressed/not-found/generation-mismatch/malformed/
-  non-integer/out-of-bounds), target `UnresolvedLookupLocation` and generation
-  skips over xref streams, carried-through skips at the extent stage, an
-  end-to-end document spine that locates direct and indirect lengths through the
-  xref-stream backend, and serde round-trips for the new rejection shape.
-- Deferred (next slice): the neutral `build_pdf_inventory` bridge in the umbrella
-  `presslint` crate. Still out of scope here: `/Prev` chaining, multi-section
-  merge, `/XRefStm`, object-stream/type-2 resolution, multi-stream
-  concatenation, filter decoding, tokenization, inventory building, and byte
-  mutation.
-
-## Follow-Ups
-
-- Next C slice: follow `/Prev` to chain `decode_xref_stream_section` over
-  incremental sections and merge them into a whole-document object map while
-  preserving the `ResolvedObject` API now shared by classic and single-section
-  xref-stream document access.

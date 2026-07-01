@@ -221,6 +221,7 @@ fn page_tree_kid_targets_serde_round_trips_aggregate_report_and_failed_entry() {
         inspect_page_tree_kid_targets(&source, &xref, 0).expect("kid targets should inspect");
 
     let value = serde_value(&report).expect("aggregate report should serialize");
+    assert!(format!("{value:?}").contains(r#"("kind", String("uncompressed"))"#));
     let restored: PageTreeKidTargetsInspection =
         from_serde_value(value).expect("aggregate report should deserialize");
     assert_eq!(restored, report);

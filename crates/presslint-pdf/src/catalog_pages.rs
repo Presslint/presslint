@@ -3,6 +3,11 @@ use serde::{Deserialize, Serialize};
 use crate::{
     DictionaryEntryByteRange, DictionaryValueKind, IndirectObjectDictionaryInspection,
     IndirectObjectDictionaryInspectionRejection, IndirectRef, IndirectReferenceInspectionRejection,
+    ResolvedObjectData, ResolvedObjectDictionaryInspection, inspect_object_dictionary,
+    object_dictionary::{
+        compressed_dictionary_as_indirect_object_dictionary,
+        resolved_dictionary_rejection_as_indirect,
+    },
 };
 
 const PAGES_KEY: &[u8] = b"/Pages";
@@ -109,9 +114,78 @@ pub fn inspect_catalog_pages(
             },
         )?;
 
+    catalog_pages_from_entries(
+        input,
+        input,
+        catalog_object_offset,
+        Some(catalog_dictionary.header_range.start),
+        catalog_dictionary,
+    )
+}
+
+/// Inspect catalog `/Pages` from body-aware resolved object data.
+///
+/// Uncompressed objects delegate to [`inspect_catalog_pages`]. Compressed
+/// objects scan only the extracted member body and keep all dictionary entry
+/// ranges member-body-relative.
+///
+/// # Errors
+///
+/// Returns [`CatalogPagesInspectionError`] for the same catalog dictionary and
+/// `/Pages` shape failures as [`inspect_catalog_pages`].
+pub fn inspect_catalog_pages_resolved(
+    input: &[u8],
+    resolved: &ResolvedObjectData,
+) -> Result<CatalogPagesInspection, CatalogPagesInspectionError> {
+    match resolved {
+        ResolvedObjectData::Uncompressed { resolved } => {
+            inspect_catalog_pages(input, resolved.object_byte_offset)
+        }
+        ResolvedObjectData::Compressed {
+            decoded_object_stream,
+            object_body_span,
+            ..
+        } => {
+            let dictionary = inspect_object_dictionary(input, resolved).map_err(|error| {
+                catalog_pages_error(
+                    input,
+                    0,
+                    None,
+                    CatalogPagesInspectionRejection::CatalogDictionary {
+                        catalog_dictionary_reason: resolved_dictionary_rejection_as_indirect(
+                            error.reason,
+                        ),
+                    },
+                    error.error_byte_offset,
+                )
+            })?;
+            let body = decoded_object_stream
+                .get(object_body_span.start..object_body_span.end)
+                .unwrap_or(&[]);
+            let ResolvedObjectDictionaryInspection::Compressed(compressed) = dictionary else {
+                unreachable!("compressed resolved object must inspect as compressed")
+            };
+            catalog_pages_from_entries(
+                input,
+                body,
+                0,
+                None,
+                compressed_dictionary_as_indirect_object_dictionary(compressed),
+            )
+        }
+    }
+}
+
+fn catalog_pages_from_entries(
+    input: &[u8],
+    dictionary_source: &[u8],
+    catalog_object_offset: usize,
+    catalog_header_byte_offset: Option<usize>,
+    catalog_dictionary: IndirectObjectDictionaryInspection,
+) -> Result<CatalogPagesInspection, CatalogPagesInspectionError> {
     let mut pages_entry: Option<crate::DictionaryEntrySpan> = None;
     for entry in &catalog_dictionary.entries {
-        if !is_exact_pages_key(input, entry.key_range) {
+        if !is_exact_pages_key(dictionary_source, entry.key_range) {
             continue;
         }
 
@@ -119,7 +193,7 @@ pub fn inspect_catalog_pages(
             return Err(catalog_pages_error(
                 input,
                 catalog_object_offset,
-                Some(catalog_dictionary.header_range.start),
+                catalog_header_byte_offset,
                 CatalogPagesInspectionRejection::DuplicatePages {
                     first_key_range: first.key_range,
                     duplicate_key_range: entry.key_range,
@@ -135,7 +209,7 @@ pub fn inspect_catalog_pages(
         catalog_pages_error(
             input,
             catalog_object_offset,
-            Some(catalog_dictionary.header_range.start),
+            catalog_header_byte_offset,
             CatalogPagesInspectionRejection::MissingPages,
             Some(catalog_dictionary.dictionary_close_byte_offset),
         )
@@ -148,7 +222,7 @@ pub fn inspect_catalog_pages(
         return Err(catalog_pages_error(
             input,
             catalog_object_offset,
-            Some(catalog_dictionary.header_range.start),
+            catalog_header_byte_offset,
             CatalogPagesInspectionRejection::NonReferencePagesValue {
                 value_kind: pages_entry.value_kind,
             },
@@ -156,24 +230,26 @@ pub fn inspect_catalog_pages(
         ));
     }
 
-    let pages_reference = crate::parse_indirect_reference(input, pages_entry.value_range.start)
-        .map_err(|error| {
-            catalog_pages_error(
-                input,
-                catalog_object_offset,
-                Some(catalog_dictionary.header_range.start),
-                CatalogPagesInspectionRejection::MalformedPagesReference {
-                    reference_reason: error.reason,
-                },
-                error.error_byte_offset,
-            )
-        })?;
+    let pages_reference =
+        crate::parse_indirect_reference(dictionary_source, pages_entry.value_range.start).map_err(
+            |error| {
+                catalog_pages_error(
+                    input,
+                    catalog_object_offset,
+                    catalog_header_byte_offset,
+                    CatalogPagesInspectionRejection::MalformedPagesReference {
+                        reference_reason: error.reason,
+                    },
+                    error.error_byte_offset,
+                )
+            },
+        )?;
 
     if pages_reference.after_keyword_offset != pages_entry.value_range.end {
         return Err(catalog_pages_error(
             input,
             catalog_object_offset,
-            Some(catalog_dictionary.header_range.start),
+            catalog_header_byte_offset,
             CatalogPagesInspectionRejection::MalformedPagesReference {
                 reference_reason: IndirectReferenceInspectionRejection::MalformedReference,
             },
