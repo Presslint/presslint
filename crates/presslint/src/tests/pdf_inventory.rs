@@ -210,7 +210,10 @@ fn inventories_flate_xref_stream_with_direct_content_length() -> Result<(), Stri
     assert_eq!(report.pages.len(), 1);
     assert_eq!(
         report.pages[0].result,
-        PdfInventoryPageResult::Inventoried { entry_count: 1 }
+        PdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
     );
     assert_eq!(report.inventory.len(), 1);
     assert_eq!(report.inventory.entries[0].kind, ObjectKind::Vector);
@@ -227,7 +230,10 @@ fn inventories_flate_xref_stream_with_indirect_content_length() -> Result<(), St
 
     assert_eq!(
         report.pages[0].result,
-        PdfInventoryPageResult::Inventoried { entry_count: 1 }
+        PdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
     );
     assert_eq!(report.inventory.len(), 1);
     assert_eq!(report.inventory.entries[0].kind, ObjectKind::Vector);
@@ -248,11 +254,17 @@ fn neutral_bridge_matches_classic_bridge_for_classic_xref() -> Result<(), String
     assert_eq!(neutral.pages[0].page_index, classic.pages[0].page_index);
     assert_eq!(
         neutral.pages[0].result,
-        PdfInventoryPageResult::Inventoried { entry_count: 1 }
+        PdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
     );
     assert_eq!(
         classic.pages[0].result,
-        ClassicPdfInventoryPageResult::Inventoried { entry_count: 1 }
+        ClassicPdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
     );
     Ok(())
 }
@@ -266,7 +278,10 @@ fn inventories_two_section_xref_stream_incremental_update() -> Result<(), String
     assert_eq!(report.pages.len(), 1);
     assert_eq!(
         report.pages[0].result,
-        PdfInventoryPageResult::Inventoried { entry_count: 1 }
+        PdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
     );
     assert_eq!(report.inventory.len(), 1);
     assert_eq!(report.inventory.entries[0].kind, ObjectKind::Vector);
@@ -282,7 +297,10 @@ fn inventories_two_section_classic_incremental_update() -> Result<(), String> {
     assert_eq!(report.pages.len(), 1);
     assert_eq!(
         report.pages[0].result,
-        PdfInventoryPageResult::Inventoried { entry_count: 1 }
+        PdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
     );
     assert_eq!(report.inventory.len(), 1);
     assert_eq!(report.inventory.entries[0].kind, ObjectKind::Vector);
@@ -316,7 +334,10 @@ fn neutral_bridge_inventories_raw_multi_stream_page() -> Result<(), PdfInventory
 
     assert_eq!(
         report.pages[0].result,
-        PdfInventoryPageResult::Inventoried { entry_count: 1 }
+        PdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
     );
     assert_eq!(report.inventory.len(), 1);
     assert_eq!(report.inventory.entries[0].kind, ObjectKind::Vector);
@@ -410,7 +431,10 @@ fn real_pdf_do_operators_become_image_and_form_inventory_entries() -> Result<(),
     assert!(neutral.pages[0].xobject_resource_skipped.is_empty());
     assert_eq!(
         neutral.pages[0].result,
-        PdfInventoryPageResult::Inventoried { entry_count: 2 }
+        PdfInventoryPageResult::Inventoried {
+            entry_count: 2,
+            form_skipped: Vec::new()
+        }
     );
     assert_eq!(
         neutral
@@ -424,7 +448,10 @@ fn real_pdf_do_operators_become_image_and_form_inventory_entries() -> Result<(),
     assert_eq!(classic.inventory, neutral.inventory);
     assert_eq!(
         classic.pages[0].result,
-        ClassicPdfInventoryPageResult::Inventoried { entry_count: 2 }
+        ClassicPdfInventoryPageResult::Inventoried {
+            entry_count: 2,
+            form_skipped: Vec::new()
+        }
     );
     Ok(())
 }

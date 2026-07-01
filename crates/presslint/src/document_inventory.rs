@@ -14,7 +14,9 @@ use presslint_syntax::{AssembleError, TokenizeError};
 use presslint_types::{PageIndex, PdfName};
 use serde::{Deserialize, Serialize};
 
-use crate::form_inventory::{FormWalkContext, build_page_inventory_with_forms};
+use crate::form_inventory::{
+    FormExpandedInventory, FormWalkContext, SkippedFormInventory, build_page_inventory_with_forms,
+};
 use crate::page_content::{PageContentBytes, page_content_bytes};
 
 /// Result of building inventory from a classic-xref PDF.
@@ -54,6 +56,9 @@ pub enum ClassicPdfInventoryPageResult {
     Inventoried {
         /// Number of entries emitted for this page.
         entry_count: usize,
+        /// Structured per-form expansion skips emitted while inventorying this
+        /// page. Empty when every invoked form was fully walked.
+        form_skipped: Vec<SkippedFormInventory>,
     },
     /// The page was intentionally skipped with a structured reason.
     Skipped {
@@ -267,12 +272,19 @@ pub fn build_classic_pdf_inventory(
             &image_xobject_names,
             &form_xobject_names,
             form_targets,
-            FormWalkContext::one_level(),
+            FormWalkContext::bounded_default(),
         ) {
             Ok(expanded) => {
-                let entry_count = expanded.inventory.len();
-                inventory.entries.extend(expanded.inventory.entries);
-                ClassicPdfInventoryPageResult::Inventoried { entry_count }
+                let FormExpandedInventory {
+                    inventory: page_inventory,
+                    form_skipped,
+                } = expanded;
+                let entry_count = page_inventory.len();
+                inventory.entries.extend(page_inventory.entries);
+                ClassicPdfInventoryPageResult::Inventoried {
+                    entry_count,
+                    form_skipped,
+                }
             }
             Err(reason) => ClassicPdfInventoryPageResult::Skipped {
                 reason: reason.into(),

@@ -6,7 +6,7 @@
 //! an error, `DeviceCMYK`/`DeviceGray` are pass-compatible, every other observed
 //! color space needs human review, and three honesty signals record where the
 //! current engine cannot yet see (skipped pages, undecoded image color, and
-//! un-recursed Form `XObject` content).
+//! skipped Form `XObject` expansion diagnostics).
 //!
 //! This is a read-only check. It lives in the umbrella crate, not
 //! `presslint-actions`: it plans nothing, mutates nothing, and retains no PDF
@@ -67,8 +67,8 @@ pub enum PreflightReason {
     /// a review.
     UnmodeledOrUnresolvedColorSpace,
     /// The engine could not fully inspect some content: a skipped page, an image
-    /// whose color is not yet decoded, or Form `XObject` content that is not
-    /// walked. Always a review.
+    /// whose color is not yet decoded, or a real Form `XObject` expansion skip.
+    /// Always a review.
     CoverageIncomplete,
 }
 
@@ -82,9 +82,7 @@ pub enum PreflightReason {
 ///   [`PreflightReason::UnmodeledOrUnresolvedColorSpace`]) carry all of them;
 /// - an image-`Unknown` coverage finding carries all of them
 ///   (`usage = Image`, `color_space = Unknown`);
-/// - a Form `XObject` coverage finding carries `object`, `entry_index`, and
-///   `kind`, but no color observation (`usage`/`color_space` are `None`);
-/// - a skipped-page coverage finding carries only the page.
+/// - skipped-page and form-skip coverage findings carry only the page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreflightFinding {
     /// Check that produced this finding.
@@ -177,12 +175,18 @@ fn collect_findings(inventory: &PdfInventory) -> Vec<PreflightFinding> {
     for page in &inventory.pages {
         match &page.result {
             PdfInventoryPageResult::Skipped { .. } => {
-                findings.push(skipped_page_finding(page.page_index));
+                findings.push(page_coverage_finding(page.page_index));
             }
-            PdfInventoryPageResult::Inventoried { entry_count } => {
+            PdfInventoryPageResult::Inventoried {
+                entry_count,
+                form_skipped,
+            } => {
                 let end = (cursor + entry_count).min(entries.len());
                 for (offset, entry) in entries[cursor..end].iter().enumerate() {
                     entry_findings(cursor + offset, entry, &mut findings);
+                }
+                for _ in form_skipped {
+                    findings.push(page_coverage_finding(page.page_index));
                 }
                 cursor = end;
             }
@@ -193,9 +197,6 @@ fn collect_findings(inventory: &PdfInventory) -> Vec<PreflightFinding> {
 
 /// Emit the findings for one inventory entry in observation order.
 fn entry_findings(entry_index: usize, entry: &InventoryEntry, out: &mut Vec<PreflightFinding>) {
-    if entry.kind == ObjectKind::FormXObject {
-        out.push(form_coverage_finding(entry_index, entry));
-    }
     for observation in &entry.colors {
         if let Some(finding) = observation_finding(entry_index, entry, observation) {
             out.push(finding);
@@ -261,20 +262,8 @@ fn entry_finding(
     }
 }
 
-/// Build the Form `XObject` coverage finding: nested form content is not walked,
-/// so `DeviceRGB` inside a form is currently invisible.
-fn form_coverage_finding(entry_index: usize, entry: &InventoryEntry) -> PreflightFinding {
-    entry_finding(
-        PreflightSeverity::Review,
-        PreflightReason::CoverageIncomplete,
-        entry_index,
-        entry,
-        None,
-    )
-}
-
-/// Build the coverage finding for a page the inventory bridge skipped.
-const fn skipped_page_finding(page: PageIndex) -> PreflightFinding {
+/// Build a page-anchored coverage finding for skipped page/form content.
+const fn page_coverage_finding(page: PageIndex) -> PreflightFinding {
     PreflightFinding {
         check: PreflightCheck::NoRgbInPrint,
         severity: PreflightSeverity::Review,

@@ -98,7 +98,10 @@ fn builds_inventory_from_raw_single_stream_page() -> Result<(), ClassicPdfInvent
     assert_eq!(report.pages[0].page_index.0, 0);
     assert_eq!(
         report.pages[0].result,
-        ClassicPdfInventoryPageResult::Inventoried { entry_count: 1 }
+        ClassicPdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
     );
     assert_eq!(report.inventory.len(), 1);
     assert_eq!(report.inventory.entries[0].kind, ObjectKind::Vector);
@@ -115,7 +118,10 @@ fn builds_inventory_from_flate_single_stream_page() -> Result<(), ClassicPdfInve
 
     assert_eq!(
         report.pages[0].result,
-        ClassicPdfInventoryPageResult::Inventoried { entry_count: 1 }
+        ClassicPdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
     );
     assert_eq!(report.inventory.len(), 1);
     assert_eq!(report.inventory.entries[0].kind, ObjectKind::Vector);
@@ -163,7 +169,10 @@ fn builds_inventory_from_raw_multi_stream_page() -> Result<(), ClassicPdfInvento
     assert_eq!(report.pages.len(), 1);
     assert_eq!(
         report.pages[0].result,
-        ClassicPdfInventoryPageResult::Inventoried { entry_count: 1 }
+        ClassicPdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
     );
     assert_eq!(report.inventory.len(), 1);
     assert_eq!(report.inventory.entries[0].kind, ObjectKind::Vector);

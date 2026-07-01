@@ -1,5 +1,43 @@
 # presslint Journal
 
+## T111 - Bounded Recursive Form Inventory + ACT Coverage Hardening
+
+- Raised the bridge walk from one-level to bounded recursive descent:
+  `FormWalkContext::bounded_default()` is depth 8 with a per-page total
+  expansion budget, while `new(max_depth)`, `with_budget(max_depth,
+  max_expansions)`, and `one_level()` remain available for focused tests. The
+  recursive `expand` machinery, active-path `visited` set, and merge ordering
+  already existed from T110; this slice raises the cap and wires it into both
+  public bridges.
+- `PdfInventoryPageResult::Inventoried` and
+  `ClassicPdfInventoryPageResult::Inventoried` now carry `form_skipped`, moved
+  from `expanded.form_skipped`, so per-form skips are visible in document
+  inventory reports instead of only through the direct form-expansion helper.
+- Nested form `/Resources /XObject` classification skips from
+  `inspect_form_xobject_resources` are now surfaced as
+  `SkippedFormInventoryReason::Resource { skip }`, attributed to the enclosing
+  form. Content skips, cycle skips, max-depth skips, and per-page
+  `BudgetExhausted` skips remain structured `SkippedFormInventory` records.
+- `check_no_rgb_in_print` no longer emits blanket `CoverageIncomplete` findings
+  for every `FormXObject` inventory entry. Coverage review now comes only from
+  skipped pages, image observations still modeled as `Unknown`, and real
+  `form_skipped` diagnostics. The ACT behavior is now: `DeviceRGB` anywhere in
+  walked page/form content is a `Fail`; a fully walked CMYK-only page/form tree
+  `Pass`es with no findings.
+- Tests cover nested RGB failure, CMYK-only nested pass, A -> B -> A cycle
+  termination, max-depth review, shared-form two-branch walking, per-page budget
+  exhaustion, nested page attribution, and nested resource diagnostics.
+- Performance: no new benchmark target. This remains build-once page inventory
+  plus bounded nested descents, capped by depth 8, active-path cycle detection,
+  and a per-page total form expansion budget consumed before any form decode,
+  tokenize, assemble, or inventory work. Raw form streams stay borrowed; Flate
+  forms use the existing bounded decoded buffer; `form_skipped` and preflight
+  findings retain no source bytes, object bodies, resource dictionaries, or
+  decoded form streams.
+- Next queued slice: IMG, decoding image `/Width`/`/Height`/
+  `/BitsPerComponent`/`/ColorSpace` so image `Unknown` observations can be
+  replaced with structured image metadata.
+
 ## T110 - One-Level Form `XObject` Content Inventory (FORM 11a)
 
 - Added `form_inventory` module owning the recursion and merge for one-level

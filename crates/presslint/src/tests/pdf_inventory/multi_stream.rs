@@ -15,7 +15,10 @@ fn adjacent_streams_are_separated_before_tokenization() -> Result<(), String> {
 
     assert_eq!(
         report.pages[0].result,
-        PdfInventoryPageResult::Inventoried { entry_count: 1 }
+        PdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
     );
     let entry = report
         .inventory

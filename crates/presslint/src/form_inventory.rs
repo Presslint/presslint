@@ -1,19 +1,18 @@
-//! One-level Form `XObject` content expansion for the PDF inventory bridge.
+//! Bounded recursive Form `XObject` content expansion for the PDF inventory bridge.
 //!
 //! A page-level Form `XObject` invocation (`/Fm Do`) is inventoried by
 //! [`presslint_inventory::build_inventory`] only as a `FormXObject` invocation
 //! entry; the colors, text, and vectors painted INSIDE the form stay invisible.
-//! This module walks a page-level form's OWN decoded content stream once,
-//! classifies the form's own `/Resources /XObject`, re-invokes `build_inventory`
-//! on the decoded form bytes in [`ContentScope::FormXObject`] with the ORIGINAL
-//! invoking page index, and merges the nested entries immediately after the
-//! form invocation entry.
+//! This module walks a form's OWN decoded content stream, classifies the form's
+//! own `/Resources /XObject`, re-invokes `build_inventory` on the decoded form
+//! bytes in [`ContentScope::FormXObject`] with the ORIGINAL invoking page index,
+//! and merges nested entries immediately after the form invocation entry.
 //!
-//! The walk is bounded by a [`FormWalkContext`] with `max_depth = 1`: nested
-//! forms inside a form are reported as an unwalked max-depth skip rather than
-//! descended, and a self-referential or cyclic form is reported as a cycle skip.
-//! Every per-form failure is a structured [`SkippedFormInventory`], never a page
-//! failure, panic, or infinite loop; the page's own inventory is always emitted.
+//! The walk is bounded by [`FormWalkContext`]: the default limit is 8 form-stream
+//! descents from the page plus a per-page total expansion budget, with
+//! active-path cycle detection. Every per-form failure is a structured
+//! [`SkippedFormInventory`], never a page failure, panic, or infinite loop; the
+//! page's own inventory is always emitted.
 
 use std::collections::BTreeSet;
 
@@ -22,8 +21,9 @@ use presslint_inventory::{
     walk_graphics_state,
 };
 use presslint_pdf::{
-    IndirectRef, ObjectLookup, PageXObjectResourceTarget,
-    inspect_content_stream_data_extent_with_lookup, inspect_form_xobject_resources,
+    IndirectRef, ObjectLookup, PageXObjectResourceTarget, SkippedPageXObjectResource,
+    SkippedPageXObjectResourceReason, inspect_content_stream_data_extent_with_lookup,
+    inspect_form_xobject_resources,
 };
 use presslint_syntax::{assemble_operators, tokenize};
 use presslint_types::{ContentScope, ObjectKind, PageIndex, PdfName};
@@ -71,26 +71,42 @@ pub enum SkippedFormInventoryReason {
         /// Configured maximum form nesting depth for the walk.
         max_depth: usize,
     },
+    /// The page-level total form-expansion budget was exhausted before this
+    /// form could be decoded, tokenized, assembled, or inventoried.
+    BudgetExhausted {
+        /// Configured maximum number of form expansion attempts for one page.
+        max_expansions: usize,
+    },
     /// The form stream could not be located, decoded, tokenized, assembled, or
     /// walked. Delegates to the shared content-skip vocabulary.
     Content {
         /// Delegated content-processing skip for the form stream.
         skip: PdfInventorySkip,
     },
+    /// A nested resource in the form's own `/Resources /XObject` dictionary
+    /// could not be classified, so invocations of that resource cannot be
+    /// recursively inventoried.
+    Resource {
+        /// Delegated resource-classification diagnostic.
+        skip: SkippedPageXObjectResource,
+    },
 }
 
 /// Bounded walk context for one page's form expansion.
 ///
-/// `max_depth` bounds form nesting (1 for this slice). `visited` keys the forms
-/// currently on the active descent path by resolved `(object_number,
+/// `max_depth` bounds form-stream descents from the page. `max_expansions`
+/// bounds total form expansion attempts for one page and is consumed before any
+/// form stream work begins; it is not restored on ascent. `visited` keys the
+/// forms currently on the active descent path by resolved `(object_number,
 /// generation)` plus byte offset, so a form that re-invokes an ancestor is
 /// detected as a cycle without blocking legitimate sibling re-invocations.
 /// Because `visited` is inserted on descent and removed on ascent, its length is
-/// the current descent depth; `visited` already exists so a future deeper walk
-/// only raises `max_depth`.
+/// the current descent depth.
 #[derive(Debug, Clone)]
 pub struct FormWalkContext {
     max_depth: usize,
+    max_expansions: usize,
+    remaining_expansions: usize,
     visited: BTreeSet<FormObjectKey>,
 }
 
@@ -98,13 +114,28 @@ impl FormWalkContext {
     /// Create a context bounded to `max_depth` levels of form nesting.
     #[must_use]
     pub const fn new(max_depth: usize) -> Self {
+        Self::with_budget(max_depth, 256)
+    }
+
+    /// Create a context bounded by nesting depth and total page expansion
+    /// attempts.
+    #[must_use]
+    pub const fn with_budget(max_depth: usize, max_expansions: usize) -> Self {
         Self {
             max_depth,
+            max_expansions,
+            remaining_expansions: max_expansions,
             visited: BTreeSet::new(),
         }
     }
 
-    /// Create the one-level context used by the current inventory bridge.
+    /// Create the default bounded context used by the inventory bridges.
+    #[must_use]
+    pub const fn bounded_default() -> Self {
+        Self::new(8)
+    }
+
+    /// Create a one-level context for focused tests and compatibility.
     #[must_use]
     pub const fn one_level() -> Self {
         Self::new(1)
@@ -128,7 +159,7 @@ impl FormObjectKey {
     }
 }
 
-/// Build a page's combined inventory with one-level Form `XObject` content
+/// Build a page's combined inventory with bounded Form `XObject` content
 /// expansion.
 ///
 /// The page content is decoded, tokenized, assembled, and inventoried through
@@ -264,6 +295,9 @@ impl<'input> FormExpansion<'input> {
             );
             return;
         }
+        if !self.consume_expansion_budget(name, target) {
+            return;
+        }
 
         let Some((source, records)) = self.decode_form(name, target) else {
             return;
@@ -272,6 +306,17 @@ impl<'input> FormExpansion<'input> {
 
         let form_resources =
             inspect_form_xobject_resources(self.input, self.lookup, target.object_byte_offset);
+        for skip in form_resources
+            .skipped
+            .iter()
+            .filter(|skip| is_form_resource_coverage_skip(skip))
+        {
+            self.push_skip(
+                name,
+                target,
+                SkippedFormInventoryReason::Resource { skip: skip.clone() },
+            );
+        }
         let image_names = inventory_names(&form_resources.image_xobject_names);
         let form_names = inventory_names(&form_resources.form_xobject_names);
         let scope = ContentScope::FormXObject { name: name.clone() };
@@ -334,6 +379,25 @@ impl<'input> FormExpansion<'input> {
             }
         }
         self.context.visited.remove(&key);
+    }
+
+    fn consume_expansion_budget(
+        &mut self,
+        name: &PdfName,
+        target: &PageXObjectResourceTarget,
+    ) -> bool {
+        if self.context.remaining_expansions == 0 {
+            self.push_skip(
+                name,
+                target,
+                SkippedFormInventoryReason::BudgetExhausted {
+                    max_expansions: self.context.max_expansions,
+                },
+            );
+            return false;
+        }
+        self.context.remaining_expansions -= 1;
+        true
     }
 
     /// Locate, decode, tokenize, and assemble a form stream through the shared
@@ -463,6 +527,14 @@ fn find_form_target<'a>(
     name: &PdfName,
 ) -> Option<&'a PageXObjectResourceTarget> {
     targets.iter().find(|target| target.name.0 == name.0)
+}
+
+const fn is_form_resource_coverage_skip(skip: &SkippedPageXObjectResource) -> bool {
+    !matches!(
+        skip.reason,
+        SkippedPageXObjectResourceReason::MissingResources
+            | SkippedPageXObjectResourceReason::MissingXObject
+    )
 }
 
 fn usize_to_u32(value: usize) -> u32 {
