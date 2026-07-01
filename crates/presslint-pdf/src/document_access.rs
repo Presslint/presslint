@@ -7,11 +7,11 @@ use crate::{
     ClassicXrefTableInspectionError, ClassicXrefTrailerRootInspection,
     ClassicXrefTrailerRootInspectionError, IndirectRef, ObjectLookup, ObjectResolutionError,
     PageTreeLeavesInspection, PageTreeLeavesInspectionError, PdfSourceDiagnostic, PdfStartXref,
-    ResolvedObject, XrefSection, XrefStreamSection, XrefStreamSectionError,
-    decode_xref_stream_section, inspect_catalog_pages, inspect_classic_xref_table,
-    inspect_classic_xref_trailer_root, inspect_page_tree_leaves,
-    inspect_page_tree_leaves_with_lookup, resolve_classic_xref_object_offset,
-    resolve_xref_object_offset,
+    ResolvedObject, XrefSection, XrefStreamChain, XrefStreamChainError, XrefStreamSection,
+    XrefStreamSectionError, build_xref_stream_chain, decode_xref_stream_section,
+    inspect_catalog_pages, inspect_classic_xref_table, inspect_classic_xref_trailer_root,
+    inspect_page_tree_leaves, inspect_page_tree_leaves_with_lookup,
+    resolve_classic_xref_object_offset, resolve_xref_object_offset,
 };
 
 /// Report-only structural access summary for a classic-xref PDF.
@@ -237,15 +237,15 @@ const fn document_access_error(
 /// realistic single-section documents.
 pub const MAX_XREF_STREAM_SECTION_DECODED_BYTES: usize = 8 * 1024 * 1024;
 
-/// Report-only structural access summary for a single-section PDF, backend
-/// neutral over a classic xref table or one decoded cross-reference-stream
-/// section.
+/// Report-only structural access summary for a PDF, backend neutral over a
+/// classic xref table, one decoded cross-reference-stream section, or a bounded
+/// same-type xref-stream `/Prev` chain.
 ///
 /// This is the first composing spine that threads the [`ObjectLookup`] backend
 /// boundary through page-tree traversal. It selects the backend from the
-/// `startxref` section classification, reads `/Root` from the matching trailer,
-/// resolves the catalog and page-tree root through the selected backend, and
-/// enumerates document-ordered leaves through
+/// `startxref` section classification, reads `/Root` from the matching trailer
+/// or newest xref-stream section, resolves the catalog and page-tree root
+/// through the selected backend, and enumerates document-ordered leaves through
 /// [`inspect_page_tree_leaves_with_lookup`].
 ///
 /// This report stores only structural metadata already produced by the delegated
@@ -294,6 +294,12 @@ pub enum DocumentAccessBackend {
         /// reference and (absent) `/Prev` byte offset.
         section: XrefStreamSection,
     },
+    /// The `startxref` section classified as a cross-reference stream carrying
+    /// `/Prev`, followed into a bounded same-type newest-wins chain.
+    XrefStreamChain {
+        /// Merged same-type xref-stream `/Prev` chain.
+        chain: XrefStreamChain,
+    },
 }
 
 /// Error returned when the neutral document-access spine cannot complete.
@@ -338,6 +344,11 @@ pub enum DocumentAccessRejection {
         /// Delegated single-section cross-reference-stream decode failure.
         error: XrefStreamSectionError,
     },
+    /// The cross-reference-stream `/Prev` chain could not be built.
+    XrefStreamChain {
+        /// Delegated chain-building failure.
+        error: Box<XrefStreamChainError>,
+    },
     /// The decoded cross-reference-stream section carries a `/Prev`. This spine
     /// decodes exactly one section and never follows `/Prev`, so a present
     /// `/Prev` is a structured stop rather than a multi-section merge.
@@ -369,21 +380,23 @@ pub enum DocumentAccessRejection {
     },
 }
 
-/// Compose the neutral single-section document-access spine over caller bytes.
+/// Compose the neutral document-access spine over caller bytes.
 ///
 /// The helper selects the cross-reference backend from the `startxref` section
 /// classification: a classic table uses [`ObjectLookup::ClassicXref`] over the
 /// parsed table; a single `/Type /XRef` stream uses
 /// [`ObjectLookup::XrefStreamSection`] over exactly ONE section decoded by
-/// [`decode_xref_stream_section`]. In both cases `/Root` is read from the
-/// matching trailer, the catalog and page-tree root are resolved through
+/// [`decode_xref_stream_section`]. If that section has `/Prev`, the xref-stream
+/// path builds a bounded [`XrefStreamChain`] and resolves through
+/// [`ObjectLookup::XrefStreamChain`]. In all cases `/Root` is read from the
+/// selected backend, the catalog and page-tree root are resolved through
 /// [`resolve_xref_object_offset`], and leaves are enumerated through
 /// [`inspect_page_tree_leaves_with_lookup`].
 ///
-/// A decoded cross-reference-stream section whose `/Prev` is present is a
-/// structured [`DocumentAccessRejection::PrevPresentUnsupported`] stop: `/Prev`
-/// is never followed, no previous section is decoded, no incremental section is
-/// merged, and no `/XRefStm` hybrid reference is consulted.
+/// Single-section xref-stream documents keep the existing
+/// [`DocumentAccessBackend::XrefStreamSection`] report. Only a present `/Prev`
+/// selects [`DocumentAccessBackend::XrefStreamChain`]. Classic `/Prev`, mixed
+/// classic/xref chains, and `/XRefStm` hybrid references are not followed.
 ///
 /// Page-tree leaf enumeration is non-fatal for individual kids: other-typed
 /// kids, per-kid resolution failures (including compressed or reserved
@@ -399,7 +412,7 @@ pub enum DocumentAccessRejection {
 ///
 /// Returns [`DocumentAccessError`] when `startxref` is missing or malformed, the
 /// section cannot be classified, the single cross-reference-stream section fails
-/// to decode, the decoded section carries a `/Prev`, or any delegated
+/// to decode, an xref-stream chain cannot be built, or any delegated
 /// table/trailer/resolution/catalog/leaf stage fails.
 pub fn inspect_document_access(input: &[u8]) -> Result<DocumentAccess, DocumentAccessError> {
     let startxref = inspect_startxref(input).map_err(|diagnostic| {
@@ -504,11 +517,8 @@ fn xref_stream_spine(
     )
     .map_err(|error| access_error(input, DocumentAccessRejection::XrefStreamDecode { error }))?;
 
-    if let Some(prev_byte_offset) = section.prev_byte_offset {
-        return Err(access_error(
-            input,
-            DocumentAccessRejection::PrevPresentUnsupported { prev_byte_offset },
-        ));
+    if section.prev_byte_offset.is_some() {
+        return xref_stream_chain_spine(input, startxref);
     }
     let root_reference = section.root_reference;
 
@@ -522,6 +532,40 @@ fn xref_stream_spine(
         byte_len: input.len(),
         startxref,
         backend: DocumentAccessBackend::XrefStreamSection { section },
+        root_reference,
+        catalog: walk.catalog,
+        catalog_pages: walk.catalog_pages,
+        page_tree_root: walk.page_tree_root,
+        page_leaves: walk.page_leaves,
+    })
+}
+
+/// Compose the spine over a merged cross-reference-stream `/Prev` chain.
+fn xref_stream_chain_spine(
+    input: &[u8],
+    startxref: PdfStartXref,
+) -> Result<DocumentAccess, DocumentAccessError> {
+    let chain = build_xref_stream_chain(
+        input,
+        startxref.byte_offset,
+        MAX_XREF_STREAM_SECTION_DECODED_BYTES,
+    )
+    .map_err(|error| {
+        access_error(
+            input,
+            DocumentAccessRejection::XrefStreamChain {
+                error: Box::new(error),
+            },
+        )
+    })?;
+    let root_reference = chain.root_reference;
+
+    let walk = walk_spine(input, ObjectLookup::XrefStreamChain(&chain), root_reference)?;
+
+    Ok(DocumentAccess {
+        byte_len: input.len(),
+        startxref,
+        backend: DocumentAccessBackend::XrefStreamChain { chain },
         root_reference,
         catalog: walk.catalog,
         catalog_pages: walk.catalog_pages,

@@ -2,14 +2,16 @@
 //!
 //! This crate provides byte-preserving structural inspection for PDF sources:
 //! source classification, classic xref parsing, single-section xref-stream
-//! decoding, a backend-neutral [`ObjectLookup`] over either backend, object
+//! decoding, bounded `/Prev` multi-section xref-stream chaining, a
+//! backend-neutral [`ObjectLookup`] over supported backends, object
 //! resolution, stream extent access, page-tree traversal, and the
 //! page-content-target/extent path threaded through the same lookup, plus small
 //! planning contracts used by higher-level crates. Classic helpers are preserved
 //! as thin wrappers over their neutral `_with_lookup` variants, so both
-//! classic-xref and single-section xref-stream documents locate page content
-//! stream byte extents through one API. The APIs carry structural metadata and
-//! byte ranges rather than retaining source payloads.
+//! classic-xref, single-section xref-stream, and same-type incrementally
+//! updated xref-stream documents locate page content stream byte extents through
+//! one API. The APIs carry structural metadata and byte ranges rather than
+//! retaining source payloads.
 
 #![forbid(unsafe_code)]
 
@@ -50,6 +52,7 @@ mod startxref;
 mod stream_decode;
 mod trailer;
 mod trailer_root;
+mod xref_chain;
 mod xref_resolve;
 mod xref_section;
 mod xref_stream;
@@ -201,6 +204,10 @@ pub use trailer::{
 pub use trailer_root::{
     ClassicXrefTrailerRootInspection, ClassicXrefTrailerRootInspectionError,
     ClassicXrefTrailerRootInspectionRejection, inspect_classic_xref_trailer_root,
+};
+pub use xref_chain::{
+    MAX_XREF_STREAM_CHAIN_ENTRIES, MAX_XREF_STREAM_CHAIN_SECTIONS, XrefStreamChain,
+    XrefStreamChainError, XrefStreamChainRejection, build_xref_stream_chain,
 };
 pub use xref_resolve::{
     ClassicXrefAmbiguousObjectEntry, ClassicXrefObjectLocation, resolve_classic_xref_object,

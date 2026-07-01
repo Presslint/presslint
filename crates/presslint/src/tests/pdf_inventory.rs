@@ -80,6 +80,65 @@ fn xref_stream_single_page_pdf(
     Ok(source)
 }
 
+fn xref_stream_incremental_single_page_pdf() -> Result<Vec<u8>, String> {
+    let objects = vec![
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_vec(),
+        b"2 0 obj\n<< /Type /Pages /Kids [ 3 0 R ] /Count 1 >>\nendobj\n".to_vec(),
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n".to_vec(),
+        b"4 0 obj\n<< /Length 1 >>\nstream\nq\nendstream\nendobj\n".to_vec(),
+    ];
+
+    let mut source = b"%PDF-1.5\n".to_vec();
+    let mut offsets = Vec::new();
+    for object in &objects {
+        offsets.push(source.len());
+        source.extend_from_slice(object);
+    }
+
+    let old_xref_offset = source.len();
+    let mut old_records = Vec::new();
+    old_records.extend_from_slice(&xref_record(0, 0, 0)?);
+    for offset in &offsets {
+        old_records.extend_from_slice(&xref_record(1, *offset, 0)?);
+    }
+    old_records.extend_from_slice(&xref_record(1, old_xref_offset, 0)?);
+    let old_xref_body = compress_to_vec_zlib(&old_records, 6);
+    source.extend_from_slice(
+        format!(
+            "5 0 obj\n<< /Type /XRef /Size 6 /W [ 1 2 1 ] /Index [ 0 6 ] /Root 1 0 R /Filter /FlateDecode /Length {} >>\nstream\n",
+            old_xref_body.len()
+        )
+        .as_bytes(),
+    );
+    source.extend_from_slice(&old_xref_body);
+    source.extend_from_slice(b"\nendstream\nendobj\n");
+
+    let updated_content = vector_content();
+    let updated_content_offset = source.len();
+    source.extend_from_slice(
+        format!("4 0 obj\n<< /Length {} >>\nstream\n", updated_content.len()).as_bytes(),
+    );
+    source.extend_from_slice(updated_content);
+    source.extend_from_slice(b"\nendstream\nendobj\n");
+
+    let new_xref_offset = source.len();
+    let mut new_records = Vec::new();
+    new_records.extend_from_slice(&xref_record(1, updated_content_offset, 0)?);
+    new_records.extend_from_slice(&xref_record(1, new_xref_offset, 0)?);
+    let new_xref_body = compress_to_vec_zlib(&new_records, 6);
+    source.extend_from_slice(
+        format!(
+            "6 0 obj\n<< /Type /XRef /Size 7 /W [ 1 2 1 ] /Index [ 4 2 ] /Root 1 0 R /Prev {old_xref_offset} /Filter /FlateDecode /Length {} >>\nstream\n",
+            new_xref_body.len()
+        )
+        .as_bytes(),
+    );
+    source.extend_from_slice(&new_xref_body);
+    source.extend_from_slice(b"\nendstream\nendobj\n");
+    source.extend_from_slice(format!("startxref\n{new_xref_offset}\n%%EOF\n").as_bytes());
+    Ok(source)
+}
+
 fn round_trip<T>(value: &T) -> Result<(), String>
 where
     T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
@@ -149,23 +208,37 @@ fn neutral_bridge_matches_classic_bridge_for_classic_xref() -> Result<(), String
 }
 
 #[test]
-fn xref_stream_prev_is_top_level_document_access_rejection() -> Result<(), String> {
-    let source = xref_stream_single_page_pdf(b"", vector_content(), false, Some(17))?;
+fn inventories_two_section_xref_stream_incremental_update() -> Result<(), String> {
+    let source = xref_stream_incremental_single_page_pdf()?;
+
+    let report = build_pdf_inventory(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(report.pages.len(), 1);
+    assert_eq!(
+        report.pages[0].result,
+        PdfInventoryPageResult::Inventoried { entry_count: 1 }
+    );
+    assert_eq!(report.inventory.len(), 1);
+    assert_eq!(report.inventory.entries[0].kind, ObjectKind::Vector);
+    Ok(())
+}
+
+#[test]
+fn invalid_xref_stream_prev_is_top_level_document_access_rejection() -> Result<(), String> {
+    let source = xref_stream_single_page_pdf(b"", vector_content(), false, Some(9999))?;
 
     let Err(error) = build_pdf_inventory(&source, 1024) else {
-        return Err("present /Prev should reject".to_string());
+        return Err("invalid /Prev should reject".to_string());
     };
 
     assert_eq!(error.byte_len, source.len());
     let PdfInventoryRejection::DocumentAccess { error } = error.reason else {
         return Err("expected delegated document-access rejection".to_string());
     };
-    assert_eq!(
+    assert!(matches!(
         error.reason,
-        crate::pdf::DocumentAccessRejection::PrevPresentUnsupported {
-            prev_byte_offset: 17,
-        }
-    );
+        crate::pdf::DocumentAccessRejection::XrefStreamChain { .. }
+    ));
     Ok(())
 }
 
@@ -229,7 +302,7 @@ fn neutral_inventory_serde_round_trips_report_page_skip_and_rejection_shapes() -
     };
     round_trip(reason)?;
 
-    let prev_source = xref_stream_single_page_pdf(b"", vector_content(), false, Some(42))?;
+    let prev_source = xref_stream_single_page_pdf(b"", vector_content(), false, Some(9999))?;
     let Err(error) = build_pdf_inventory(&prev_source, 1024) else {
         return Err("present /Prev should reject".to_string());
     };

@@ -4,6 +4,34 @@ Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.
 
 ## Current State
 
+### T103 - Xref-Stream `/Prev` Chain Object Map
+
+- Added a bounded same-type xref-stream `/Prev` chain builder that decodes each
+  section with the existing single-section decoder, follows newest-to-oldest
+  offsets, and materializes one deterministic newest-wins merged
+  `XrefStreamEntry` map sorted by object number.
+- Merge precedence is newest-wins for every entry type: an object redefined in
+  the newest section resolves to the newest offset, and a newer type-0 free
+  entry shadows an older type-1 in-use entry.
+- The chain report reads `/Root` from the newest section only, tracks effective
+  `/Size` as the maximum across sections, retains no source bytes, and owns only
+  bounded section offsets plus the merged entry vector.
+- Added structured chain stops for out-of-bounds offsets, repeated offsets
+  (cycles), section-count bound, merged-entry bound, unclassified `/Prev`
+  targets, mixed classic-table `/Prev` targets, and delegated section decode
+  failures.
+- Added `ObjectLookup::XrefStreamChain` and
+  `DocumentAccessBackend::XrefStreamChain`. Single-section xref-stream PDFs
+  with no `/Prev` still use the existing `XrefStreamSection` backend and serde
+  shape; only a present `/Prev` selects the chain backend.
+- The neutral document-access spine and the page-content extent path now resolve
+  through the merged chain. The umbrella inventory bridge gets the benefit
+  transitively by deriving the new lookup variant from the new backend; no new
+  umbrella report type, opener, cache, or CLI behavior was added.
+- Deferred as planned: classic-table `/Prev` chains need the companion classic
+  trailer inspector slice, and mixed classic/xref chains plus `/XRefStm` hybrid
+  references remain Y2 work.
+
 ### T088 - Bounded FlateDecode Stream Decoding
 
 - Added a focused `/FlateDecode` stream helper that accepts borrowed compressed

@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ClassicXrefAmbiguousObjectEntry, ClassicXrefObjectLocation, ClassicXrefTableInspection,
-    XrefStreamEntry, XrefStreamEntryRecord, XrefStreamSection, resolve_classic_xref_object,
+    XrefStreamChain, XrefStreamEntry, XrefStreamEntryRecord, XrefStreamSection,
+    resolve_classic_xref_object,
 };
 
 /// Borrowed object lookup backend.
@@ -16,6 +17,8 @@ pub enum ObjectLookup<'a> {
     ClassicXref(&'a ClassicXrefTableInspection),
     /// Decoded single cross-reference-stream section backend.
     XrefStreamSection(&'a XrefStreamSection),
+    /// Merged newest-wins cross-reference-stream `/Prev` chain backend.
+    XrefStreamChain(&'a XrefStreamChain),
 }
 
 /// Locate-only result for an object number from any supported xref backend.
@@ -145,7 +148,10 @@ pub fn locate_xref_object(lookup: ObjectLookup<'_>, object_number: usize) -> Obj
     match lookup {
         ObjectLookup::ClassicXref(xref) => locate_classic_object(xref, object_number),
         ObjectLookup::XrefStreamSection(section) => {
-            locate_xref_stream_object(section, object_number)
+            locate_xref_stream_entries(&section.entries, object_number)
+        }
+        ObjectLookup::XrefStreamChain(chain) => {
+            locate_xref_stream_entries(&chain.entries, object_number)
         }
     }
 }
@@ -201,18 +207,16 @@ fn classic_object_number(object_number: u32) -> usize {
     usize::try_from(object_number).map_or(usize::MAX, |value| value)
 }
 
-fn locate_xref_stream_object(
-    section: &XrefStreamSection,
+fn locate_xref_stream_entries(
+    entries: &[XrefStreamEntry],
     object_number: usize,
 ) -> ObjectLookupLocation {
-    let Ok(index) = section
-        .entries
-        .binary_search_by_key(&object_number, |entry| entry.object_number)
+    let Ok(index) = entries.binary_search_by_key(&object_number, |entry| entry.object_number)
     else {
         return ObjectLookupLocation::XrefStreamNotFound { object_number };
     };
 
-    xref_stream_location(section.entries[index])
+    xref_stream_location(entries[index])
 }
 
 fn xref_stream_location(entry: XrefStreamEntry) -> ObjectLookupLocation {

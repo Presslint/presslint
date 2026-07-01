@@ -229,7 +229,7 @@ pub fn inspect_content_stream_data_extent(
 /// - [`ObjectLookup::ClassicXref`] delegates to
 ///   [`inspect_indirect_length_content_stream_data_extent`] so the classic path
 ///   stays byte-identical;
-/// - any other backend resolves the `/Length` reference through the shared
+/// - xref-stream backends resolve the `/Length` reference through the shared
 ///   [`resolve_xref_object_offset`] machinery and reads the referenced
 ///   non-negative integer, mapping compressed, reserved, free, missing,
 ///   out-of-range, and generation-mismatched results into structured
@@ -316,13 +316,15 @@ pub fn inspect_content_stream_data_extent_with_lookup(
                         )
                     })
                 }
-                other @ ObjectLookup::XrefStreamSection(_) => resolve_indirect_length_via_lookup(
-                    input,
-                    other,
-                    object_offset,
-                    stream_start,
-                    length_entry,
-                ),
+                other @ (ObjectLookup::XrefStreamSection(_) | ObjectLookup::XrefStreamChain(_)) => {
+                    resolve_indirect_length_via_lookup(
+                        input,
+                        other,
+                        object_offset,
+                        stream_start,
+                        length_entry,
+                    )
+                }
             }
         }
         value_kind => Err(content_stream_data_extent_error(

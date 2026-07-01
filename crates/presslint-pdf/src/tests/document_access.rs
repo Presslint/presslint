@@ -7,9 +7,12 @@ use super::indirect_ref;
 use serde_harness::{from_serde_value, serde_value};
 
 use crate::{
-    ClassicDocumentAccess, ClassicDocumentAccessRejection, DocumentAccess, DocumentAccessBackend,
-    DocumentAccessError, DocumentAccessRejection, ObjectResolutionError, ObjectResolutionRejection,
-    SkippedPageTreeLeafReason, inspect_classic_document_access, inspect_document_access,
+    ClassicDocumentAccess, ClassicDocumentAccessRejection, ContentStreamDataExtentInspection,
+    DocumentAccess, DocumentAccessBackend, DocumentAccessError, DocumentAccessRejection,
+    DocumentPageContentExtentResult, ObjectLookup, ObjectResolutionError,
+    ObjectResolutionRejection, PageContentExtentInspection, SkippedPageTreeLeafReason,
+    inspect_classic_document_access, inspect_document_access,
+    inspect_document_page_content_extents_with_lookup,
 };
 
 /// Extract the delegated object-resolution error from a `RootObject` rejection.
@@ -402,6 +405,68 @@ fn flate_xref_stream_document(catalog_extra: &str, prev: Option<usize>) -> (Vec<
     )
 }
 
+/// Assemble a two-section incrementally-updated xref-stream document where
+/// object 4 (`/Contents`) is present in both sections. The newest section
+/// redefines object 4, so resolving page content extents through the document
+/// access backend must land on the newer content stream.
+fn two_section_xref_stream_document() -> (Vec<u8>, usize) {
+    let prefix = b"%PDF-1.5\n";
+    let catalog = b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+    let pages = b"2 0 obj\n<< /Type /Pages /Kids [ 3 0 R ] /Count 1 >>\nendobj\n";
+    let page = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n";
+    let old_content = b"4 0 obj\n<< /Length 3 >>\nstream\nold\nendstream\nendobj\n";
+
+    let catalog_offset = prefix.len();
+    let pages_offset = catalog_offset + catalog.len();
+    let page_offset = pages_offset + pages.len();
+    let old_content_offset = page_offset + page.len();
+    let old_xref_offset = old_content_offset + old_content.len();
+
+    let mut old_records = Vec::new();
+    old_records.extend_from_slice(&xref_record(0, 0, 0));
+    old_records.extend_from_slice(&xref_record(1, catalog_offset, 0));
+    old_records.extend_from_slice(&xref_record(1, pages_offset, 0));
+    old_records.extend_from_slice(&xref_record(1, page_offset, 0));
+    old_records.extend_from_slice(&xref_record(1, old_content_offset, 0));
+    old_records.extend_from_slice(&xref_record(1, old_xref_offset, 0));
+    let old_body = zlib_store(&old_records);
+
+    let mut source = prefix.to_vec();
+    source.extend_from_slice(catalog);
+    source.extend_from_slice(pages);
+    source.extend_from_slice(page);
+    source.extend_from_slice(old_content);
+    source.extend_from_slice(
+        format!(
+            "5 0 obj\n<< /Type /XRef /Size 6 /W [ 1 2 1 ] /Index [ 0 6 ] /Root 1 0 R /Filter /FlateDecode /Length {} >>\nstream\n",
+            old_body.len()
+        )
+        .as_bytes(),
+    );
+    source.extend_from_slice(&old_body);
+    source.extend_from_slice(b"\nendstream\nendobj\n");
+
+    let new_content_offset = source.len();
+    source.extend_from_slice(b"4 0 obj\n<< /Length 3 >>\nstream\nnew\nendstream\nendobj\n");
+    let new_xref_offset = source.len();
+    let mut new_records = Vec::new();
+    new_records.extend_from_slice(&xref_record(1, new_content_offset, 0));
+    new_records.extend_from_slice(&xref_record(1, new_xref_offset, 0));
+    let new_body = zlib_store(&new_records);
+    source.extend_from_slice(
+        format!(
+            "6 0 obj\n<< /Type /XRef /Size 7 /W [ 1 2 1 ] /Index [ 4 2 ] /Root 1 0 R /Prev {old_xref_offset} /Filter /FlateDecode /Length {} >>\nstream\n",
+            new_body.len()
+        )
+        .as_bytes(),
+    );
+    source.extend_from_slice(&new_body);
+    source.extend_from_slice(b"\nendstream\nendobj\n");
+    source.extend_from_slice(format!("startxref\n{new_xref_offset}\n%%EOF\n").as_bytes());
+
+    (source, new_content_offset)
+}
+
 fn leaf_offsets(access: &DocumentAccess) -> Vec<(crate::IndirectRef, usize)> {
     access
         .page_leaves
@@ -469,18 +534,62 @@ fn neutral_spine_navigates_flate_xref_stream_document() {
 }
 
 #[test]
-fn neutral_spine_stops_on_present_prev_without_following_it() {
-    let (source, _) = flate_xref_stream_document("", Some(17));
+fn neutral_spine_navigates_two_section_xref_stream_chain_to_newest_content_object() {
+    let (source, new_content_offset) = two_section_xref_stream_document();
 
-    let error = inspect_document_access(&source)
-        .expect_err("a present /Prev must stop the single-section spine");
+    let access = inspect_document_access(&source)
+        .expect("neutral spine should navigate a two-section xref-stream chain");
 
+    assert!(matches!(
+        access.backend,
+        DocumentAccessBackend::XrefStreamChain { .. }
+    ));
+    assert_eq!(access.page_leaves.leaf_count(), 1);
+    let DocumentAccessBackend::XrefStreamChain { chain } = &access.backend else {
+        unreachable!("backend shape already asserted");
+    };
+    assert_eq!(chain.section_byte_offsets.len(), 2);
     assert_eq!(
-        error.reason,
-        DocumentAccessRejection::PrevPresentUnsupported {
-            prev_byte_offset: 17,
+        crate::locate_xref_object(ObjectLookup::XrefStreamChain(chain), 4),
+        crate::ObjectLookupLocation::XrefStreamUncompressed {
+            object_number: 4,
+            generation: 0,
+            byte_offset: new_content_offset,
         }
     );
+
+    let extents = inspect_document_page_content_extents_with_lookup(
+        &source,
+        ObjectLookup::XrefStreamChain(chain),
+        access.page_tree_root.object_byte_offset,
+    )
+    .expect("page content extents should resolve through the chain");
+    assert_eq!(extents.located_page_count(), 1);
+    assert!(matches!(
+        &extents.pages[0].result,
+        DocumentPageContentExtentResult::Inspected { .. }
+    ));
+    if let DocumentPageContentExtentResult::Inspected { extents, .. } = &extents.pages[0].result {
+        assert!(matches!(
+            &extents.entries[0],
+            PageContentExtentInspection::Located {
+                extent: ContentStreamDataExtentInspection::DirectLength(_),
+                ..
+            }
+        ));
+        if let PageContentExtentInspection::Located {
+            object_byte_offset,
+            extent: ContentStreamDataExtentInspection::DirectLength(extent),
+            ..
+        } = &extents.entries[0]
+        {
+            assert_eq!(*object_byte_offset, new_content_offset);
+            assert_eq!(
+                &source[extent.stream_data_start_byte_offset..extent.stream_data_end_byte_offset],
+                b"new"
+            );
+        }
+    }
 }
 
 #[test]
@@ -576,10 +685,25 @@ fn neutral_spine_serde_round_trips_flate_report() {
 }
 
 #[test]
+fn neutral_spine_serde_round_trips_xref_stream_chain_report() {
+    let (source, _) = two_section_xref_stream_document();
+    let access = inspect_document_access(&source).expect("chain spine should compose");
+
+    assert!(matches!(
+        access.backend,
+        DocumentAccessBackend::XrefStreamChain { .. }
+    ));
+    let value = serde_value(&access).expect("chain neutral report should serialize");
+    let restored: DocumentAccess =
+        from_serde_value(value).expect("chain neutral report should deserialize");
+    assert_eq!(restored, access);
+}
+
+#[test]
 fn neutral_spine_serde_round_trips_rejection_shapes() {
-    let prev_error = {
+    let chain_error = {
         let (source, _) = flate_xref_stream_document("", Some(42));
-        inspect_document_access(&source).expect_err("present /Prev should reject")
+        inspect_document_access(&source).expect_err("out-of-bounds /Prev should reject")
     };
     let root_error = {
         let (source, _) = assemble(
@@ -593,7 +717,7 @@ fn neutral_spine_serde_round_trips_rejection_shapes() {
         inspect_document_access(&source).expect_err("malformed xref stream should reject")
     };
 
-    for error in [prev_error, root_error, decode_error] {
+    for error in [chain_error, root_error, decode_error] {
         let value = serde_value(&error).expect("rejection should serialize");
         let restored: DocumentAccessError =
             from_serde_value(value).expect("rejection should deserialize");
