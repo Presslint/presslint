@@ -546,3 +546,31 @@ The matcher does not retain source bytes or build a whole-document cache; it
 keeps only token/operator records and small splice ranges for the current stream.
 The stream-object-body builder is split into `stream_object_body.rs`, keeping the
 shared pipeline comfortably below the 800-line file-size gate.
+
+## T129 - Black-Preservation Overlay for DeviceLink Conversion
+
+Added an opt-in `BlackPreservationPolicy` to
+`convert_content_colors_incremental`. The default policy is `None`, preserving
+the F4-2 DeviceLink behavior byte-for-byte: matching source-space operators are
+validated and then converted through `presslint-color-lcms`.
+
+With `NeutralBlackToK`, matching source-space operators are processed in this
+order: source-space gate, operand count / number / range validation, exact
+neutral-black preservation, then DeviceLink conversion for everything else. The
+overlay fires only when the DeviceLink destination is CMYK. Exact neutral black
+means RGB `[0, 0, 0]`, Gray `[0]`, or CMYK `[0, 0, 0, 1]` after the existing
+single-number operand parse; there is no tolerance and no neutral-gray mapping.
+Preserved operators serialize canonically as `0 0 0 1 k` or `0 0 0 1 K`.
+
+`ConvertedPage` now reports `black_preserved` separately from
+`operators_converted`. The latter remains the count of operators actually sent
+through the DeviceLink. A canonical CMYK K-only operator under a CMYK-to-CMYK
+link is counted as preserved, but if the canonical replacement is byte-identical
+to the original operator record no splice is recorded, so a page with only those
+passthroughs produces no revision object.
+
+Bounds and performance: the overlay adds only a small fixed operand comparison
+before the heavier DeviceLink call and can skip that call for preserved black.
+Memory shape is unchanged from F4-2: one decoded stream, token/operator records,
+small replacement buffers only for real splices, and the normal re-encoded
+stream / append-writer output when a page is actually dirtied.

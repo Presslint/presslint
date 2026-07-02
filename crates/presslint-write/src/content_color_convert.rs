@@ -1,13 +1,12 @@
 //! DeviceLink-driven direct device-colour content conversion (F4-2).
 //!
-//! This is the first real colour conversion of PDF page content. It generalises
-//! the T126 hardcoded `0 0 0 rg -> 0 0 0 1 k` rewrite into a DeviceLink-driven
-//! conversion: for each direct device colour-setting operator in a selected page
-//! content stream whose declared colour space equals the supplied DeviceLink's
-//! **source** space, it reads the operands, applies the DeviceLink through
-//! `presslint-color-lcms` (F4-1), and rewrites the operator to the DeviceLink's
-//! **destination** space with the converted, deterministically serialized
-//! operands.
+//! This is the first real colour conversion of PDF page content. For each direct
+//! device colour-setting operator in a selected page content stream whose
+//! declared colour space equals the supplied DeviceLink's **source** space, it
+//! reads the operands, optionally applies the black-preservation overlay, else
+//! applies the DeviceLink through `presslint-color-lcms` (F4-1), and rewrites the
+//! operator to the DeviceLink's **destination** space with deterministically
+//! serialized operands.
 //!
 //! It is source-space GATED: an RGB->CMYK link touches only `rg`/`RG`, a
 //! CMYK->CMYK link only `k`/`K`, a Gray link only `g`/`G`; every other operator
@@ -37,6 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     PlannedWriteError, WriteError,
+    black_preservation::{BlackPreservationPolicy, black_preservation_replacement},
     content_edit_pipeline::{
         EditPageContentError, EditedContent, PageSelection, PipelinePageSkip, PipelineSkipReason,
         edit_page_content_incremental,
@@ -51,6 +51,9 @@ pub struct ConvertContentColorsRequest {
     pub pages: PageSelection,
     /// Raw ICC DeviceLink profile bytes, inspected once up front.
     pub device_link_bytes: Vec<u8>,
+    /// Optional pre-DeviceLink black-preservation overlay.
+    #[serde(default)]
+    pub black_preservation: BlackPreservationPolicy,
 }
 
 /// Per-page aggregate operator-skip taxonomy (honest coverage reporting).
@@ -75,6 +78,8 @@ pub struct ConvertedPage {
     pub content_object: IndirectRef,
     /// Number of operators converted in this page stream.
     pub operators_converted: usize,
+    /// Number of source-space neutral-black operators preserved before the link.
+    pub black_preserved: usize,
     /// Aggregate per-page operator-skip counts.
     pub operator_skips: OperatorSkipCounts,
 }
@@ -194,9 +199,9 @@ pub enum ConvertContentColorsError {
     },
 }
 
-/// A direct device colour space handled by this slice.
+/// A direct device colour space shared by this crate's content-colour helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeviceColorSpace {
+pub enum DeviceColorSpace {
     Gray,
     Rgb,
     Cmyk,
@@ -225,7 +230,7 @@ impl DeviceColorSpace {
 
     /// The direct device colour-setting operator for this space and mode
     /// (lowercase = nonstroking, uppercase = stroking).
-    const fn operator(self, stroking: bool) -> &'static [u8] {
+    pub const fn operator(self, stroking: bool) -> &'static [u8] {
         match (self, stroking) {
             (Self::Gray, false) => b"g",
             (Self::Gray, true) => b"G",
@@ -254,6 +259,7 @@ const fn classify_operator(operator: &[u8]) -> Option<(DeviceColorSpace, bool)> 
 #[derive(Default)]
 struct PageTally {
     converted: usize,
+    black_preserved: usize,
     skips: OperatorSkipCounts,
 }
 
@@ -293,19 +299,26 @@ pub fn convert_content_colors_incremental(
     let link_bytes = request.device_link_bytes.as_slice();
 
     let output = edit_page_content_incremental(input, &request.pages, |decoded| {
-        match convert_decoded(decoded, link_bytes, source, destination) {
+        match convert_decoded(
+            decoded,
+            link_bytes,
+            source,
+            destination,
+            request.black_preservation,
+        ) {
             Some((edited, tally)) => {
-                let edit_count = tally.converted;
+                let edit_count = tally.converted + tally.black_preserved;
+                let has_splices = !edited.is_empty();
                 tallies.borrow_mut().push(tally);
-                if edit_count == 0 {
-                    // Analysed but nothing converted: no revision object, but the
-                    // tally is still recorded above for honest reporting.
-                    EditedContent::Unchanged
-                } else {
+                if has_splices {
                     EditedContent::Rewritten {
                         decoded: edited,
                         edit_count,
                     }
+                } else {
+                    // Analysed but no real byte splice: no revision object, but
+                    // the tally is still recorded above for honest reporting.
+                    EditedContent::Unchanged
                 }
             }
             None => EditedContent::Rejected(PipelineSkipReason::ContentRoundTripMismatch),
@@ -330,15 +343,17 @@ pub fn convert_content_colors_incremental(
 
 /// Apply the DeviceLink to one decoded content stream.
 ///
-/// Returns `Some((edited, tally))` when the stream tokenized and assembled (the
-/// tally records conversions + skips, and `edited` is the spliced buffer, valid
-/// only when `tally.converted > 0`), or `None` when the operators could not be
-/// assembled (a round-trip rejection, no tally recorded).
+/// Returns `Some((edited, tally))` when the stream tokenized and assembled.
+/// `edited` is empty when no real splice is needed, otherwise it is the spliced
+/// buffer; `tally` still records conversions, black-preserved operators, and
+/// skips. Returns `None` when operators could not be assembled (a round-trip
+/// rejection, no tally recorded).
 fn convert_decoded(
     decoded: &[u8],
     link_bytes: &[u8],
     source: DeviceColorSpace,
     destination: DeviceColorSpace,
+    black_preservation: BlackPreservationPolicy,
 ) -> Option<(Vec<u8>, PageTally)> {
     let tokens = tokenize(decoded).ok()?;
     let assembled = assemble_operators(&tokens).ok()?;
@@ -371,6 +386,19 @@ fn convert_decoded(
                 continue;
             }
         };
+        if let Some(replacement) = black_preservation_replacement(
+            &operands,
+            source,
+            destination,
+            stroking,
+            black_preservation,
+        ) {
+            tally.black_preserved += 1;
+            if decoded.get(record.range.start..record.range.end) != Some(replacement.as_slice()) {
+                splices.push((record.range, replacement));
+            }
+            continue;
+        }
         let Ok(components) = apply_device_link_f64(link_bytes, &operands) else {
             // Unreachable after the up-front space gate + per-operand validation
             // (channel count and range are already guaranteed); leave verbatim.
@@ -478,6 +506,7 @@ fn attach_tallies(
             page_index,
             content_object,
             operators_converted: tally.converted,
+            black_preserved: tally.black_preserved,
             operator_skips: tally.skips,
         })
         .collect()

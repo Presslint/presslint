@@ -23,8 +23,9 @@ use presslint_syntax::{TokenKind, assemble_operators, tokenize};
 use presslint_types::PageIndex;
 
 use crate::{
-    ConvertContentColorsError, ConvertContentColorsOutput, ConvertContentColorsRequest,
-    ConvertPageSkipReason, OperatorSkipCounts, PageSelection, convert_content_colors_incremental,
+    BlackPreservationPolicy, ConvertContentColorsError, ConvertContentColorsOutput,
+    ConvertContentColorsRequest, ConvertPageSkipReason, OperatorSkipCounts, PageSelection,
+    convert_content_colors_incremental,
 };
 
 use super::{reopen, xref_record};
@@ -239,15 +240,31 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-fn convert(input: &[u8], link: &str) -> ConvertContentColorsOutput {
+fn occurrence_count(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
+}
+
+fn convert_with_policy(
+    input: &[u8],
+    link: &str,
+    black_preservation: BlackPreservationPolicy,
+) -> ConvertContentColorsOutput {
     convert_content_colors_incremental(
         input,
         &ConvertContentColorsRequest {
             pages: PageSelection::All,
             device_link_bytes: link_bytes(link),
+            black_preservation,
         },
     )
     .expect("convert succeeds")
+}
+
+fn convert(input: &[u8], link: &str) -> ConvertContentColorsOutput {
+    convert_with_policy(input, link, BlackPreservationPolicy::None)
 }
 
 fn assert_component_range(operands: &[f64]) {
@@ -267,6 +284,7 @@ fn rgb_link_converts_nonstroking_rg_to_k() {
     assert_eq!(&output.bytes[..input.len()], input.as_slice());
     assert_eq!(output.converted.len(), 1);
     assert_eq!(output.converted[0].operators_converted, 1);
+    assert_eq!(output.converted[0].black_preserved, 0);
     assert_eq!(
         output.converted[0].operator_skips,
         OperatorSkipCounts::default()
@@ -305,6 +323,7 @@ fn source_space_gate_leaves_cmyk_and_gray_verbatim_under_rgb_link() {
     // Only the RGB operator converts; the k and g operators are counted as
     // source-space mismatches and left byte-verbatim.
     assert_eq!(output.converted[0].operators_converted, 1);
+    assert_eq!(output.converted[0].black_preserved, 0);
     assert_eq!(output.converted[0].operator_skips.source_space_mismatch, 2);
 
     let decoded = page_decoded_stream(&output.bytes, false);
@@ -337,6 +356,120 @@ fn gray_link_converts_g_to_g() {
     let operands = operands_of(&decoded, b"g");
     assert_eq!(operands.len(), 1);
     assert_component_range(&operands);
+}
+
+#[test]
+fn black_preservation_maps_rgb_black_to_k_before_device_link() {
+    let input = classic_raw_pdf(b"q 0 0 0 rg 1 0 0 RG Q\n");
+    let output = convert_with_policy(
+        &input,
+        RGB_TO_CMYK_LINK,
+        BlackPreservationPolicy::NeutralBlackToK,
+    );
+
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    assert_eq!(output.converted[0].operators_converted, 1);
+    assert_eq!(output.converted[0].black_preserved, 1);
+
+    let decoded = page_decoded_stream(&output.bytes, false);
+    assert!(contains(&decoded, b"0 0 0 1 k"));
+    assert!(!contains(&decoded, b"0 0 0 rg"));
+    assert!(!contains(&decoded, b"RG"));
+    assert_eq!(operands_of(&decoded, b"K").len(), 4);
+}
+
+#[test]
+fn policy_none_keeps_rgb_black_as_rich_device_link_conversion() {
+    let input = classic_raw_pdf(b"0 0 0 rg\n");
+    let output = convert(&input, RGB_TO_CMYK_LINK);
+
+    assert_eq!(output.converted[0].operators_converted, 1);
+    assert_eq!(output.converted[0].black_preserved, 0);
+    let decoded = page_decoded_stream(&output.bytes, false);
+    let operands = operands_of(&decoded, b"k");
+    assert_eq!(operands.len(), 4);
+    assert_ne!(operands, vec![0.0, 0.0, 0.0, 1.0]);
+}
+
+#[test]
+fn black_preservation_preserves_cmyk_k_only_without_identical_splice() {
+    let input = classic_raw_pdf(b"0 0 0 1 k\n");
+    let output = convert_with_policy(
+        &input,
+        CMYK_TO_CMYK_LINK,
+        BlackPreservationPolicy::NeutralBlackToK,
+    );
+
+    assert_eq!(output.converted[0].operators_converted, 0);
+    assert_eq!(output.converted[0].black_preserved, 1);
+    assert_eq!(occurrence_count(&output.bytes, b"4 0 obj"), 1);
+    assert_eq!(page_decoded_stream(&output.bytes, false), b"0 0 0 1 k\n");
+}
+
+#[test]
+fn black_preservation_rewrites_noncanonical_cmyk_k_only() {
+    let input = classic_raw_pdf(b"0.0 0.0 0.0 1.0 K\n");
+    let output = convert_with_policy(
+        &input,
+        CMYK_TO_CMYK_LINK,
+        BlackPreservationPolicy::NeutralBlackToK,
+    );
+
+    assert_eq!(output.converted[0].operators_converted, 0);
+    assert_eq!(output.converted[0].black_preserved, 1);
+    assert_eq!(page_decoded_stream(&output.bytes, false), b"0 0 0 1 K\n");
+}
+
+#[test]
+fn non_cmyk_destination_does_not_preserve_black() {
+    let input = classic_raw_pdf(b"0 g\n");
+    let output = convert_with_policy(
+        &input,
+        GRAY_TO_GRAY_LINK,
+        BlackPreservationPolicy::NeutralBlackToK,
+    );
+
+    assert_eq!(output.converted[0].operators_converted, 1);
+    assert_eq!(output.converted[0].black_preserved, 0);
+    let decoded = page_decoded_stream(&output.bytes, false);
+    assert!(!contains(&decoded, b"k"));
+    assert_eq!(operands_of(&decoded, b"g").len(), 1);
+}
+
+#[test]
+fn source_space_gate_still_leaves_rgb_black_under_cmyk_link() {
+    let input = classic_raw_pdf(b"0 0 0 rg\n0 0 0 1 k\n");
+    let output = convert_with_policy(
+        &input,
+        CMYK_TO_CMYK_LINK,
+        BlackPreservationPolicy::NeutralBlackToK,
+    );
+
+    assert_eq!(output.converted[0].operators_converted, 0);
+    assert_eq!(output.converted[0].black_preserved, 1);
+    assert_eq!(output.converted[0].operator_skips.source_space_mismatch, 1);
+    let decoded = page_decoded_stream(&output.bytes, false);
+    assert!(contains(&decoded, b"0 0 0 rg"));
+    assert!(contains(&decoded, b"0 0 0 1 k"));
+}
+
+#[test]
+fn xref_stream_black_preservation_rewrites_rgb_black_and_reopens() {
+    let input = xref_stream_pdf(b"0 0 0 rg\n");
+    let output = convert_with_policy(
+        &input,
+        RGB_TO_CMYK_LINK,
+        BlackPreservationPolicy::NeutralBlackToK,
+    );
+
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    assert_eq!(output.converted[0].operators_converted, 0);
+    assert_eq!(output.converted[0].black_preserved, 1);
+    assert!(matches!(
+        reopen(&output.bytes).backend,
+        DocumentAccessBackend::XrefStreamChain { .. }
+    ));
+    assert_eq!(page_decoded_stream(&output.bytes, false), b"0 0 0 1 k\n");
 }
 
 #[test]
@@ -450,6 +583,7 @@ fn lab_sided_link_is_a_whole_op_unsupported_space_error() {
         &ConvertContentColorsRequest {
             pages: PageSelection::All,
             device_link_bytes: link_bytes(LAB_TO_RGB_LINK),
+            black_preservation: BlackPreservationPolicy::None,
         },
     )
     .expect_err("Lab-sided link is rejected");
@@ -467,6 +601,7 @@ fn invalid_link_bytes_are_a_whole_op_inspect_failure() {
         &ConvertContentColorsRequest {
             pages: PageSelection::All,
             device_link_bytes: b"not an icc profile".to_vec(),
+            black_preservation: BlackPreservationPolicy::None,
         },
     )
     .expect_err("invalid link bytes are rejected");
@@ -484,6 +619,7 @@ fn empty_page_index_request_is_rejected() {
         &ConvertContentColorsRequest {
             pages: PageSelection::Indices(vec![]),
             device_link_bytes: link_bytes(RGB_TO_CMYK_LINK),
+            black_preservation: BlackPreservationPolicy::None,
         },
     )
     .expect_err("empty index list is rejected");
@@ -521,6 +657,7 @@ fn rerunning_rgb_link_does_not_reconvert_the_now_cmyk_operator() {
         &ConvertContentColorsRequest {
             pages: PageSelection::Indices(vec![PageIndex(0)]),
             device_link_bytes: link_bytes(RGB_TO_CMYK_LINK),
+            black_preservation: BlackPreservationPolicy::None,
         },
     )
     .expect("second run succeeds");
@@ -543,6 +680,7 @@ fn cmyk_link_reconverts_an_already_cmyk_operator() {
         &ConvertContentColorsRequest {
             pages: PageSelection::Indices(vec![PageIndex(0)]),
             device_link_bytes: link_bytes(CMYK_TO_CMYK_LINK),
+            black_preservation: BlackPreservationPolicy::None,
         },
     )
     .expect("second run succeeds");

@@ -50,6 +50,7 @@
 
 #![forbid(unsafe_code)]
 
+mod black_preservation;
 mod content_color_convert;
 mod content_color_rewrite;
 mod content_edit_pipeline;
@@ -62,6 +63,7 @@ mod stream_object_body;
 mod writer;
 mod xref_stream_writer;
 
+pub use black_preservation::BlackPreservationPolicy;
 pub use content_color_convert::{
     ConvertContentColorsError, ConvertContentColorsOutput, ConvertContentColorsRequest,
     ConvertPageSkip, ConvertPageSkipReason, ConvertedPage, OperatorSkipCounts,
