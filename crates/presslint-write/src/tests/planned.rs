@@ -17,7 +17,9 @@ use crate::{
     PlannedWriteError, UnsupportedBoundaryKind, WriteError, write_incremental_revision_plan,
 };
 
-use super::{PAGE_BODY, page_leaf_numbers, reopen, sample_pdf};
+use super::{
+    PAGE_BODY, page_leaf_numbers, reopen, sample_pdf, sample_xref_stream_pdf, xref_stream_chain,
+};
 
 fn iref(object_number: u32) -> IndirectRef {
     IndirectRef {
@@ -284,4 +286,18 @@ fn delegated_writer_error_is_wrapped() {
         error,
         PlannedWriteError::Write { error } if matches!(*error, WriteError::Source { .. })
     ));
+}
+
+#[test]
+fn plan_bridge_writes_xref_stream_input() {
+    let input = sample_xref_stream_pdf();
+    let obj3 = iref(3);
+    let plan = one_object_plan(obj3, vec![media_entry(obj3, in_place(obj3))], PAGE_BODY);
+
+    let output = write_incremental_revision_plan(&input, &plan).expect("plan writes");
+
+    assert_eq!(&output[..input.len()], input.as_slice());
+    let access = reopen(&output);
+    assert_eq!(xref_stream_chain(&access).section_byte_offsets.len(), 2);
+    assert_eq!(page_leaf_numbers(&access), vec![3]);
 }

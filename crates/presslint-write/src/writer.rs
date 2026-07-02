@@ -4,10 +4,12 @@ use presslint_pdf::{
     ClassicXrefChain, ClassicXrefChainError, ClassicXrefTableInspectionError,
     ClassicXrefTrailerDictionaryInspectionError, DictionaryEntryInspectionError, IndirectRef,
     ObjectLookup, ObjectResolutionError, ObjectResolutionRejection, PdfSourceInspectionError,
-    XrefSection, build_classic_xref_chain, inspect_classic_xref_table,
-    inspect_classic_xref_trailer_dictionary, inspect_dictionary_entries, inspect_pdf_source,
-    resolve_xref_object_offset,
+    XrefSection, XrefStreamChainError, XrefStreamTrailerInspectionError, build_classic_xref_chain,
+    inspect_classic_xref_table, inspect_classic_xref_trailer_dictionary,
+    inspect_dictionary_entries, inspect_pdf_source, resolve_xref_object_offset,
 };
+
+use crate::xref_stream_writer::write_xref_stream_incremental_revision;
 
 const ENCRYPT_KEY: &[u8] = b"/Encrypt";
 const ID_KEY: &[u8] = b"/ID";
@@ -39,7 +41,7 @@ pub struct DirtyObjectBytes {
     pub body_bytes: Vec<u8>,
 }
 
-/// Error returned when a classic incremental append cannot be produced.
+/// Error returned when an incremental append cannot be produced.
 ///
 /// Each variant names the stage that stopped and preserves the delegated
 /// [`presslint_pdf`] failure verbatim where one applies.
@@ -56,14 +58,16 @@ pub enum WriteError {
     /// The cross-reference section at the final `startxref` offset could not be
     /// classified as a table or a stream.
     XrefSectionUnclassified,
-    /// The input's final cross-reference section is a cross-reference stream.
-    /// This slice writes classic tables only and does not update xref streams.
-    XrefStreamInput {
-        /// Object number from the cross-reference stream indirect object header.
-        object_number: u32,
-        /// Generation number from the cross-reference stream indirect object
-        /// header.
-        generation: u16,
+    /// The xref-stream `/Prev` chain could not be built.
+    XrefStreamChain {
+        /// Delegated xref-stream chain-building failure.
+        error: Box<XrefStreamChainError>,
+    },
+    /// The active xref-stream dictionary could not be scanned for trailer-style
+    /// values carried into the appended stream dictionary.
+    ActiveXrefStream {
+        /// Delegated xref-stream trailer inspection failure.
+        error: XrefStreamTrailerInspectionError,
     },
     /// The newest classic cross-reference table could not be inspected.
     XrefTable {
@@ -118,23 +122,44 @@ pub enum WriteError {
         /// the structured header rejection reason.
         error: Box<ObjectResolutionError>,
     },
+    /// A dirty object resolves to a type-2 compressed object-stream member.
+    CompressedDirtyObject {
+        /// The dirty reference whose newest xref entry is compressed.
+        reference: IndirectRef,
+        /// Object number of the containing object stream.
+        object_stream_number: usize,
+        /// Member index inside the containing object stream.
+        index_within_object_stream: usize,
+    },
+    /// A dirty object resolves to a reserved or future xref-stream entry type.
+    ReservedDirtyObject {
+        /// The dirty reference whose newest xref entry is reserved.
+        reference: IndirectRef,
+        /// Raw xref-stream entry type.
+        entry_type: u64,
+    },
     /// An appended object offset does not fit the fixed 10-digit classic xref
     /// offset field.
     XrefOffsetTooLarge {
         /// The offending byte offset.
         byte_offset: usize,
     },
+    /// The xref-stream backend could not allocate the appended xref-stream
+    /// object number inside the public indirect-reference range.
+    XrefStreamObjectNumberTooLarge {
+        /// Highest existing or newly requested object number that overflowed.
+        object_number: usize,
+    },
 }
 
-/// Append a classic-xref incremental revision that no-op rewrites existing
-/// uncompressed objects with caller-supplied body bytes.
+/// Append an incremental revision that no-op rewrites existing uncompressed
+/// objects with caller-supplied body bytes.
 ///
-/// The output is `input` copied verbatim, followed by one appended revision:
-/// each dirty object's `N G obj … endobj`, then a classic cross-reference table
-/// whose entries point at the appended object headers, then a trailer preserving
-/// `/Root` (and `/ID` when present), setting `/Prev` to the previous `startxref`
-/// target, and setting `/Size` to at least one greater than the highest object
-/// number across the whole classic `/Prev` chain. Therefore
+/// The output is `input` copied verbatim, followed by one appended revision.
+/// Classic-table inputs keep the classic table/trailer append path; xref-stream
+/// inputs append a raw `/Type /XRef` stream revision. Both paths preserve `/Root`
+/// and optional `/ID`/`/Info`, set `/Prev` to the previous `startxref` target,
+/// and set `/Size` from the whole `/Prev` chain. Therefore
 /// `output[..input.len()] == input`.
 ///
 /// Dirty objects are sorted deterministically by indirect reference, so the
@@ -144,12 +169,12 @@ pub enum WriteError {
 ///
 /// # Errors
 ///
-/// Returns [`WriteError`] when the input is not a classic-xref PDF (missing
-/// header/`startxref`, unclassifiable section, or a cross-reference stream), the
-/// active trailer declares `/Encrypt` or `/XRefStm`, the classic `/Prev` chain
-/// cannot be built, dirty object numbers duplicate, a dirty object does not
-/// resolve to an existing in-use object of matching generation, or an appended
-/// offset exceeds the fixed 10-digit xref field.
+/// Returns [`WriteError`] when the input is not a supported append source
+/// (missing header/`startxref` or unclassifiable section), the active trailer
+/// declares `/Encrypt`, a classic trailer declares `/XRefStm`, the selected
+/// `/Prev` chain cannot be built, dirty object numbers duplicate, a dirty object
+/// does not resolve to an existing in-use uncompressed object of matching
+/// generation, or an appended classic offset exceeds the fixed 10-digit field.
 pub fn write_incremental_revision(
     input: &[u8],
     dirty_objects: &[DirtyObjectBytes],
@@ -158,24 +183,26 @@ pub fn write_incremental_revision(
     let startxref = source.startxref.ok_or(WriteError::StartXrefUnavailable)?;
 
     match source.xref_section {
-        Some(XrefSection::Table) => {}
-        Some(XrefSection::Stream {
-            object_number,
-            generation,
-        }) => {
-            return Err(WriteError::XrefStreamInput {
-                object_number,
-                generation,
-            });
+        Some(XrefSection::Table) => {
+            write_classic_incremental_revision(input, dirty_objects, startxref.byte_offset)
         }
-        None => return Err(WriteError::XrefSectionUnclassified),
+        Some(XrefSection::Stream { .. }) => {
+            write_xref_stream_incremental_revision(input, dirty_objects, startxref.byte_offset)
+        }
+        None => Err(WriteError::XrefSectionUnclassified),
     }
+}
 
-    let newest_table = inspect_classic_xref_table(input, startxref.byte_offset)
+pub fn write_classic_incremental_revision(
+    input: &[u8],
+    dirty_objects: &[DirtyObjectBytes],
+    startxref_byte_offset: usize,
+) -> Result<Vec<u8>, WriteError> {
+    let newest_table = inspect_classic_xref_table(input, startxref_byte_offset)
         .map_err(|error| WriteError::XrefTable { error })?;
     let active_trailer = scan_active_trailer(input, newest_table.trailer_byte_offset)?;
 
-    let chain = build_classic_xref_chain(input, startxref.byte_offset).map_err(|error| {
+    let chain = build_classic_xref_chain(input, startxref_byte_offset).map_err(|error| {
         WriteError::ClassicXrefChain {
             error: Box::new(error),
         }
@@ -200,9 +227,9 @@ pub fn write_incremental_revision(
     let xref_byte_offset = writer.len();
     writer.push_xref_table(&records)?;
     writer.push_trailer(
-        effective_size(&chain),
+        classic_effective_size(&chain),
         chain.root_reference,
-        startxref.byte_offset,
+        startxref_byte_offset,
         active_trailer.id_bytes(input),
         active_trailer.info_bytes(input),
     );
@@ -219,7 +246,7 @@ pub fn write_incremental_revision(
 /// is the concrete `PDFBOX-5945` pitfall). The chain's best-effort
 /// `effective_size` (the maximum trailer `/Size` observed) is kept as a floor so
 /// the appended value never regresses below a previously declared `/Size`.
-fn effective_size(chain: &ClassicXrefChain) -> usize {
+fn classic_effective_size(chain: &ClassicXrefChain) -> usize {
     let highest_object_number = chain
         .entries
         .iter()
@@ -231,7 +258,7 @@ fn effective_size(chain: &ClassicXrefChain) -> usize {
 
 /// Dirty objects sorted by indirect reference, rejecting duplicate object
 /// numbers.
-fn order_dirty_objects(
+pub fn order_dirty_objects(
     dirty_objects: &[DirtyObjectBytes],
 ) -> Result<Vec<&DirtyObjectBytes>, WriteError> {
     let mut ordered: Vec<&DirtyObjectBytes> = dirty_objects.iter().collect();
@@ -276,8 +303,26 @@ fn validate_dirty_objects(
 /// rejection surface, preserving the distinct generation-mismatch and
 /// not-in-use cases and folding every header-validation failure into
 /// [`WriteError::DirtyObjectHeaderMismatch`].
-fn classify_resolution_error(reference: IndirectRef, error: ObjectResolutionError) -> WriteError {
+pub fn classify_resolution_error(
+    reference: IndirectRef,
+    error: ObjectResolutionError,
+) -> WriteError {
     match error.reason {
+        ObjectResolutionRejection::UnsupportedCompressedXrefStreamEntry {
+            object_stream_number,
+            index_within_object_stream,
+            ..
+        } => WriteError::CompressedDirtyObject {
+            reference,
+            object_stream_number,
+            index_within_object_stream,
+        },
+        ObjectResolutionRejection::UnsupportedReservedXrefStreamEntry { entry_type, .. } => {
+            WriteError::ReservedDirtyObject {
+                reference,
+                entry_type,
+            }
+        }
         ObjectResolutionRejection::GenerationMismatch {
             requested_generation,
             xref_generation,
@@ -312,24 +357,22 @@ pub enum ActiveTrailerError {
     },
 }
 
-/// `/Encrypt`/`/XRefStm` presence plus byte ranges of single top-level `/ID`
-/// and `/Info` values in the active trailer dictionary.
-struct ActiveTrailerScan {
-    has_encrypt: bool,
-    has_xref_stm: bool,
-    id_value_range: Option<(usize, usize)>,
-    info_value_range: Option<(usize, usize)>,
+/// Byte ranges of single top-level `/ID` and `/Info` values in the active
+/// trailer dictionary.
+pub struct ActiveTrailerScan {
+    pub id_value_range: Option<(usize, usize)>,
+    pub info_value_range: Option<(usize, usize)>,
 }
 
 impl ActiveTrailerScan {
     /// Borrow the preserved `/ID` value bytes from the source, if present.
-    fn id_bytes<'a>(&self, input: &'a [u8]) -> Option<&'a [u8]> {
+    pub fn id_bytes<'a>(&self, input: &'a [u8]) -> Option<&'a [u8]> {
         self.id_value_range
             .and_then(|(start, end)| input.get(start..end))
     }
 
     /// Borrow the preserved `/Info` value bytes from the source, if present.
-    fn info_bytes<'a>(&self, input: &'a [u8]) -> Option<&'a [u8]> {
+    pub fn info_bytes<'a>(&self, input: &'a [u8]) -> Option<&'a [u8]> {
         self.info_value_range
             .and_then(|(start, end)| input.get(start..end))
     }
@@ -357,17 +400,17 @@ fn scan_active_trailer(
         })?;
 
     let mut scan = ActiveTrailerScan {
-        has_encrypt: false,
-        has_xref_stm: false,
         id_value_range: None,
         info_value_range: None,
     };
+    let mut has_encrypt = false;
+    let mut has_xref_stm = false;
     for entry in &entries.entries {
         let key = input.get(entry.key_range.start..entry.key_range.end);
         if key == Some(ENCRYPT_KEY) {
-            scan.has_encrypt = true;
+            has_encrypt = true;
         } else if key == Some(XREF_STM_KEY) {
-            scan.has_xref_stm = true;
+            has_xref_stm = true;
         } else if key == Some(ID_KEY) && scan.id_value_range.is_none() {
             scan.id_value_range = Some((entry.value_range.start, entry.value_range.end));
         } else if key == Some(INFO_KEY) && scan.info_value_range.is_none() {
@@ -375,10 +418,10 @@ fn scan_active_trailer(
         }
     }
 
-    if scan.has_encrypt {
+    if has_encrypt {
         return Err(WriteError::EncryptedInput);
     }
-    if scan.has_xref_stm {
+    if has_xref_stm {
         return Err(WriteError::HybridXrefStmInput);
     }
     Ok(scan)

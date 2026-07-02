@@ -247,3 +247,45 @@ failure folded into `DirtyObjectHeaderMismatch { reference, error }`.
   only `MutationBoundary::DictionaryEntry`; `ContentStreamOperand`,
   `WholeStream`, and `IndirectObjectClone` are rejected as unsupported execution
   shapes.
+
+## T121 - Xref-Stream Incremental Append Backend
+
+Added a second append backend for inputs whose final `startxref` points at a
+cross-reference stream. `write_incremental_revision` now dispatches by the
+input's newest xref section kind:
+
+- classic table inputs continue through the existing classic table/trailer path;
+- xref-stream inputs build the same-type xref-stream `/Prev` chain and append a
+  raw, unfiltered `/Type /XRef` stream revision;
+- hybrid classic trailers carrying `/XRefStm` remain rejected.
+
+The xref-stream backend allocates a fresh indirect object for the appended xref
+stream (`whole-chain max object number + 1`, generation 0) and includes a
+self-entry pointing at the offset recorded before that object's own header. It
+packs only type-1 entries, computes `/W` minimally as `[1 w1 w2]` with big-endian
+fields, derives `/Index` from the dirty objects plus the new xref object as
+ascending run-length subsections, and sets `/Length` to the exact packed byte
+count. The stream dictionary order is deterministic: `/Type`, `/Size`, `/Index`,
+`/W`, `/Root`, `/Prev`, `/Length`, optional `/ID`, optional `/Info`.
+
+Dirty-object validation mirrors the classic gate but uses
+`ObjectLookup::XrefStreamChain`: each dirty reference must resolve through
+`resolve_xref_object_offset` to an uncompressed in-use object whose header
+matches the requested reference. Type-2 compressed xref-stream entries now return
+`CompressedDirtyObject`; reserved/future entry types return
+`ReservedDirtyObject`. Encrypted xref-stream dictionaries are rejected with the
+same `EncryptedInput` variant as classic inputs.
+
+Tests cover verbatim prefix preservation, reopen through
+`inspect_document_access` selecting `XrefStreamChain`, self-reference
+correctness, newest-wins dirty-object resolution, `/Prev` and `startxref`
+offsets, whole-chain `/Size` including the newly allocated xref object, `/Index`
+and `/W` bytes, second append chain growth, plan-bridge routing, and
+`set_page_boxes_incremental` end-to-end on an xref-stream input. A classic
+dispatch regression compares the public dispatch output with the classic backend
+bytes.
+
+Deferred deliberately: Flate-compressed xref stream output, hybrid `/XRefStm`
+write/merge support, type-2 compressed-object mutation, object-stream writing,
+clone/private-copy routing, deletion/free-list repair, and encryption
+preservation.

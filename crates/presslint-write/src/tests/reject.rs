@@ -11,23 +11,17 @@ fn xref_stream_pdf() -> Vec<u8> {
     buf.extend_from_slice(b"%PDF-1.5\n");
     let object_offset = buf.len();
     buf.extend_from_slice(
-        b"1 0 obj\n<< /Type /XRef /Size 1 /W [1 1 1] /Root 2 0 R /Length 0 >>\nstream\n\nendstream\nendobj\n",
+        b"1 0 obj\n<< /Type /XRef /Size 1 /W [1 1 1] /Root 2 0 R /Encrypt 4 0 R /Length 0 >>\nstream\n\nendstream\nendobj\n",
     );
     buf.extend_from_slice(format!("startxref\n{object_offset}\n%%EOF").as_bytes());
     buf
 }
 
 #[test]
-fn rejects_xref_stream_input() {
+fn rejects_encrypted_xref_stream_input() {
     let input = xref_stream_pdf();
     let error = write_incremental_revision(&input, &[]).unwrap_err();
-    assert_eq!(
-        error,
-        WriteError::XrefStreamInput {
-            object_number: 1,
-            generation: 0,
-        }
-    );
+    assert_eq!(error, WriteError::EncryptedInput);
 }
 
 #[test]
@@ -42,6 +36,52 @@ fn rejects_hybrid_xref_stm_input() {
     let input = sample_pdf_with_trailer_tail(" /XRefStm 123");
     let error = write_incremental_revision(&input, &[dirty(3, 0, PAGE_BODY)]).unwrap_err();
     assert_eq!(error, WriteError::HybridXrefStmInput);
+}
+
+fn xref_stream_with_compressed_page_entry() -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"%PDF-1.5\n");
+    let catalog_offset = buf.len();
+    buf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    let pages_offset = buf.len();
+    buf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+    let xref_offset = buf.len();
+
+    let mut body = Vec::new();
+    body.extend_from_slice(&super::xref_record(0, 0, 0));
+    body.extend_from_slice(&super::xref_record(1, catalog_offset, 0));
+    body.extend_from_slice(&super::xref_record(1, pages_offset, 0));
+    body.extend_from_slice(&super::xref_record(2, 8, 0));
+    body.extend_from_slice(&super::xref_record(1, xref_offset, 0));
+
+    buf.extend_from_slice(
+        format!(
+            "4 0 obj\n<< /Type /XRef /Size 5 /Index [0 5] /W [1 2 1] /Root 1 0 R /Length {} >>\nstream\n",
+            body.len()
+        )
+        .as_bytes(),
+    );
+    buf.extend_from_slice(&body);
+    buf.extend_from_slice(b"\nendstream\nendobj\n");
+    buf.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF").as_bytes());
+    buf
+}
+
+#[test]
+fn rejects_compressed_dirty_object_on_xref_stream_input() {
+    let input = xref_stream_with_compressed_page_entry();
+    let error = write_incremental_revision(&input, &[dirty(3, 0, PAGE_BODY)]).unwrap_err();
+    assert_eq!(
+        error,
+        WriteError::CompressedDirtyObject {
+            reference: IndirectRef {
+                object_number: 3,
+                generation: 0,
+            },
+            object_stream_number: 8,
+            index_within_object_stream: 0,
+        }
+    );
 }
 
 #[test]

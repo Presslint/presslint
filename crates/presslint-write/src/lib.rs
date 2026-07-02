@@ -1,12 +1,14 @@
 //! Append-only incremental-update PDF writing.
 //!
 //! This crate holds the first byte-writing slice of the presslint F3 patch
-//! executor: a deterministic classic-xref *incremental append* writer.
+//! executor: a deterministic *incremental append* writer.
 //!
 //! [`write_incremental_revision`] is the foundational semantic **no-op**: it
-//! copies the caller's input verbatim and appends one classic incremental
-//! revision that rewrites selected uncompressed objects with caller-supplied
-//! body bytes. [`set_page_boxes_incremental`] is the first *semantic* mutation
+//! copies the caller's input verbatim and appends one incremental revision,
+//! using a classic cross-reference table for classic inputs and a raw
+//! cross-reference stream for xref-stream inputs. It rewrites selected
+//! uncompressed objects with caller-supplied body bytes. [`set_page_boxes_incremental`]
+//! is the first *semantic* mutation
 //! built on it: it sets `/MediaBox` and/or `/CropBox` on selected uncompressed
 //! leaf page dictionaries, reading leaf references and box provenance from
 //! [`presslint_pdf::inspect_document_page_boxes`], deciding ownership with
@@ -16,20 +18,20 @@
 //!
 //! The append mechanics prove what the semantic writer needs: it copies the
 //! caller's input
-//! verbatim as the output prefix, then appends one classic incremental revision
-//! that rewrites selected existing uncompressed indirect objects with
-//! caller-supplied body bytes, followed by a classic cross-reference table and a
-//! trailer carrying `/Prev`.
+//! verbatim as the output prefix, then appends one revision that rewrites
+//! selected existing uncompressed indirect objects with caller-supplied body
+//! bytes, followed by an xref section matching the input's final xref kind and a
+//! `/Prev` link.
 //!
 //! It proves the append mechanics the future semantic writer needs — verbatim
-//! prefix preservation, appended-object offset accounting, classic xref-entry
-//! width, whole-`/Prev`-chain `/Size` computation, and newest-wins resolution
+//! prefix preservation, appended-object offset accounting, xref-entry encoding,
+//! whole-`/Prev`-chain `/Size` computation, and newest-wins resolution
 //! through the existing [`presslint_pdf`] access spine — without performing any
 //! semantic edit. It deliberately does not encode dictionaries, rewrite content
 //! operands, re-encode streams, clone shared objects, delete objects, repair
-//! free lists, preserve encryption, or write cross-reference streams. It also
-//! rejects hybrid-reference classic trailers carrying `/XRefStm`, because this
-//! slice follows only the classic `/Prev` chain and does not merge supplemental
+//! free lists, preserve encryption, write hybrid updates, or mutate compressed
+//! object-stream members. It also rejects hybrid-reference classic trailers
+//! carrying `/XRefStm`, because this slice does not merge supplemental
 //! xref-stream entries.
 //!
 //! [`write_incremental_revision_plan`] is the validating bridge from the
@@ -41,7 +43,7 @@
 //! [`write_incremental_revision`]. `set_page_boxes_incremental` routes its
 //! already-proven leaf edits through this bridge.
 //!
-//! Structural facts about the input (the final `startxref`, the classic
+//! Structural facts about the input (the final `startxref`, the active
 //! cross-reference `/Prev` chain, `/Root`, and object currency) are read through
 //! [`presslint_pdf`] rather than reparsed here, so the writer stays a thin byte
 //! assembler over already-validated structural metadata.
@@ -52,6 +54,7 @@ mod page_box_serialize;
 mod page_boxes;
 mod planned;
 mod writer;
+mod xref_stream_writer;
 
 pub use page_boxes::{
     AppliedBox, DictionaryEntryWrite, EditedPage, PageBoxEdit, SetPageBoxSkipReason,

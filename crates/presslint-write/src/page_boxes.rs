@@ -1,9 +1,9 @@
 //! Semantic `/MediaBox` / `/CropBox` incremental writing over leaf page objects.
 //!
-//! This is the first *semantic* byte mutation built on the append-only classic
+//! This is the first *semantic* byte mutation built on the append-only
 //! incremental writer: it sets `/MediaBox` and/or `/CropBox` on selected
-//! uncompressed leaf page dictionaries and appends exactly one classic
-//! incremental revision through [`crate::write_incremental_revision`].
+//! uncompressed leaf page dictionaries and appends exactly one incremental
+//! revision through [`crate::write_incremental_revision`].
 //!
 //! Structural facts — leaf references, box provenance, and per-page skip reasons
 //! — are read through [`presslint_pdf::inspect_document_page_boxes`]; ownership is
@@ -57,7 +57,7 @@ pub struct PageBoxEdit {
 /// Output of a successful [`set_page_boxes_incremental`] call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetPageBoxesOutput {
-    /// The new PDF bytes: `input` verbatim plus one appended classic revision.
+    /// The new PDF bytes: `input` verbatim plus one appended revision.
     pub bytes: Vec<u8>,
     /// Pages that were edited, in document order.
     pub edited: Vec<EditedPage>,
@@ -214,11 +214,11 @@ pub enum SetPageBoxesError {
 }
 
 /// Set `/MediaBox` and/or `/CropBox` on selected leaf pages and append one
-/// classic incremental revision.
+/// incremental revision.
 ///
 /// The output preserves `input` verbatim as its prefix
-/// (`output.bytes[..input.len()] == input`) and appends exactly one classic
-/// incremental revision that rewrites only the edited leaf page objects. Every
+/// (`output.bytes[..input.len()] == input`) and appends exactly one incremental
+/// revision that rewrites only the edited leaf page objects. Every
 /// unrelated byte inside each rewritten leaf dictionary body is preserved.
 ///
 /// Requested rectangles are normalized by ordering lower-left and upper-right

@@ -8,8 +8,10 @@
 
 mod append;
 mod page_boxes;
+mod page_boxes_xref_stream;
 mod planned;
 mod reject;
+mod xref_stream_writer;
 
 use presslint_pdf::{
     DocumentAccess, DocumentAccessBackend, IndirectRef, inspect_document_access, inspect_pdf_source,
@@ -56,6 +58,60 @@ fn sample_pdf_with_trailer_tail(trailer_tail: &str) -> Vec<u8> {
 /// A minimal, valid single-page classic-xref PDF with no extra trailer keys.
 fn sample_pdf() -> Vec<u8> {
     sample_pdf_with_trailer_tail("")
+}
+
+/// Encode one `/W [ 1 2 1 ]` xref-stream record.
+fn xref_record(entry_type: u8, field2: usize, generation: u8) -> [u8; 4] {
+    let [hi, lo] = u16::try_from(field2)
+        .expect("test field2 fits u16")
+        .to_be_bytes();
+    [entry_type, hi, lo, generation]
+}
+
+/// Minimal one-page PDF whose final section is a raw xref stream.
+fn sample_xref_stream_pdf_with_catalog_tail(catalog_tail: &str) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"%PDF-1.5\n");
+
+    let catalog =
+        format!("1 0 obj\n<< /Type /Catalog /Pages 2 0 R{catalog_tail} >>\nendobj\n").into_bytes();
+    let pages = b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+    let page = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n";
+    let info = b"4 0 obj\n<< /Producer (presslint-test) >>\nendobj\n";
+
+    let catalog_offset = buf.len();
+    buf.extend_from_slice(&catalog);
+    let pages_offset = buf.len();
+    buf.extend_from_slice(pages);
+    let page_offset = buf.len();
+    buf.extend_from_slice(page);
+    let info_offset = buf.len();
+    buf.extend_from_slice(info);
+    let xref_offset = buf.len();
+
+    let mut body = Vec::new();
+    body.extend_from_slice(&xref_record(0, 0, 0));
+    body.extend_from_slice(&xref_record(1, catalog_offset, 0));
+    body.extend_from_slice(&xref_record(1, pages_offset, 0));
+    body.extend_from_slice(&xref_record(1, page_offset, 0));
+    body.extend_from_slice(&xref_record(1, info_offset, 0));
+    body.extend_from_slice(&xref_record(1, xref_offset, 0));
+
+    buf.extend_from_slice(
+        format!(
+            "5 0 obj\n<< /Type /XRef /Size 6 /Index [0 6] /W [1 2 1] /Root 1 0 R /Info 4 0 R /ID [<0011> <2233>] /Length {} >>\nstream\n",
+            body.len()
+        )
+        .as_bytes(),
+    );
+    buf.extend_from_slice(&body);
+    buf.extend_from_slice(b"\nendstream\nendobj\n");
+    buf.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF").as_bytes());
+    buf
+}
+
+fn sample_xref_stream_pdf() -> Vec<u8> {
+    sample_xref_stream_pdf_with_catalog_tail("")
 }
 
 /// Build a two-revision classic PDF whose newest section rewrites only object 3
@@ -146,6 +202,14 @@ fn classic_chain(access: &DocumentAccess) -> &presslint_pdf::ClassicXrefChain {
     match &access.backend {
         DocumentAccessBackend::ClassicXrefChain { chain } => chain,
         other => panic!("expected a classic /Prev chain backend, got {other:?}"),
+    }
+}
+
+/// The merged xref-stream `/Prev` chain behind a reopened document.
+fn xref_stream_chain(access: &DocumentAccess) -> &presslint_pdf::XrefStreamChain {
+    match &access.backend {
+        DocumentAccessBackend::XrefStreamChain { chain } => chain,
+        other => panic!("expected an xref-stream /Prev chain backend, got {other:?}"),
     }
 }
 
