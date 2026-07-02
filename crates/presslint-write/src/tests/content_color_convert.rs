@@ -19,6 +19,7 @@ use presslint_pdf::{
     PageContentExtentInspection, content_stream_data_slice, decode_flate_stream,
     encode_flate_stream, inspect_document_page_content_extents_with_lookup,
 };
+use presslint_selectors::{Predicate, Selector};
 use presslint_syntax::{TokenKind, assemble_operators, tokenize};
 use presslint_types::PageIndex;
 
@@ -34,12 +35,12 @@ const FLATE_LIMIT: usize = 1 << 20;
 const CATALOG: &[u8] = b"<< /Type /Catalog /Pages 2 0 R >>";
 
 // SYNTHETIC DeviceLinks (grid-2 CLUT placeholders). Source->destination spaces:
-const RGB_TO_CMYK_LINK: &str = "000001746c636d73043000006c696e6b52474220434d594b07ea00070002000f00040004616373704150504c0000000000000000000000000000000000000000000000000000f6d6000100000000d32d6c636d730000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014132423000000090000000e46d4142200000000003040000000000a40000000000000000000000500000002070617261000000000000000000010000706172610000000000000000000100007061726100000000000000000001000002020200000000000000000000000000020000000005002a004f0074009900be00e30108012d01520177019c01c101e6020b0230025500220047006c009100b600db01000125014a016f019401b901de0203022870617261000000000000000000010000706172610000000000000000000100007061726100000000000000000001000070617261000000000000000000010000";
+pub(super) const RGB_TO_CMYK_LINK: &str = "000001746c636d73043000006c696e6b52474220434d594b07ea00070002000f00040004616373704150504c0000000000000000000000000000000000000000000000000000f6d6000100000000d32d6c636d730000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014132423000000090000000e46d4142200000000003040000000000a40000000000000000000000500000002070617261000000000000000000010000706172610000000000000000000100007061726100000000000000000001000002020200000000000000000000000000020000000005002a004f0074009900be00e30108012d01520177019c01c101e6020b0230025500220047006c009100b600db01000125014a016f019401b901de0203022870617261000000000000000000010000706172610000000000000000000100007061726100000000000000000001000070617261000000000000000000010000";
 const CMYK_TO_CMYK_LINK: &str = "000001c46c636d73043000006c696e6b434d594b434d594b07ea00070002000f00040004616373704150504c0000000000000000000000000000000000000000000000000000f6d6000100000000d32d6c636d730000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014132423000000090000001346d4142200000000004040000000000f4000000000000000000000060000000207061726100000000000000000001000070617261000000000000000000010000706172610000000000000000000100007061726100000000000000000001000002020202000000000000000000000000020000000005002a004f0074009900be00e30108012d01520177019c01c101e6020b0230025500220047006c009100b600db01000125014a016f019401b901de02030228024d001a003f0064008900ae00d300f8011d01420167018c01b101d601fb0220024500120037005c008100a600cb00f00115013a015f018401a901ce01f3021870617261000000000000000000010000706172610000000000000000000100007061726100000000000000000001000070617261000000000000000000010000";
 const GRAY_TO_GRAY_LINK: &str = "000000e86c636d73043000006c696e6b475241594752415907ea00070002000f00040004616373704150504c0000000000000000000000000000000000000000000000000000f6d6000100000000d32d6c636d730000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014132423000000090000000586d41422000000000010100000000004800000000000000000000003000000020706172610000000000000000000100000200000000000000000000000000000002000000000703ec70617261000000000000000000010000";
 const LAB_TO_RGB_LINK: &str = "000000846c636d73043000006c696e6b4c6162205247422007ea00070002000f00040004616373704150504c0000000000000000000000000000000000000000000000000000f6d6000100000000d32d6c636d73000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
-fn link_bytes(hex: &str) -> Vec<u8> {
+pub(super) fn link_bytes(hex: &str) -> Vec<u8> {
     (0..hex.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex"))
@@ -84,7 +85,7 @@ fn page_body(contents: &str) -> Vec<u8> {
         .into_bytes()
 }
 
-fn classic_raw_pdf(data: &[u8]) -> Vec<u8> {
+pub(super) fn classic_raw_pdf(data: &[u8]) -> Vec<u8> {
     assemble_classic(&[
         CATALOG.to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
@@ -103,7 +104,23 @@ fn classic_flate_pdf(data: &[u8]) -> Vec<u8> {
     ])
 }
 
-fn xref_stream_pdf(data: &[u8]) -> Vec<u8> {
+/// Two-page classic PDF, each leaf owning its own single content stream.
+pub(super) fn classic_two_page_pdf(page0: &[u8], page1: &[u8]) -> Vec<u8> {
+    assemble_classic(&[
+        CATALOG.to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>".to_vec(),
+        stream_body("", page0),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R >>".to_vec(),
+        stream_body("", page1),
+    ])
+}
+
+pub(super) fn predicate(predicate: Predicate) -> Selector {
+    Selector::Predicate { predicate }
+}
+
+pub(super) fn xref_stream_pdf(data: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(b"%PDF-1.5\n");
 
@@ -183,7 +200,7 @@ fn page_encoded_stream(bytes: &[u8]) -> Vec<u8> {
         .to_vec()
 }
 
-fn page_decoded_stream(bytes: &[u8], flate: bool) -> Vec<u8> {
+pub(super) fn page_decoded_stream(bytes: &[u8], flate: bool) -> Vec<u8> {
     let data = page_encoded_stream(bytes);
     if flate {
         decode_flate_stream(&data, FlateDecodeParameters::default(), FLATE_LIMIT).expect("decode")
@@ -224,7 +241,7 @@ fn operators(decoded: &[u8]) -> Vec<(Vec<u8>, Vec<f64>)> {
 }
 
 /// The numeric operands of the single record with operator `op`.
-fn operands_of(decoded: &[u8], op: &[u8]) -> Vec<f64> {
+pub(super) fn operands_of(decoded: &[u8], op: &[u8]) -> Vec<f64> {
     let mut matches: Vec<Vec<f64>> = operators(decoded)
         .into_iter()
         .filter(|(operator, _)| operator == op)
@@ -234,7 +251,7 @@ fn operands_of(decoded: &[u8], op: &[u8]) -> Vec<f64> {
     matches.remove(0)
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+pub(super) fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
@@ -258,13 +275,32 @@ fn convert_with_policy(
             pages: PageSelection::All,
             device_link_bytes: link_bytes(link),
             black_preservation,
+            target: None,
         },
     )
     .expect("convert succeeds")
 }
 
-fn convert(input: &[u8], link: &str) -> ConvertContentColorsOutput {
+pub(super) fn convert(input: &[u8], link: &str) -> ConvertContentColorsOutput {
     convert_with_policy(input, link, BlackPreservationPolicy::None)
+}
+
+/// Convert with a `target` selector, `PageSelection::All`, no black preservation.
+pub(super) fn convert_with_target(
+    input: &[u8],
+    link: &str,
+    target: Selector,
+) -> ConvertContentColorsOutput {
+    convert_content_colors_incremental(
+        input,
+        &ConvertContentColorsRequest {
+            pages: PageSelection::All,
+            device_link_bytes: link_bytes(link),
+            black_preservation: BlackPreservationPolicy::None,
+            target: Some(target),
+        },
+    )
+    .expect("convert succeeds")
 }
 
 fn assert_component_range(operands: &[f64]) {
@@ -584,6 +620,7 @@ fn lab_sided_link_is_a_whole_op_unsupported_space_error() {
             pages: PageSelection::All,
             device_link_bytes: link_bytes(LAB_TO_RGB_LINK),
             black_preservation: BlackPreservationPolicy::None,
+            target: None,
         },
     )
     .expect_err("Lab-sided link is rejected");
@@ -602,6 +639,7 @@ fn invalid_link_bytes_are_a_whole_op_inspect_failure() {
             pages: PageSelection::All,
             device_link_bytes: b"not an icc profile".to_vec(),
             black_preservation: BlackPreservationPolicy::None,
+            target: None,
         },
     )
     .expect_err("invalid link bytes are rejected");
@@ -620,6 +658,7 @@ fn empty_page_index_request_is_rejected() {
             pages: PageSelection::Indices(vec![]),
             device_link_bytes: link_bytes(RGB_TO_CMYK_LINK),
             black_preservation: BlackPreservationPolicy::None,
+            target: None,
         },
     )
     .expect_err("empty index list is rejected");
@@ -658,6 +697,7 @@ fn rerunning_rgb_link_does_not_reconvert_the_now_cmyk_operator() {
             pages: PageSelection::Indices(vec![PageIndex(0)]),
             device_link_bytes: link_bytes(RGB_TO_CMYK_LINK),
             black_preservation: BlackPreservationPolicy::None,
+            target: None,
         },
     )
     .expect("second run succeeds");
@@ -681,6 +721,7 @@ fn cmyk_link_reconverts_an_already_cmyk_operator() {
             pages: PageSelection::Indices(vec![PageIndex(0)]),
             device_link_bytes: link_bytes(CMYK_TO_CMYK_LINK),
             black_preservation: BlackPreservationPolicy::None,
+            target: None,
         },
     )
     .expect("second run succeeds");

@@ -574,3 +574,87 @@ before the heavier DeviceLink call and can skip that call for preserved black.
 Memory shape is unchanged from F4-2: one decoded stream, token/operator records,
 small replacement buffers only for real splices, and the normal re-encoded
 stream / append-writer output when a page is actually dirtied.
+
+## T130 - Selector-Targeted DeviceLink Colour Conversion (F4-4)
+
+Added an optional `target: Option<Selector>` to `ConvertContentColorsRequest`
+(`#[serde(default, skip_serializing_if = "Option::is_none")]`), so a caller can
+narrow WHICH matching-source colour operators are converted, e.g. "only DeviceRGB
+fills", "odd pages", "pure-red operands". `None` (default) is F4-2/F4-3 behaviour
+byte-for-byte: every matching-source operator is converted. The struct dropped
+its `Eq` derive (keeps `PartialEq`) because a `Selector` may carry `f64` colour
+components.
+
+### Operator-local evaluator (src/selector_match.rs)
+
+The selector is evaluated PER COLOUR OPERATOR against a synthetic borrowed
+`OperatorView { page_index, color_space: DeviceColorSpace, usage: ColorUsage,
+components: &[f64] }` — page index, the operator's declared device space,
+Fill (lowercase `g`/`rg`/`k`) vs Stroke (uppercase `G`/`RG`/`K`), and the
+already-parsed operand components. `selector_matches` walks the boolean tree
+directly (`All`=true, `None`=false, `Not`, `And`=all, `Or`=any, `Predicate`=leaf).
+It builds NO `InventoryEntry`, tracks NO graphics state, and does NOT call
+`presslint_selectors::matches`; the private page-match and component-match
+semantics of the selector crate are reimplemented locally (parity on the
+one-based page number, exact/tolerant component compare) so the evaluator stays a
+cheap per-operator boolean with no inventory dependency.
+
+### Supported vs rejected leaves (up-front rejection)
+
+BEFORE any page traversal, `collect_unsupported_leaves` walks the selector tree;
+any unsupported leaf makes the whole call fail with
+`ConvertContentColorsError::UnsupportedTargetSelector { unsupported:
+Vec<UnsupportedTargetLeaf> }` — never a silent non-match, because silently
+under-converting is bad prepress behaviour. SUPPORTED (operator-local) leaves:
+`ColorSpace` for Device Gray/RGB/CMYK only, `Page` + `PageMatch`
+(parity/range/set/exact), `ColorUsage` for Fill/Stroke only, and `ColorComponents`
+over the operand components (device space + usage None/Fill/Stroke). REJECTED
+leaves (need graphics-state association, a later slice): `ObjectKind`, `Editable`,
+`Scope`, a `ColorUsage`/`ColorComponents` usage of Image/Shading, and a
+`ColorSpace`/`ColorComponents` over a non-device space (ICCBased, Lab, spot,
+resource, ...).
+
+### Ordering + report
+
+Per operator the order EXTENDS F4-2/F4-3: source-space gate → operand validation
+(count/number/range) → **selector check (only when `target` is `Some`)** →
+black-preservation → DeviceLink apply. A valid source-space operator the selector
+does NOT match is left byte-verbatim and counted as the new
+`OperatorSkipCounts::selector_excluded`. Note the ordering means an off-source
+operator (e.g. `g`/`k` under an RGB link) is counted `source_space_mismatch` and
+never reaches the selector check.
+
+### Page-aware pipeline (src/content_edit_pipeline.rs)
+
+Page predicates need the page index per operator, so the internal core became
+`edit_page_content_incremental_indexed(input, pages, Fn(PageIndex, &[u8]) ->
+EditedContent)`. `edit_page_content_incremental` is kept as a thin
+index-ignoring wrapper, so `reencode_content.rs` (T125) and
+`content_color_rewrite.rs` (T126) are byte-for-byte UNCHANGED; only the convert
+action switched to the page-aware entry. All decode / round-trip / re-encode /
+write mechanics are shared and identical between the two entries.
+
+### Dependency edge + license gate
+
+New first-party dependency `presslint-selectors` (pulls `presslint-inventory`
+transitively — acceptable; only the `Selector`/`Predicate` data model is used,
+never the inventory matcher). Direction stays acyclic:
+`write -> {actions, color-lcms, pdf, selectors, syntax, types}`.
+`check_licenses.sh` still passes (53 third-party packages, unchanged — both new
+crates are first-party).
+
+### Bounds / performance
+
+The selector check is a cheap per-operator boolean eval BEFORE the heavier
+DeviceLink apply, with no inventory build and no allocation beyond the small
+`OperatorView` (which borrows the already-parsed operand slice). Up-front leaf
+rejection is a single pre-order walk of the selector tree. Memory shape is
+otherwise unchanged from F4-2/F4-3.
+
+### Bounds / unchanged
+
+Every changed public source file stays < 800 lines (content_color_convert.rs 641,
+content_edit_pipeline.rs 600, selector_match.rs 222; the selector integration
+tests live in the tests/selector_match.rs module to keep tests/content_color_convert.rs
+at 729). T125/T126/T128/T129 public behaviour and the `target = None` path are
+unchanged; the pipeline wrapper keeps the old callers intact.

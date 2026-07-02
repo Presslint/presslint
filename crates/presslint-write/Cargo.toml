@@ -11,6 +11,7 @@ description = "Append-only incremental-update PDF writing for presslint."
 presslint-actions.workspace = true
 presslint-color-lcms.workspace = true
 presslint-pdf.workspace = true
+presslint-selectors.workspace = true
 presslint-syntax.workspace = true
 presslint-types.workspace = true
 serde.workspace = true

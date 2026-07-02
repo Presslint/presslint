@@ -30,8 +30,9 @@ use presslint_color_lcms::{
 use presslint_pdf::{
     DictionaryValueKind, DocumentAccessError, IndirectObjectEditDisposition, IndirectRef,
 };
+use presslint_selectors::Selector;
 use presslint_syntax::{OperandRecord, Token, TokenKind, assemble_operators, tokenize};
-use presslint_types::{ByteRange, PageIndex};
+use presslint_types::{ByteRange, ColorUsage, PageIndex};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -39,13 +40,19 @@ use crate::{
     black_preservation::{BlackPreservationPolicy, black_preservation_replacement},
     content_edit_pipeline::{
         EditPageContentError, EditedContent, PageSelection, PipelinePageSkip, PipelineSkipReason,
-        edit_page_content_incremental,
+        edit_page_content_incremental_indexed,
     },
     pdf_number_serialize::serialize_color_component,
+    selector_match::{
+        OperatorView, UnsupportedTargetLeaf, collect_unsupported_leaves, selector_matches,
+    },
 };
 
 /// Request to convert direct device colours in selected pages via ONE DeviceLink.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `PartialEq` only (not `Eq`): the optional `target` selector may carry
+/// floating-point colour components.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConvertContentColorsRequest {
     /// Page selection (reuses the shared content-edit pipeline selection).
     pub pages: PageSelection,
@@ -54,6 +61,18 @@ pub struct ConvertContentColorsRequest {
     /// Optional pre-DeviceLink black-preservation overlay.
     #[serde(default)]
     pub black_preservation: BlackPreservationPolicy,
+    /// Optional operator-local selector narrowing WHICH matching-source colour
+    /// operators are converted.
+    ///
+    /// `None` (the default) converts every matching-source operator, exactly as
+    /// F4-2/F4-3 did. `Some(selector)` converts only operators whose synthetic
+    /// per-operator view matches; non-matching operators are left byte-verbatim
+    /// and counted as [`OperatorSkipCounts::selector_excluded`]. Selector leaves
+    /// that are not operator-local (object kind, editability, scope, image/shading
+    /// usage, non-device colour spaces) are rejected up front — see
+    /// [`ConvertContentColorsError::UnsupportedTargetSelector`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<Selector>,
 }
 
 /// Per-page aggregate operator-skip taxonomy (honest coverage reporting).
@@ -67,6 +86,8 @@ pub struct OperatorSkipCounts {
     pub non_number_operand: usize,
     /// Source-space operators with an operand outside `[0.0, 1.0]`.
     pub operand_out_of_range: usize,
+    /// Valid source-space operators excluded by the request `target` selector.
+    pub selector_excluded: usize,
 }
 
 /// Report for one page whose direct device colours were analysed.
@@ -166,6 +187,14 @@ pub enum ConvertContentColorsError {
     DeviceLinkInspectFailed {
         /// Delegated `presslint-color-lcms` inspection failure.
         error: LcmsError,
+    },
+    /// The `target` selector contains one or more leaves this operator-local
+    /// converter cannot evaluate (object kind, editability, scope, image/shading
+    /// usage, or a non-direct-device colour space). Rejected up front, before any
+    /// page is traversed, so the request never silently under-converts.
+    UnsupportedTargetSelector {
+        /// Every unsupported leaf found in the selector tree, in pre-order.
+        unsupported: Vec<UnsupportedTargetLeaf>,
     },
     /// The DeviceLink source or destination space is Lab or unsupported, so no
     /// direct device operator can be converted through it.
@@ -295,36 +324,49 @@ pub fn convert_content_colors_incremental(
         });
     };
 
+    // Reject unsupported selector leaves UP FRONT, before any page traversal, so
+    // an unanswerable target never silently under-converts.
+    if let Some(selector) = &request.target {
+        let unsupported = collect_unsupported_leaves(selector);
+        if !unsupported.is_empty() {
+            return Err(ConvertContentColorsError::UnsupportedTargetSelector { unsupported });
+        }
+    }
+
     let tallies: RefCell<Vec<PageTally>> = RefCell::new(Vec::new());
     let link_bytes = request.device_link_bytes.as_slice();
+    let target = request.target.as_ref();
 
-    let output = edit_page_content_incremental(input, &request.pages, |decoded| {
-        match convert_decoded(
-            decoded,
-            link_bytes,
-            source,
-            destination,
-            request.black_preservation,
-        ) {
-            Some((edited, tally)) => {
-                let edit_count = tally.converted + tally.black_preserved;
-                let has_splices = !edited.is_empty();
-                tallies.borrow_mut().push(tally);
-                if has_splices {
-                    EditedContent::Rewritten {
-                        decoded: edited,
-                        edit_count,
+    let output =
+        edit_page_content_incremental_indexed(input, &request.pages, |page_index, decoded| {
+            match convert_decoded(
+                page_index,
+                decoded,
+                link_bytes,
+                source,
+                destination,
+                request.black_preservation,
+                target,
+            ) {
+                Some((edited, tally)) => {
+                    let edit_count = tally.converted + tally.black_preserved;
+                    let has_splices = !edited.is_empty();
+                    tallies.borrow_mut().push(tally);
+                    if has_splices {
+                        EditedContent::Rewritten {
+                            decoded: edited,
+                            edit_count,
+                        }
+                    } else {
+                        // Analysed but no real byte splice: no revision object, but
+                        // the tally is still recorded above for honest reporting.
+                        EditedContent::Unchanged
                     }
-                } else {
-                    // Analysed but no real byte splice: no revision object, but
-                    // the tally is still recorded above for honest reporting.
-                    EditedContent::Unchanged
                 }
+                None => EditedContent::Rejected(PipelineSkipReason::ContentRoundTripMismatch),
             }
-            None => EditedContent::Rejected(PipelineSkipReason::ContentRoundTripMismatch),
-        }
-    })
-    .map_err(map_error)?;
+        })
+        .map_err(map_error)?;
 
     let converted = attach_tallies(&output.edited, &output.skipped, tallies.into_inner());
     let skipped = output
@@ -349,11 +391,13 @@ pub fn convert_content_colors_incremental(
 /// skips. Returns `None` when operators could not be assembled (a round-trip
 /// rejection, no tally recorded).
 fn convert_decoded(
+    page_index: PageIndex,
     decoded: &[u8],
     link_bytes: &[u8],
     source: DeviceColorSpace,
     destination: DeviceColorSpace,
     black_preservation: BlackPreservationPolicy,
+    target: Option<&Selector>,
 ) -> Option<(Vec<u8>, PageTally)> {
     let tokens = tokenize(decoded).ok()?;
     let assembled = assemble_operators(&tokens).ok()?;
@@ -386,6 +430,25 @@ fn convert_decoded(
                 continue;
             }
         };
+        // Selector check (F4-4): a cheap per-operator boolean eval over a
+        // borrowed operator view, BEFORE the heavier black-preservation /
+        // DeviceLink apply. A non-match leaves the operator byte-verbatim.
+        if let Some(selector) = target {
+            let view = OperatorView {
+                page_index,
+                color_space: space,
+                usage: if stroking {
+                    ColorUsage::Stroke
+                } else {
+                    ColorUsage::Fill
+                },
+                components: &operands,
+            };
+            if !selector_matches(selector, &view) {
+                tally.skips.selector_excluded += 1;
+                continue;
+            }
+        }
         if let Some(replacement) = black_preservation_replacement(
             &operands,
             source,

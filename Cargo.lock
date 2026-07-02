@@ -359,6 +359,7 @@ dependencies = [
  "presslint-actions",
  "presslint-color-lcms",
  "presslint-pdf",
+ "presslint-selectors",
  "presslint-syntax",
  "presslint-types",
  "serde",

@@ -122,6 +122,11 @@ pub enum EditPageContentError {
     },
 }
 
+/// Page-index-ignoring content edit: thin wrapper over
+/// [`edit_page_content_incremental_indexed`] that discards the page index.
+///
+/// Kept so [`crate::reencode_content`] and [`crate::content_color_rewrite`], which
+/// do not need per-page context, stay byte-for-byte unchanged.
 pub fn edit_page_content_incremental<F>(
     input: &[u8],
     pages: &PageSelection,
@@ -129,6 +134,22 @@ pub fn edit_page_content_incremental<F>(
 ) -> Result<EditPageContentOutput, EditPageContentError>
 where
     F: Fn(&[u8]) -> EditedContent,
+{
+    edit_page_content_incremental_indexed(input, pages, |_page_index, decoded| edit(decoded))
+}
+
+/// Page-aware content edit: the edit closure receives the zero-based document
+/// [`PageIndex`] of the page whose decoded content-stream bytes it is editing, so
+/// callers such as the selector-targeted colour converter can evaluate per-page
+/// predicates. All decode/round-trip/re-encode/write mechanics are shared with
+/// (and identical to) the index-ignoring wrapper.
+pub fn edit_page_content_incremental_indexed<F>(
+    input: &[u8],
+    pages: &PageSelection,
+    edit: F,
+) -> Result<EditPageContentOutput, EditPageContentError>
+where
+    F: Fn(PageIndex, &[u8]) -> EditedContent,
 {
     let access = inspect_document_access(input).map_err(|error| EditPageContentError::Open {
         error: Box::new(error),
@@ -266,7 +287,7 @@ fn plan_page<F>(
     edit: &F,
 ) -> PagePlan
 where
-    F: Fn(&[u8]) -> EditedContent,
+    F: Fn(PageIndex, &[u8]) -> EditedContent,
 {
     let page_index = page_index_of(page);
     let located = match locate_single_stream(page) {
@@ -317,7 +338,7 @@ where
         return skip(PipelineSkipReason::NoContentStream);
     };
 
-    let new_data = match edit_stream_data(stream_data, filter, edit) {
+    let new_data = match edit_stream_data(page_index, stream_data, filter, edit) {
         Ok(Some(new_data)) => new_data,
         Ok(None) => return skip(PipelineSkipReason::Unchanged),
         Err(reason) => return skip(reason),
@@ -505,12 +526,13 @@ struct EditedStreamData {
 }
 
 fn edit_stream_data<F>(
+    page_index: PageIndex,
     stream_data: &[u8],
     filter: PipelineFilterKind,
     edit: &F,
 ) -> Result<Option<EditedStreamData>, PipelineSkipReason>
 where
-    F: Fn(&[u8]) -> EditedContent,
+    F: Fn(PageIndex, &[u8]) -> EditedContent,
 {
     let decoded = match filter {
         PipelineFilterKind::Raw => stream_data.to_vec(),
@@ -523,7 +545,7 @@ where
     };
 
     require_round_trip(&decoded)?;
-    let (edited, edit_count) = match edit(&decoded) {
+    let (edited, edit_count) = match edit(page_index, &decoded) {
         EditedContent::Unchanged => return Ok(None),
         EditedContent::Rejected(reason) => return Err(reason),
         EditedContent::Rewritten {

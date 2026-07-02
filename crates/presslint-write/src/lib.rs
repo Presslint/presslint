@@ -59,6 +59,7 @@ mod page_boxes;
 mod pdf_number_serialize;
 mod planned;
 mod reencode_content;
+mod selector_match;
 mod stream_object_body;
 mod writer;
 mod xref_stream_writer;
@@ -86,6 +87,7 @@ pub use reencode_content::{
     ReencodePageContentRequest, ReencodePageSkip, ReencodePageSkipReason, ReencodedPage,
     reencode_page_content_incremental,
 };
+pub use selector_match::UnsupportedTargetLeaf;
 pub use writer::{ActiveTrailerError, DirtyObjectBytes, WriteError, write_incremental_revision};
 
 #[cfg(test)]

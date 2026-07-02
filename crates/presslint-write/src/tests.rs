@@ -14,6 +14,7 @@ mod page_boxes_xref_stream;
 mod planned;
 mod reencode_content;
 mod reject;
+mod selector_match;
 mod xref_stream_writer;
 
 use presslint_pdf::{
