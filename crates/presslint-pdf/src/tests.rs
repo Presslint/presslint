@@ -38,6 +38,7 @@ mod page_tree_reference;
 mod page_xobject_resources;
 mod source;
 mod stream_decode;
+mod stream_encode;
 mod trailer;
 mod trailer_prev;
 mod trailer_root;

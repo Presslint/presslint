@@ -56,6 +56,7 @@ mod source;
 mod source_utils;
 mod startxref;
 mod stream_decode;
+mod stream_encode;
 mod trailer;
 mod trailer_prev;
 mod trailer_root;
@@ -234,6 +235,9 @@ pub use source::{
 };
 pub use stream_decode::{
     FlateDecodeParameters, FlateDecodeStreamError, FlateDecodeStreamRejection, decode_flate_stream,
+};
+pub use stream_encode::{
+    FLATE_ENCODE_LEVEL, FlateEncodeStreamError, FlateEncodeStreamRejection, encode_flate_stream,
 };
 pub use trailer::{
     ClassicXrefTrailerDictionaryInspection, ClassicXrefTrailerDictionaryInspectionError,

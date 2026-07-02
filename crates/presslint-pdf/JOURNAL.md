@@ -755,3 +755,16 @@ Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.
   support, object-stream extraction, type-2 compressed-object resolution,
   document-level object maps/caches/openers, and filesystem I/O remain separate
   future work.
+
+### T124 - Add Deterministic Flate Encode
+
+- Adds `encode_flate_stream(input, input_limit)`, a pure byte transform that
+  rejects inputs over the caller bound with `InputLimitExceeded`, then emits a
+  zlib-wrapped `/FlateDecode` payload via
+  `miniz_oxide::deflate::compress_to_vec_zlib`.
+- Pins `FLATE_ENCODE_LEVEL` to `6`; no date, random, dictionary, predictor, or
+  platform-dependent option is introduced. Output is one owned `Vec<u8>` and
+  the borrowed input is not retained.
+- Tests cover empty, small, large, high-entropy, already-compressed, and real
+  decoded content-stream bodies, deterministic repeat encode, default-parameter
+  decode round-trip, bounded rejection, and the structured error shape.
