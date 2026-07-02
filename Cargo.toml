@@ -9,6 +9,7 @@ members = [
     "crates/presslint-selectors",
     "crates/presslint-actions",
     "crates/presslint-color",
+    "crates/presslint-color-lcms",
     "crates/presslint-write",
 ]
 
@@ -32,11 +33,25 @@ presslint-inventory = { path = "crates/presslint-inventory", version = "0.0.1" }
 presslint-selectors = { path = "crates/presslint-selectors", version = "0.0.1" }
 presslint-actions = { path = "crates/presslint-actions", version = "0.0.1" }
 presslint-color = { path = "crates/presslint-color", version = "0.0.1" }
+presslint-color-lcms = { path = "crates/presslint-color-lcms", version = "0.0.1" }
 presslint-write = { path = "crates/presslint-write", version = "0.0.1" }
 
 serde = { version = "1", features = ["derive"] }
 criterion = { version = "0.5", default-features = false }
 miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-alloc"] }
+# Little CMS 2 FFI (MIT; wraps Little CMS, MIT). Pinned EXACT because an lcms2
+# patch bump can shift CMYK output by a few digital counts, which would break the
+# determinism invariant. `default-features = false` plus `static` forces the
+# bundled Little CMS C source to be compiled with `cc` (bypassing pkg-config /
+# any system lcms2), so output is reproducible across build hosts, AND drops the
+# `parallel`/`dynamic` default features whose transitive deps (jobserver ->
+# getrandom -> r-efi/wasip2/wit-bindgen) carry LGPL / LLVM-exception licences the
+# `check_licenses.sh` gate forbids. Cargo cannot subtract a feature enabled by an
+# intermediate crate, so the safe `lcms2` wrapper (which pulls `lcms2-sys` with
+# its defaults) cannot be used without failing the gate — hence the raw FFI here.
+# Used only by `presslint-color-lcms`, which isolates the C dependency and all
+# `unsafe` away from the pure-Rust `presslint-color`.
+lcms2-sys = { version = "=4.0.7", default-features = false, features = ["static"] }
 
 [workspace.lints.rust]
 unsafe_code = "warn"

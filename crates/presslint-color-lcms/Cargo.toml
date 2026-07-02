@@ -1,0 +1,25 @@
+[package]
+name = "presslint-color-lcms"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Little CMS (lcms2) DeviceLink executor for presslint colour conversion."
+
+[dependencies]
+lcms2-sys.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+# The integration tests build a tiny SYNTHETIC in-memory DeviceLink through the
+# same `lcms2-sys` FFI (create built-in profiles, link them, serialize with
+# `cmsSaveProfileToMem`), then feed those bytes back through the public API.
+# Integration tests are a separate crate, so `lcms2-sys` must be a dev-dependency
+# as well as a dependency. The safe `lcms2` wrapper is deliberately NOT used
+# (even in tests) because it would reintroduce the licence-forbidden transitive
+# deps into the graph via `lcms2-sys` default features.
+lcms2-sys.workspace = true
+
+[lints]
+workspace = true
