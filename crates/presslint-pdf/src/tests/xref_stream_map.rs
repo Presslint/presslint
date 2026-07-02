@@ -275,10 +275,32 @@ fn rejects_unsupported_filter_without_partial_entries() {
 }
 
 #[test]
-fn rejects_unsupported_array_decode_parms() {
+fn decodes_flate_section_with_single_element_array_decode_parms() {
+    // A one-element `/DecodeParms` array carrying the predictor dictionary is
+    // semantically equivalent to the direct dictionary form and decodes end to
+    // end through the same Flate+predictor path.
+    let rows = canonical_rows();
+    let body = zlib_store(&png_up_encode(&rows));
     let object = object_with_body(
         "/Type /XRef /Size 3 /W [ 1 2 1 ] /Index [ 0 3 ] /Root 1 0 R \
-         /Filter /FlateDecode /DecodeParms [ << /Predictor 12 >> ]",
+         /Filter /FlateDecode /DecodeParms [ << /Predictor 12 /Columns 4 >> ]",
+        &body,
+    );
+
+    let report = decode_xref_stream_section(&object, 0, MAX_DECODED)
+        .expect("single-element array /DecodeParms should decode");
+
+    assert_eq!(report.widths, [1, 2, 1]);
+    assert_eq!(report.entries, expected_entries());
+}
+
+#[test]
+fn rejects_unsupported_array_decode_parms() {
+    // A two-element `/DecodeParms` array is the genuine per-filter-chain form and
+    // stays a structured skip.
+    let object = object_with_body(
+        "/Type /XRef /Size 3 /W [ 1 2 1 ] /Index [ 0 3 ] /Root 1 0 R \
+         /Filter /FlateDecode /DecodeParms [ << /Predictor 12 >> << /Predictor 12 >> ]",
         b"xxxx",
     );
 

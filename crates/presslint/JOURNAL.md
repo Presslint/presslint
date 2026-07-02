@@ -1,5 +1,18 @@
 # presslint Journal
 
+## T122 - Single-Filter DecodeParms Arrays End To End
+
+- No public surface change. `build_pdf_inventory` now inventories Flate pages
+  and Flate content in xref-stream PDFs whose `/DecodeParms` is the single-filter
+  array form `[null]` or `[<< ... >>]`, because the underlying
+  `presslint_pdf::resolve_flate_decode_parameters` now resolves those forms to
+  the same `FlateDecodeParameters` as the direct `null`/dictionary values (T122
+  in the presslint-pdf journal). The page-content decode path was already shaped
+  to accept any `Resolved` resolution, so raw streams stay borrowed and only the
+  existing bounded decoded buffer is allocated for Flate streams.
+- Added umbrella end-to-end tests over `build_pdf_inventory` for a classic-xref
+  Flate page and an xref-stream Flate page, each with `/DecodeParms [ null ]`.
+
 ## T115 - Read-Only Document Color-Usage Audit (CHK2)
 
 - Added `audit_color_usage(input, max_decoded_stream_bytes) -> Result<ColorUsageAudit, PdfInventoryError>`

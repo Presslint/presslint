@@ -1,11 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+use crate::source_utils::{
+    skip_hex_string, skip_literal_string, skip_name, skip_scalar_token,
+    skip_whitespace_and_comments,
+};
 use crate::xref_stream::{IntegerError, parse_non_negative_integer, unique_entry};
 use crate::{
     ContentStreamStartInspectionRejection, DictionaryEntryByteRange,
     DictionaryEntryInspectionRejection, DictionaryEntrySpan, DictionaryValueKind,
-    FlateDecodeParameters, inspect_content_stream_start, inspect_dictionary_entries,
+    FlateDecodeParameters, inspect_array_extent, inspect_content_stream_start,
+    inspect_dictionary_entries, inspect_dictionary_extent,
 };
+
+const NULL_KEYWORD: &[u8] = b"null";
 
 const DECODE_PARMS_KEY: &[u8] = b"/DecodeParms";
 const PREDICTOR_KEY: &[u8] = b"/Predictor";
@@ -61,9 +68,17 @@ pub enum FlateDecodeParametersResolution {
         /// value is a parameters dictionary.
         parameters_dictionary_range: Option<DictionaryEntryByteRange>,
     },
-    /// The `/DecodeParms` value is an array (the per-filter-chain form): a
-    /// structured skip, deferred to a later slice rather than treated as
-    /// defaults or as an error.
+    /// The `/DecodeParms` value is an array shape this single-filter slice does
+    /// not treat as effective parameters: an empty array, a two-or-more-element
+    /// array (the genuine per-filter-chain form), or a single element that is
+    /// neither `null` nor a dictionary. A structured skip, deferred to a later
+    /// multi-filter slice rather than treated as defaults or as an error.
+    ///
+    /// A single-element `[null]` or `[<< ... >>]` array is instead resolved to
+    /// [`Resolved`](Self::Resolved), since it is semantically equivalent to the
+    /// direct `null`/dictionary form for the already-classified single Flate
+    /// filter (PDF 32000 §7.4.1, `/DecodeParms` parallel to a one-filter
+    /// `/Filter`).
     UnsupportedArrayParms {
         /// Byte range covering the `/DecodeParms` array value span.
         decode_parms_value_range: DictionaryEntryByteRange,
@@ -111,6 +126,16 @@ pub enum FlateDecodeParametersResolutionRejection {
     NonDictionaryParmsValue {
         /// Shallow value kind reported by dictionary entry inspection.
         value_kind: DictionaryValueKind,
+    },
+    /// A `/DecodeParms` array element could not be shallowly bounded within the
+    /// array body: an unbalanced or overrunning dictionary, sub-array, or string
+    /// element. Through the public stream resolver, unbalanced inner
+    /// dictionaries are normally caught earlier by the outer stream-dictionary
+    /// extent scan as `StreamStart`; this variant remains a defensive outcome for
+    /// the bounded array-body scanner and is pinned by serde coverage.
+    MalformedArrayElement {
+        /// Byte range covering the `/DecodeParms` array value span.
+        decode_parms_value_range: DictionaryEntryByteRange,
     },
     /// A delegated parms-dictionary entry scan failed.
     ParmsDictEntries {
@@ -164,9 +189,15 @@ pub enum FlateDecodeParametersResolutionRejection {
 ///   means default values);
 /// - a single `null` value resolves the same way, with the key range `Some` and
 ///   the dictionary range `None`;
-/// - a single array value is an `Ok`
+/// - an array value is scanned shallowly for its elements: a single-element
+///   `[null]` resolves to defaults and a single-element `[<< ... >>]` resolves
+///   its inner predictor dictionary, both exactly as their direct `null` and
+///   dictionary forms would (PDF 32000 §7.4.1 treats `/DecodeParms` as parallel
+///   to `/Filter`, so a one-element array is the one-filter case). An empty
+///   array, a two-or-more-element array, or a single element that is neither
+///   `null` nor a dictionary stays an `Ok`
 ///   [`UnsupportedArrayParms`](FlateDecodeParametersResolution::UnsupportedArrayParms)
-///   skip, the deferred per-filter-chain follow-up;
+///   skip, the deferred multi-filter follow-up;
 /// - a single dictionary value is located with [`inspect_dictionary_entries`]
 ///   and its `/Predictor`, `/Colors`, `/BitsPerComponent`, and `/Columns`
 ///   entries are each matched once with `unique_entry` and parsed in place with
@@ -186,6 +217,8 @@ pub enum FlateDecodeParametersResolutionRejection {
 /// [`DuplicateDecodeParms`](FlateDecodeParametersResolutionRejection::DuplicateDecodeParms),
 /// a `/DecodeParms` value that is none of dictionary/`null`/array
 /// ([`NonDictionaryParmsValue`](FlateDecodeParametersResolutionRejection::NonDictionaryParmsValue)),
+/// a `/DecodeParms` array element that cannot be shallowly bounded
+/// ([`MalformedArrayElement`](FlateDecodeParametersResolutionRejection::MalformedArrayElement)),
 /// a delegated parms-dictionary entry-scan failure
 /// ([`ParmsDictEntries`](FlateDecodeParametersResolutionRejection::ParmsDictEntries)),
 /// a duplicated predictor key
@@ -238,14 +271,191 @@ pub fn resolve_flate_decode_parameters(
             decode_parms_key_range: Some(entry.key_range),
             parameters_dictionary_range: None,
         }),
-        DictionaryValueKind::Array => Ok(FlateDecodeParametersResolution::UnsupportedArrayParms {
-            decode_parms_value_range: entry.value_range,
-        }),
+        DictionaryValueKind::Array => resolve_parms_array(input, entry, ctx),
         DictionaryValueKind::Dictionary => resolve_parms_dictionary(input, entry, ctx),
         value_kind => Err(ctx.error(
             FlateDecodeParametersResolutionRejection::NonDictionaryParmsValue { value_kind },
             Some(entry.value_range.start),
         )),
+    }
+}
+
+/// Shallow classification of a single `/DecodeParms` array element.
+///
+/// Only enough is decided to route the single-filter slice: a `null` element and
+/// a dictionary element are the two effective single-element forms; every other
+/// shape (name, number, string, sub-array, or a multi-token scalar run such as an
+/// `N G R` indirect reference, whose tokens each count as one `Other` element) is
+/// not effective and keeps the array a structured skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParmsArrayElement {
+    /// A `null` scalar element: defaults, mirroring a direct `null` value.
+    Null,
+    /// A `<< ... >>` dictionary element; the range covers its balanced extent.
+    Dictionary {
+        /// Byte range covering the dictionary element's balanced `<< ... >>`
+        /// span.
+        value_range: DictionaryEntryByteRange,
+    },
+    /// Any other element kind: not effective for this single-filter slice.
+    Other,
+}
+
+/// Result of the shallow `/DecodeParms` array element scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParmsArrayScan {
+    /// Number of shallow elements observed in the array body.
+    element_count: usize,
+    /// The first element, when the array is non-empty.
+    first_element: Option<ParmsArrayElement>,
+}
+
+/// Resolve an array `/DecodeParms` value.
+///
+/// A single-element `[null]` resolves to defaults and a single-element
+/// `[<< ... >>]` delegates its inner dictionary to [`resolve_parms_dictionary`],
+/// reusing the same `/DecodeParms` key range so the resolved report is
+/// indistinguishable from the direct forms. Every other cardinality or element
+/// shape stays a structured
+/// [`UnsupportedArrayParms`](FlateDecodeParametersResolution::UnsupportedArrayParms)
+/// skip; a malformed array element is a
+/// [`MalformedArrayElement`](FlateDecodeParametersResolutionRejection::MalformedArrayElement)
+/// rejection.
+fn resolve_parms_array(
+    input: &[u8],
+    entry: DictionaryEntrySpan,
+    ctx: ErrorContext,
+) -> Result<FlateDecodeParametersResolution, FlateDecodeParametersResolutionError> {
+    let scan = scan_parms_array(input, entry.value_range, ctx)?;
+
+    match (scan.element_count, scan.first_element) {
+        (1, Some(ParmsArrayElement::Null)) => Ok(FlateDecodeParametersResolution::Resolved {
+            parameters: FlateDecodeParameters::default(),
+            decode_parms_key_range: Some(entry.key_range),
+            parameters_dictionary_range: None,
+        }),
+        (1, Some(ParmsArrayElement::Dictionary { value_range })) => resolve_parms_dictionary(
+            input,
+            DictionaryEntrySpan {
+                key_range: entry.key_range,
+                value_range,
+                value_kind: DictionaryValueKind::Dictionary,
+            },
+            ctx,
+        ),
+        _ => Ok(FlateDecodeParametersResolution::UnsupportedArrayParms {
+            decode_parms_value_range: entry.value_range,
+        }),
+    }
+}
+
+/// Scan the shallow elements of a `/DecodeParms` array, counting them and
+/// classifying the first.
+///
+/// The array is already known balanced (its value was classified as
+/// [`DictionaryValueKind::Array`]); this bounds every element scan to the array
+/// body by slicing the source at the closing `]`, so a dictionary/sub-array/
+/// string element that would overrun the array is rejected as
+/// [`MalformedArrayElement`](FlateDecodeParametersResolutionRejection::MalformedArrayElement)
+/// rather than silently consuming trailing bytes. It decodes no element contents
+/// and retains no PDF bytes; only byte ranges and small counts flow out.
+fn scan_parms_array(
+    input: &[u8],
+    value_range: DictionaryEntryByteRange,
+    ctx: ErrorContext,
+) -> Result<ParmsArrayScan, FlateDecodeParametersResolutionError> {
+    let malformed = |error_byte_offset: Option<usize>| {
+        ctx.error(
+            FlateDecodeParametersResolutionRejection::MalformedArrayElement {
+                decode_parms_value_range: value_range,
+            },
+            error_byte_offset,
+        )
+    };
+
+    let array = inspect_array_extent(input, value_range.start)
+        .map_err(|error| malformed(error.error_byte_offset))?;
+    let body_end = array.close_byte_offset;
+    // Bounding the source at the closing `]` keeps every delegated element scan
+    // inside the array body, so an unterminated element cannot run past it.
+    let bounded = &input[..body_end];
+
+    let mut cursor = array.open_byte_offset + 1;
+    let mut element_count = 0usize;
+    let mut first_element = None;
+
+    while cursor < body_end {
+        cursor = skip_whitespace_and_comments(input, cursor, body_end);
+        if cursor >= body_end {
+            break;
+        }
+
+        let (element, next) = classify_parms_array_element(bounded, cursor, body_end, malformed)?;
+        if first_element.is_none() {
+            first_element = Some(element);
+        }
+        element_count += 1;
+        cursor = next;
+    }
+
+    Ok(ParmsArrayScan {
+        element_count,
+        first_element,
+    })
+}
+
+/// Classify the array element at `cursor` and return the offset just past it.
+///
+/// `bounded` is the source truncated at the array's closing `]`, so the
+/// delegated dictionary/array/string extent helpers cannot cross the array
+/// boundary; a delegated failure maps to a `malformed` rejection.
+fn classify_parms_array_element(
+    bounded: &[u8],
+    cursor: usize,
+    body_end: usize,
+    malformed: impl Fn(Option<usize>) -> FlateDecodeParametersResolutionError,
+) -> Result<(ParmsArrayElement, usize), FlateDecodeParametersResolutionError> {
+    match bounded[cursor] {
+        b'<' if bounded.get(cursor + 1) == Some(&b'<') => {
+            let dictionary = inspect_dictionary_extent(bounded, cursor)
+                .map_err(|error| malformed(error.error_byte_offset))?;
+            Ok((
+                ParmsArrayElement::Dictionary {
+                    value_range: DictionaryEntryByteRange {
+                        start: cursor,
+                        end: dictionary.after_close_byte_offset,
+                    },
+                },
+                dictionary.after_close_byte_offset,
+            ))
+        }
+        b'[' => {
+            let array = inspect_array_extent(bounded, cursor)
+                .map_err(|error| malformed(error.error_byte_offset))?;
+            Ok((ParmsArrayElement::Other, array.after_close_byte_offset))
+        }
+        b'(' => {
+            let end =
+                skip_literal_string(bounded, cursor).ok_or_else(|| malformed(Some(cursor)))?;
+            Ok((ParmsArrayElement::Other, end))
+        }
+        b'<' => {
+            let end = skip_hex_string(bounded, cursor).ok_or_else(|| malformed(Some(cursor)))?;
+            Ok((ParmsArrayElement::Other, end))
+        }
+        b'/' => {
+            let end = skip_name(bounded, cursor, body_end);
+            Ok((ParmsArrayElement::Other, end))
+        }
+        _ => {
+            let end = skip_scalar_token(bounded, cursor, body_end);
+            let element = if &bounded[cursor..end] == NULL_KEYWORD {
+                ParmsArrayElement::Null
+            } else {
+                ParmsArrayElement::Other
+            };
+            Ok((element, end))
+        }
     }
 }
 

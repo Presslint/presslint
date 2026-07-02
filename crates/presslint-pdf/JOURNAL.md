@@ -4,6 +4,34 @@ Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.
 
 ## Current State
 
+### T122 - Accept Single-Filter DecodeParms Arrays
+
+- `resolve_flate_decode_parameters` now accepts the single-filter array form of
+  `/DecodeParms`: `[null]` resolves to default `FlateDecodeParameters`, and
+  `[<< ...predictor keys... >>]` resolves the inner dictionary exactly as the
+  direct dictionary form does (reporting the element span as
+  `parameters_dictionary_range`). Both match the direct `null`/dictionary forms for
+  the already-classified single Flate filter (PDF 32000 §7.4.1). The element is
+  scanned shallowly via `inspect_array_extent`, bounded at the closing `]` so
+  element extents cannot cross the array boundary; the dictionary case delegates to
+  the existing `resolve_parms_dictionary` with a synthetic entry carrying the real
+  `/DecodeParms` key range.
+- Other array shapes stay a structured `UnsupportedArrayParms` skip (empty,
+  two-or-more-element per-filter-chain, or a single non-`null`/non-dictionary
+  element); indirect-reference values and `/DP` stay out of scope. Malformed
+  inner dictionary elements such as `[ << /Predictor 12 ]` fail earlier through
+  the public stream resolver because the outer dictionary extent scan tracks
+  nested `<<`/`>>` and reports `StreamStart`. The defensive
+  `MalformedArrayElement` rejection remains for the bounded array-body scanner
+  and its JSON shape is pinned directly in serde tests.
+- Page-content and xref-stream Flate paths inherit this end to end unchanged (both
+  destructure `Resolved { parameters, .. }`). Copy budget unchanged: only byte
+  ranges and the small `Copy` `FlateDecodeParameters`, plus one bounded shallow
+  `/DecodeParms` scan per Flate stream.
+- Focused tests cover `[null]`, `[<< ... >>]`, empty, two-element, single-name,
+  single-indirect, and malformed arrays, plus a Flate xref-stream section and
+  classic/xref-stream page-inventory fixtures with single-element array forms.
+
 ### T118 - Page Box Inspection
 
 - Added `inspect_document_page_boxes(input) ->
@@ -386,80 +414,30 @@ Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.
 ### T089 - Inspect Cross-Reference Stream Dictionary Geometry Fields
 
 - Adds `inspect_xref_stream_dictionary(input, object_byte_offset)`, the first
-  cross-reference-stream (`/Type /XRef`) slice. Given caller bytes and the byte
-  offset of an indirect object (the offset `classify_xref_section` reports as
-  `XrefSection::Stream`), it extracts the geometry fields a later step needs to
-  slice the eventually-decoded entry table: `/Type` (must be `/XRef`), `/W` (the
-  three field widths), `/Size`, and `/Index` (the subsection pairs).
-- It delegates the object header and top-level entry spans to
-  `inspect_indirect_object_dictionary`, reimplementing no header, body-token,
-  dictionary-open, or entry-span scanning, and matches only the exact raw key
-  bytes `/Type`, `/W`, `/Size`, and `/Index` the same way
-  `inspect_classic_xref_trailer_root` matches `/Root` (one shared
-  `unique_entry` helper reports missing as `Ok(None)`, exactly-one as
-  `Ok(Some)`, and more-than-one as a duplicate-key error).
-- `/Type` must be exactly one name value whose raw bytes are `/XRef`; a missing,
-  duplicate, non-name, or non-`/XRef` `/Type` is a distinct rejection
-  (`MissingType`, `DuplicateType`, `NonNameTypeValue`, `UnexpectedTypeName`).
-- `/W` must be exactly one array value, located with `inspect_array_extent` and
-  scanned by the one new bounded abstraction: a whitespace/comment-separated
-  decimal-integer element scan over the located array extent. Exactly three
-  non-negative integers are required and a width of `0` (omitted field) is
-  accepted; missing, duplicate, non-array, malformed-array, malformed-element,
-  width-overflow, and wrong-length cases are distinct rejections (`MissingW`,
-  `DuplicateW`, `NonArrayWValue`, `MalformedWArray`, `MalformedWElement`,
-  `WidthOutOfRange`, `WrongWLength`).
-- `/Size` must be exactly one direct non-negative integer that fits `usize`;
-  missing, duplicate, non-integer (any non-pure-digit value span, including an
-  indirect `N G R` or a decimal), and out-of-range cases are distinct
-  rejections (`MissingSize`, `DuplicateSize`, `NonIntegerSizeValue`,
-  `SizeOutOfRange`).
-- `/Index` is optional: when absent it defaults to a single `(0, Size)`
-  subsection with `index_value_range` `None`; when present it must be one array
-  of an even count of non-negative integers parsed as
-  `(first_object_number, entry_count)` pairs, and a duplicate, non-array,
-  malformed-array, malformed-element, odd-length, or integer-overflow `/Index`
-  is a distinct rejection (`DuplicateIndex`, `NonArrayIndexValue`,
-  `MalformedIndexArray`, `MalformedIndexElement`, `OddIndexLength`,
-  `IndexIntegerOutOfRange`). Geometry is never fabricated when the key is
-  present but malformed.
-- `XrefStreamDictionaryInspection` carries the delegated
-  `IndirectObjectDictionaryInspection`, the `/Type` key/value byte ranges, the
-  `/W` value byte range and parsed `widths`, the `/Size` value byte range and
-  parsed `size`, and the `/Index` value byte range (when present) plus the
-  ordered `index_subsections`. It retains or copies no PDF bytes, object bodies,
-  stream bodies, decoded bytes, or source slices; the only owned allocations are
-  the three-element `widths` vector and the small `index_subsections` pair
-  vector (the acceptable copy budget for bounded report materialization), so no
-  benchmark was added.
-- Every failure path is a distinct structured rejection variant and the helper
-  never returns partial geometry on error. It lives in the new focused
-  `xref_stream.rs` module, re-exported from `lib.rs`; tests live in
-  `src/tests/xref_stream.rs`.
-- A composition test chains `inspect_startxref -> classify_xref_section
-  (== XrefSection::Stream) -> inspect_xref_stream_dictionary` over a synthetic
-  xref-stream fixture and confirms `/Type /XRef`, the three `/W` widths,
-  `/Size`, and the defaulted/explicit `/Index` subsections; a serde round-trip
-  test pins the public JSON shape of the report and rejection enum.
-- Non-goals for this slice: no decoding/inflating/reading of the cross-reference
-  stream body bytes, no `/W`-width entry-record parsing or object offset map, no
-  `/Root` or `/Prev` parsing, no `/Prev` following, incremental-section merging,
-  or hybrid-reference (`/XRefStm`) support, no indirect-reference resolution,
-  catalog/page-tree/`/Contents` reading, no stream-data extent location or
-  `endstream` validation, and no filesystem I/O, document opener, caches, object
-  maps, or whole-document eager parsing.
-- Ablation (behavior-preserving): the four field-requirement helpers
-  (`require_type`/`require_widths`/`require_size`/`require_index`) no longer take
-  a generic `E: Fn(..) -> Error + Copy` error closure with the same four-line
-  bound repeated verbatim; they take a small `Copy` `ErrorContext` struct whose
-  `error(reason, offset)` method builds the rejection. This removes the generic
-  parameter from every helper, the closure built in
-  `inspect_xref_stream_dictionary`, the free `xref_stream_error` constructor, and
-  the four single-use `duplicate_*` variant wrappers (their duplicate-key ranges
-  are now destructured inline at each call site). No public type, field, serde
-  shape, rejection variant, error offset, or behavior changed; all `xref_stream`
-  tests, the full `presslint-pdf` suite, `cargo check --workspace --all-targets`,
-  clippy, and `./scripts/ci_check.sh` pass unchanged.
+  cross-reference-stream (`/Type /XRef`) slice. Given the byte offset of an
+  indirect object reported as `XrefSection::Stream`, it extracts the geometry a
+  later step needs to slice the decoded entry table: `/Type` (must be `/XRef`),
+  `/W` (three field widths), `/Size`, and `/Index` (subsection pairs). It delegates
+  header/entry-span scanning to `inspect_indirect_object_dictionary` and matches
+  exact raw key bytes via the shared `unique_entry` helper.
+- Each field has distinct structured rejections and never fabricates geometry on
+  error: `/Type` (missing/duplicate/non-name/non-`/XRef`); `/W` scanned by a bounded
+  decimal-integer element scan over `inspect_array_extent`, requiring exactly three
+  non-negative integers (width `0` allowed); `/Size` one direct `usize`-fitting
+  integer; `/Index` optional (defaults to a single `(0, Size)` subsection) else an
+  even-count non-negative-integer array parsed as `(first_object, count)` pairs.
+- `XrefStreamDictionaryInspection` carries the delegated inspection, the field
+  byte ranges, parsed `widths`/`size`, and ordered `index_subsections`. It copies
+  no PDF/stream/decoded bytes; the only owned allocations are the small `widths`
+  and `index_subsections` vectors. Lives in `xref_stream.rs` (re-exported from
+  `lib.rs`); tests in `src/tests/xref_stream.rs`, with a startxref → classify →
+  inspect composition test and a serde shape lock.
+- Non-goals: no stream-body decode, no entry-record parsing/object map, no
+  `/Root`/`/Prev` parsing or following, no section merging or hybrid `/XRefStm`,
+  no indirect resolution, catalog/page-tree/`/Contents` reading, no opener/caches.
+- Ablation (behavior-preserving): the four field-requirement helpers take a small
+  `Copy` `ErrorContext` struct instead of a repeated generic error closure; no
+  public type, serde shape, rejection variant, or behavior changed.
 
 ### T090 - Inspect Cross-Reference Stream Trailer Navigation Fields
 

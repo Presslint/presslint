@@ -2,8 +2,11 @@
 //!
 //! These exercise the resolver directly over single stream objects (no
 //! `/DecodeParms`, a `null` value, a full predictor dictionary, a partial
-//! predictor dictionary, an array value, and every malformed-structure
-//! rejection) and then prove the resolver composes with the classic-xref
+//! predictor dictionary, the single-element `[null]`/`[<< ... >>]` array forms
+//! that resolve like their direct counterparts, the empty/multi-element/
+//! non-dictionary-non-null array shapes that stay structured skips, and every
+//! malformed-structure rejection) and then prove the resolver composes with the
+//! classic-xref
 //! document-access spine: a synthetic single-page `/FlateDecode` content stream
 //! carrying a predictor dictionary is navigated end to end, classified as
 //! `Flate`, and resolved. A serde round-trip pins the public JSON shape of the
@@ -17,11 +20,11 @@ use serde_harness::{from_serde_value, serde_value};
 
 use crate::{
     ContentStreamFilterClassification, ContentStreamStartInspectionRejection, DecodeParmsParameter,
-    DictionaryValueKind, FlateDecodeParameters, FlateDecodeParametersResolution,
-    FlateDecodeParametersResolutionError, FlateDecodeParametersResolutionRejection,
-    IndirectObjectBodyLeadingTokenKind, PageContentTargetInspection,
-    classify_content_stream_filter, inspect_classic_document_access, inspect_page_content_targets,
-    inspect_page_contents, resolve_flate_decode_parameters,
+    DictionaryEntryByteRange, DictionaryValueKind, FlateDecodeParameters,
+    FlateDecodeParametersResolution, FlateDecodeParametersResolutionError,
+    FlateDecodeParametersResolutionRejection, IndirectObjectBodyLeadingTokenKind,
+    PageContentTargetInspection, classify_content_stream_filter, inspect_classic_document_access,
+    inspect_page_content_targets, inspect_page_contents, resolve_flate_decode_parameters,
 };
 
 const PDF_PREFIX: &[u8] = b"%PDF-1.7\n";
@@ -62,6 +65,24 @@ fn resolve_err(dictionary: &[u8]) -> FlateDecodeParametersResolutionRejection {
     resolve(dictionary)
         .expect_err("decode-parms resolution should reject")
         .reason
+}
+
+/// Assert that `dictionary` resolves to an `UnsupportedArrayParms` skip whose
+/// value range covers the exact `expected_value` array bytes.
+fn assert_unsupported_array(dictionary: &[u8], expected_value: &[u8]) {
+    let (source, result) = resolve_capturing(dictionary);
+    let resolution = result.expect("array decode-parms should be a structured skip");
+
+    let FlateDecodeParametersResolution::UnsupportedArrayParms {
+        decode_parms_value_range,
+    } = resolution
+    else {
+        unreachable!("expected an unsupported array skip, got {resolution:?}");
+    };
+    assert_eq!(
+        &source[decode_parms_value_range.start..decode_parms_value_range.end],
+        expected_value
+    );
 }
 
 #[test]
@@ -147,20 +168,131 @@ fn partial_predictor_dictionary_defaults_absent_keys() {
 }
 
 #[test]
-fn array_decode_parms_is_unsupported_array_skip() {
+fn single_null_array_decode_parms_resolves_to_defaults() {
     let (source, result) = resolve_capturing(b"<< /DecodeParms [ null ] >>");
-    let resolution = result.expect("array decode-parms should be a structured skip");
+    let resolution = result.expect("single-null array decode-parms should resolve to defaults");
 
-    let FlateDecodeParametersResolution::UnsupportedArrayParms {
-        decode_parms_value_range,
+    let FlateDecodeParametersResolution::Resolved {
+        parameters,
+        decode_parms_key_range,
+        parameters_dictionary_range,
     } = resolution
     else {
-        unreachable!("expected an unsupported array skip, got {resolution:?}");
+        unreachable!("expected a resolved result, got {resolution:?}");
     };
-    assert_eq!(
-        &source[decode_parms_value_range.start..decode_parms_value_range.end],
-        b"[ null ]"
+    assert_eq!(parameters, FlateDecodeParameters::default());
+    assert_eq!(parameters_dictionary_range, None);
+    let key_range = decode_parms_key_range.expect("single-null array still locates the key range");
+    assert_eq!(&source[key_range.start..key_range.end], b"/DecodeParms");
+}
+
+#[test]
+fn single_dictionary_array_decode_parms_matches_direct_dictionary() {
+    let array = resolve_ok(
+        b"<< /DecodeParms [ << /Predictor 12 /Columns 4 /Colors 1 /BitsPerComponent 8 >> ] >>",
     );
+    let direct = resolve_ok(
+        b"<< /DecodeParms << /Predictor 12 /Columns 4 /Colors 1 /BitsPerComponent 8 >> >>",
+    );
+
+    let (
+        FlateDecodeParametersResolution::Resolved {
+            parameters: array_params,
+            ..
+        },
+        FlateDecodeParametersResolution::Resolved {
+            parameters: direct_params,
+            ..
+        },
+    ) = (array, direct)
+    else {
+        unreachable!("both single-dictionary forms should resolve");
+    };
+    assert_eq!(array_params, direct_params);
+    assert_eq!(
+        array_params,
+        FlateDecodeParameters {
+            predictor: 12,
+            colors: 1,
+            bits_per_component: 8,
+            columns: 4,
+        }
+    );
+}
+
+#[test]
+fn single_dictionary_array_reports_the_element_dictionary_range() {
+    let dictionary = b"<< /DecodeParms [ << /Predictor 12 >> ] >>";
+    let (source, result) = resolve_capturing(dictionary);
+    let resolution = result.expect("single-dictionary array should resolve");
+
+    let FlateDecodeParametersResolution::Resolved {
+        decode_parms_key_range,
+        parameters_dictionary_range,
+        ..
+    } = resolution
+    else {
+        unreachable!("expected a resolved result, got {resolution:?}");
+    };
+    let key_range = decode_parms_key_range.expect("array-dictionary form locates the key range");
+    assert_eq!(&source[key_range.start..key_range.end], b"/DecodeParms");
+    // The reported dictionary range is the array element itself, not the array.
+    let dict_range =
+        parameters_dictionary_range.expect("array-dictionary form locates the element");
+    assert_eq!(
+        &source[dict_range.start..dict_range.end],
+        b"<< /Predictor 12 >>"
+    );
+}
+
+#[test]
+fn empty_array_decode_parms_is_unsupported_array_skip() {
+    assert_unsupported_array(b"<< /DecodeParms [ ] >>", b"[ ]");
+}
+
+#[test]
+fn two_element_array_decode_parms_is_unsupported_array_skip() {
+    assert_unsupported_array(b"<< /DecodeParms [ null null ] >>", b"[ null null ]");
+}
+
+#[test]
+fn single_non_dictionary_non_null_array_element_is_unsupported_array_skip() {
+    // A lone name element is neither `null` nor a dictionary, so it is not
+    // effective and the array stays a structured skip.
+    assert_unsupported_array(b"<< /DecodeParms [ /Flate ] >>", b"[ /Flate ]");
+}
+
+#[test]
+fn single_indirect_reference_array_element_is_unsupported_array_skip() {
+    // An `N G R` reference is three scalar tokens, so it is a multi-element array
+    // and never resolved; indirect `/DecodeParms` values stay out of scope.
+    assert_unsupported_array(b"<< /DecodeParms [ 5 0 R ] >>", b"[ 5 0 R ]");
+}
+
+#[test]
+fn malformed_array_decode_parms_is_a_structured_rejection() {
+    // `[ << ]` leaves the stream dictionary's `<<`/`>>` unbalanced, so the
+    // delegated content-stream-start inspection rejects it before the array arm
+    // is reached: a malformed array is always a structured rejection, never
+    // silent defaults. (The array-body scan additionally guards element extents
+    // with the defensive `MalformedArrayElement`; that arm is exercised via serde
+    // below, since a malformed inner element also unbalances the outer stream
+    // dictionary and is caught here first.)
+    assert!(matches!(
+        resolve_err(b"<< /DecodeParms [ << ] >>"),
+        FlateDecodeParametersResolutionRejection::StreamStart { .. }
+    ));
+}
+
+#[test]
+fn malformed_array_predictor_dictionary_is_stream_start_rejection() {
+    // The outer stream-dictionary extent scan tracks nested `<<`/`>>`, so this
+    // unclosed inner dictionary unbalances the stream dictionary before the
+    // `/DecodeParms` array arm can classify an element.
+    assert!(matches!(
+        resolve_err(b"<< /DecodeParms [ << /Predictor 12 ] >>"),
+        FlateDecodeParametersResolutionRejection::StreamStart { .. }
+    ));
 }
 
 #[test]
@@ -351,6 +483,8 @@ fn serde_round_trips_resolution_shapes() {
         resolve_ok(b"<< /DecodeParms null >>"),
         resolve_ok(b"<< /DecodeParms << /Predictor 12 /Columns 4 >> >>"),
         resolve_ok(b"<< /DecodeParms [ null ] >>"),
+        resolve_ok(b"<< /DecodeParms [ << /Predictor 12 >> ] >>"),
+        resolve_ok(b"<< /DecodeParms [ null null ] >>"),
     ] {
         let value = serde_value(&resolution).expect("resolution should serialize");
         let restored: FlateDecodeParametersResolution =
@@ -361,13 +495,26 @@ fn serde_round_trips_resolution_shapes() {
 
 #[test]
 fn serde_round_trips_rejection_shape() {
-    let error =
+    let resolved_error =
         resolve(b"<< /DecodeParms 5 0 R >>").expect_err("indirect decode-parms should reject");
+    // The defensive `MalformedArrayElement` variant is not reachable through the
+    // public entry point (a malformed inner element unbalances the stream
+    // dictionary and is rejected earlier), so its JSON shape is pinned directly.
+    let malformed_array_error = FlateDecodeParametersResolutionError {
+        byte_offset: 9,
+        byte_len: 42,
+        error_byte_offset: Some(20),
+        reason: FlateDecodeParametersResolutionRejection::MalformedArrayElement {
+            decode_parms_value_range: DictionaryEntryByteRange { start: 20, end: 26 },
+        },
+    };
 
-    let value = serde_value(&error).expect("error should serialize");
-    let restored: FlateDecodeParametersResolutionError =
-        from_serde_value(value).expect("error should deserialize");
-    assert_eq!(restored, error);
+    for error in [resolved_error, malformed_array_error] {
+        let value = serde_value(&error).expect("error should serialize");
+        let restored: FlateDecodeParametersResolutionError =
+            from_serde_value(value).expect("error should deserialize");
+        assert_eq!(restored, error);
+    }
 }
 
 #[test]

@@ -241,6 +241,54 @@ fn inventories_flate_xref_stream_with_indirect_content_length() -> Result<(), St
 }
 
 #[test]
+fn inventories_flate_page_with_single_element_array_decode_parms() -> Result<(), String> {
+    // `/DecodeParms [ null ]` is the single-filter array form of the direct
+    // `null` value: it resolves to default Flate parameters, so the page content
+    // decodes and inventories end to end.
+    let compressed = compress_to_vec_zlib(vector_content(), 6);
+    let source = single_page_pdf(b" /Filter /FlateDecode /DecodeParms [ null ]", &compressed);
+
+    let report = build_pdf_inventory(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(
+        report.pages[0].result,
+        PdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
+    );
+    assert_eq!(report.inventory.len(), 1);
+    assert_eq!(report.inventory.entries[0].kind, ObjectKind::Vector);
+    Ok(())
+}
+
+#[test]
+fn inventories_flate_xref_stream_with_single_element_array_decode_parms() -> Result<(), String> {
+    // The same single-element array form on the content stream of an xref-stream
+    // PDF also decodes and inventories through the neutral bridge.
+    let compressed = compress_to_vec_zlib(vector_content(), 6);
+    let source = xref_stream_single_page_pdf(
+        b" /Filter /FlateDecode /DecodeParms [ null ]",
+        &compressed,
+        false,
+        None,
+    )?;
+
+    let report = build_pdf_inventory(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(
+        report.pages[0].result,
+        PdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
+    );
+    assert_eq!(report.inventory.len(), 1);
+    assert_eq!(report.inventory.entries[0].kind, ObjectKind::Vector);
+    Ok(())
+}
+
+#[test]
 fn neutral_bridge_matches_classic_bridge_for_classic_xref() -> Result<(), String> {
     let source = single_page_pdf(b"", vector_content());
 
