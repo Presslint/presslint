@@ -5,10 +5,123 @@
 `presslint-write` is the first byte-writing crate: a deterministic classic-xref
 and xref-stream **incremental append** writer. It offers the foundational
 semantic **no-op** (`write_incremental_revision`), the first *semantic*
-dictionary mutation built on it (`set_page_boxes_incremental`), and now the first
-**whole-stream** mutation: a no-op content-stream re-encode
-(`reencode_page_content_incremental`) that proves the replace-a-stream-object-body
-pipeline every future content-operand rewrite needs.
+dictionary mutation built on it (`set_page_boxes_incremental`), the first
+**whole-stream** mutation (a no-op content-stream re-encode,
+`reencode_page_content_incremental`), the first content-operand rewrite
+(`rewrite_rgb_black_to_cmyk_incremental`, an exact syntactic RGB-black rewrite),
+and now the first REAL colour conversion of PDF content:
+`convert_content_colors_incremental`, a DeviceLink-driven direct device-colour
+conversion (F4-2).
+
+## T128 - DeviceLink Content-Colour Conversion (F4-2)
+
+`convert_content_colors_incremental(input, &ConvertContentColorsRequest { pages,
+device_link_bytes }) -> Result<ConvertContentColorsOutput,
+ConvertContentColorsError>` generalises the T126 hardcoded
+`0 0 0 rg -> 0 0 0 1 k` rewrite into a DeviceLink-driven conversion. For each
+direct device colour-setting operator in a selected single-content-stream page
+whose declared space equals the supplied DeviceLink's SOURCE space, it reads the
+operands, applies the DeviceLink via `presslint_color_lcms::apply_device_link_f64`
+(F4-1), and rewrites the operator to the DeviceLink's DESTINATION space with the
+converted operands. It is built on the untouched T125/T126
+`content_edit_pipeline` (`edit_page_content_incremental` + `EditedContent`) and
+the T126 operator matcher; `content_edit_pipeline.rs` was NOT modified.
+
+### DeviceLink inspected ONCE up front
+
+`presslint_color_lcms::inspect_device_link(&device_link_bytes)` runs before any
+page traversal. An invalid / non-DeviceLink profile is `DeviceLinkInspectFailed
+{ error }`; a `Lab` or `Unsupported` source OR destination space is
+`UnsupportedLinkSpace { source, destination }` — both whole-op errors returned
+before a single page is opened. The convertible source/destination spaces are
+narrowed once to an internal `DeviceColorSpace` (`Gray`/`Rgb`/`Cmyk`), which
+fixes the expected source operator set and channel count.
+
+### Source-space gate + operator/operand-count change
+
+Per page, an edit closure over the decoded content `tokenize`s +
+`assemble_operators`, then for each `OperatorRecord`:
+
+- operator bytes → `(space, stroking)`: `g`/`G`=Gray(1), `rg`/`RG`=RGB(3),
+  `k`/`K`=CMYK(4); lowercase = nonstroking, uppercase = stroking. A non-colour
+  operator is left verbatim and not counted.
+- a colour operator whose space != link source space is left verbatim and counted
+  `source_space_mismatch` (so a CMYK->CMYK link never touches `rg`, an RGB->CMYK
+  link never touches `k`).
+- a source-space operator with the wrong operand count → `wrong_operand_count`,
+  skip; a non-number / multi-token operand → `non_number_operand`, skip; an
+  operand outside `[0.0, 1.0]` → `operand_out_of_range`, skip.
+- otherwise `apply_device_link_f64` produces the destination components; the
+  operator becomes the destination-space operator (Gray→`g`/`G`, RGB→`rg`/`RG`,
+  CMYK→`k`/`K`, preserving stroking), and the replacement is
+  `<serialized components joined by single spaces> <dest operator>`. The operand
+  count and operator therefore change with the destination space (e.g.
+  `1 0 0 rg` via an RGB->CMYK link → `<c> <m> <y> <k> k`).
+
+Splices are applied DESCENDING by source offset (T126 precedent) so earlier
+ranges stay valid; every non-converted byte is preserved verbatim, and
+`output.bytes[..input.len()] == input`. A page with zero conversions returns
+`EditedContent::Unchanged` (no revision object), and works on classic AND
+xref-stream, raw AND single `/FlateDecode` inputs (inheriting the pipeline's
+skips for multi-stream `/Contents`, indirect/duplicate `/Length`, predictor
+Flate, unsupported filter, compressed content object, and unproven ownership).
+
+### Deterministic colour serialization (src/pdf_number_serialize.rs)
+
+`serialize_color_component(f64) -> String` clamps to `[0.0, 1.0]`, maps `-0.0`
+and negative / non-finite values to `0`, formats `{:.8}` (never an exponent),
+then trims trailing zeros and a trailing `.`. This is F4-2's quantisation policy
+(F4-1 stays raw `f64`). It is a deliberately separate helper from
+`page_box_serialize::format_number`, which serializes arbitrary finite
+coordinates by shortest round-trip and has no `[0,1]` clamp — the two policies do
+not share an implementation, so page-box was left untouched.
+
+### Honest reporting
+
+`ConvertContentColorsOutput { bytes, converted, skipped }`. `ConvertedPage {
+page_index, content_object, operators_converted, operator_skips }` where
+`OperatorSkipCounts { source_space_mismatch, wrong_operand_count,
+non_number_operand, operand_out_of_range }` aggregates per page. Every ANALYSED
+page (a conversion happened, or zero conversions after operator inspection) is
+reported under `converted`, carrying its per-page skip counts; only STRUCTURAL
+skips (multi-stream, ownership, filter, length, round-trip) go to `skipped`.
+Per-page tallies are captured in a `RefCell<Vec<PageTally>>` the edit closure
+owns (one push per analysed page, in ascending selected-page order) and are
+associated back to pages after the pipeline returns by ordering the analysed
+pages (edited + `Unchanged`-skip) ascending and positionally zipping — exact
+because the pipeline invokes the closure once per analysed page in that order.
+
+### Bounds / copy budget
+
+Per analysed page: one decoded `Vec<u8>` (Flate), one edited `Vec<u8>` only when
+a conversion happens, one re-encoded `Vec<u8>`, plus small per-splice replacement
+`Vec<u8>`s and the final append-writer output. The DeviceLink transform is built
+per converted operator inside `apply_device_link_f64` (F4-1 semantics); a bounded
+`TransformCacheKey` cache is a later slice. No source PDF bytes or whole-document
+object cache are retained.
+
+### Dependency edge + license gate
+
+New first-party dependency `presslint-color-lcms` (the F4-1 Little CMS DeviceLink
+executor); direction stays `write -> {actions, color-lcms, pdf, syntax, types}`,
+no cycle. `presslint-color-lcms` pulls `lcms2-sys` (MIT, wrapping Little CMS,
+MIT), pinned EXACT with `default-features = false, features = ["static"]` so the
+LGPL / LLVM-exception transitive deps stay out of the graph. `check_licenses.sh`
+still passes (53 third-party packages). Because `presslint-write` is
+`#![forbid(unsafe_code)]`, its unit tests cannot run the lcms FFI that builds a
+synthetic link, so the tests embed tiny frozen synthetic DeviceLink bytes
+(grid-2 CLUT placeholders built once out of band through the same pinned
+`lcms2-sys`) and drive them through the public `inspect`/`apply` API; no
+ECI/FOGRA profile is vendored. Note: lcms `TYPE_CMYK_DBL` is the 0..100 domain,
+so a CMYK-destination link's raw components can exceed 1.0 and are clamped to
+`[0,1]` by the serializer — colour fidelity of CMYK sides is F4-1 / real-profile
+territory, out of scope here.
+
+### T125/T126 unchanged
+
+`reencode_page_content_incremental` (T125) and
+`rewrite_rgb_black_to_cmyk_incremental` (T126) keep their exact public API,
+behaviour, and skip taxonomy; the shared `content_edit_pipeline.rs` is untouched.
 
 ## WholeStream executor + no-op content re-encode (T125)
 

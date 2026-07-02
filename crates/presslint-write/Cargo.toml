@@ -9,6 +9,7 @@ description = "Append-only incremental-update PDF writing for presslint."
 
 [dependencies]
 presslint-actions.workspace = true
+presslint-color-lcms.workspace = true
 presslint-pdf.workspace = true
 presslint-syntax.workspace = true
 presslint-types.workspace = true

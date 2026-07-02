@@ -50,16 +50,23 @@
 
 #![forbid(unsafe_code)]
 
+mod content_color_convert;
 mod content_color_rewrite;
 mod content_edit_pipeline;
 mod page_box_serialize;
 mod page_boxes;
+mod pdf_number_serialize;
 mod planned;
 mod reencode_content;
 mod stream_object_body;
 mod writer;
 mod xref_stream_writer;
 
+pub use content_color_convert::{
+    ConvertContentColorsError, ConvertContentColorsOutput, ConvertContentColorsRequest,
+    ConvertPageSkip, ConvertPageSkipReason, ConvertedPage, OperatorSkipCounts,
+    convert_content_colors_incremental,
+};
 pub use content_color_rewrite::{
     ContentColorRewriteError, ContentColorRewriteOutput, ContentColorRewriteRequest,
     ContentColorRewriteSkip, ContentColorRewriteSkipReason, RewrittenPage,

@@ -357,6 +357,7 @@ name = "presslint-write"
 version = "0.0.1"
 dependencies = [
  "presslint-actions",
+ "presslint-color-lcms",
  "presslint-pdf",
  "presslint-syntax",
  "presslint-types",

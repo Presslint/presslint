@@ -7,6 +7,7 @@
 )]
 
 mod append;
+mod content_color_convert;
 mod content_color_rewrite;
 mod page_boxes;
 mod page_boxes_xref_stream;
