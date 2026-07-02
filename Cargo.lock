@@ -315,7 +315,9 @@ dependencies = [
 name = "presslint-write"
 version = "0.0.1"
 dependencies = [
+ "presslint-actions",
  "presslint-pdf",
+ "presslint-types",
  "serde",
 ]
 

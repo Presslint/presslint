@@ -8,7 +8,9 @@ license.workspace = true
 description = "Append-only incremental-update PDF writing for presslint."
 
 [dependencies]
+presslint-actions.workspace = true
 presslint-pdf.workspace = true
+presslint-types.workspace = true
 serde.workspace = true
 
 [lints]

@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod incremental_revision;
 mod patch;
 
 use presslint_inventory::{Inventory, InventoryEntry};
@@ -10,6 +11,7 @@ use presslint_selectors::{Selector, matches as selector_matches};
 use presslint_types::{ColorSpace, EditCapability, ObjectId};
 use serde::{Deserialize, Serialize};
 
+pub use incremental_revision::{IncrementalRevisionPlan, PlannedDirtyObject};
 pub use patch::{
     DictionaryEntryOp, DictionaryValueLocator, MutationBoundary, PlannedObjectAllocation,
     PlannedValueProvenance, plan_set_page_box_boundaries,

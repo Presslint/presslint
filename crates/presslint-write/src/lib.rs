@@ -32,6 +32,15 @@
 //! slice follows only the classic `/Prev` chain and does not merge supplemental
 //! xref-stream entries.
 //!
+//! [`write_incremental_revision_plan`] is the validating bridge from the
+//! backend-agnostic [`presslint_actions::IncrementalRevisionPlan`] contract to
+//! the byte writer: it validates dirty-object intent (boundary kind, boundary
+//! target agreement, in-place ownership, duplicate object numbers) before any
+//! byte assembly, converts the validated dirty objects to [`DirtyObjectBytes`],
+//! and delegates all xref/trailer/backend mechanics to
+//! [`write_incremental_revision`]. `set_page_boxes_incremental` routes its
+//! already-proven leaf edits through this bridge.
+//!
 //! Structural facts about the input (the final `startxref`, the classic
 //! cross-reference `/Prev` chain, `/Root`, and object currency) are read through
 //! [`presslint_pdf`] rather than reparsed here, so the writer stays a thin byte
@@ -39,7 +48,9 @@
 
 #![forbid(unsafe_code)]
 
+mod page_box_serialize;
 mod page_boxes;
+mod planned;
 mod writer;
 
 pub use page_boxes::{
@@ -47,6 +58,7 @@ pub use page_boxes::{
     SetPageBoxesError, SetPageBoxesOutput, SetPageBoxesRequest, SkippedPageEdit,
     set_page_boxes_incremental,
 };
+pub use planned::{PlannedWriteError, UnsupportedBoundaryKind, write_incremental_revision_plan};
 pub use writer::{ActiveTrailerError, DirtyObjectBytes, WriteError, write_incremental_revision};
 
 #[cfg(test)]

@@ -12,15 +12,23 @@
 //! boxes become explicit direct entries on the edited leaf; ancestor `/Pages`
 //! dictionaries are never mutated.
 
-use presslint_pdf::{
-    DictionaryValueKind, DocumentPageBoxesInspection, IndirectObjectEditDisposition, IndirectRef,
-    PageBoxInspectionError, PageBoxKind, PageBoxSource, PageBoxesInspection, PageRectangle,
-    ResolvedObjectPosition, SkippedPageBox, SkippedPageBoxReason, decide_indirect_object_edit,
-    inspect_document_page_boxes, inspect_indirect_object_dictionary, parse_indirect_reference,
+use presslint_actions::{
+    IncrementalRevisionPlan, PlannedDirtyObject, SetPageBox, plan_set_page_box_boundaries,
 };
+use presslint_pdf::{
+    DictionaryValueKind, DocumentPageBoxesInspection, IndirectObjectEditDecision,
+    IndirectObjectEditDisposition, IndirectRef, PageBoxInspectionError, PageBoxKind,
+    PageBoxesInspection, PageRectangle, ResolvedObjectPosition, SkippedPageBox,
+    SkippedPageBoxReason, decide_indirect_object_edit, inspect_document_page_boxes,
+    inspect_indirect_object_dictionary, parse_indirect_reference,
+};
+use presslint_types::ByteRange;
 use serde::{Deserialize, Serialize};
 
-use crate::{DirtyObjectBytes, WriteError, write_incremental_revision};
+use crate::page_box_serialize::{apply_body_edits, push_box_edit};
+use crate::{
+    PlannedWriteError, WriteError, write_incremental_revision, write_incremental_revision_plan,
+};
 
 const PARENT_KEY: &[u8] = b"/Parent";
 
@@ -157,10 +165,17 @@ pub enum SetPageBoxesError {
         /// Delegated inspection failure.
         error: Box<PageBoxInspectionError>,
     },
-    /// The append writer rejected the input or the assembled revision.
+    /// The append writer rejected the input or the assembled revision. Used for
+    /// the all-skipped case, which delegates to the append writer directly rather
+    /// than through the plan bridge (an empty plan is a plan-layer rejection).
     Write {
         /// Delegated append-writer failure.
         error: Box<WriteError>,
+    },
+    /// The plan bridge rejected the assembled incremental-revision plan.
+    Plan {
+        /// Delegated plan-bridge failure.
+        error: Box<PlannedWriteError>,
     },
     /// The same page index was requested more than once.
     DuplicatePageIndex {
@@ -232,25 +247,31 @@ pub fn set_page_boxes_incremental(
 
     let mut edited = Vec::new();
     let mut skipped = Vec::new();
-    let mut dirty: Vec<DirtyObjectBytes> = Vec::new();
+    let mut dirty_objects: Vec<PlannedDirtyObject> = Vec::new();
 
     for edit in &request.pages {
         match plan_page_edit(input, &inspection, edit)? {
-            PagePlan::Edit {
-                report,
-                dirty_object,
-            } => {
+            PagePlan::Edit { report, planned } => {
                 edited.push(report);
-                dirty.push(dirty_object);
+                dirty_objects.push(planned);
             }
             PagePlan::Skip(skip) => skipped.push(skip),
         }
     }
 
-    let bytes =
-        write_incremental_revision(input, &dirty).map_err(|error| SetPageBoxesError::Write {
+    // Route proven leaf edits through the backend-agnostic plan bridge. When
+    // every page was skipped the plan is empty, which the bridge rejects by
+    // contract, so delegate the no-op revision straight to the append writer.
+    let bytes = if dirty_objects.is_empty() {
+        write_incremental_revision(input, &[]).map_err(|error| SetPageBoxesError::Write {
             error: Box::new(error),
-        })?;
+        })?
+    } else {
+        let plan = IncrementalRevisionPlan { dirty_objects };
+        write_incremental_revision_plan(input, &plan).map_err(|error| SetPageBoxesError::Plan {
+            error: Box::new(error),
+        })?
+    };
 
     // Reports are collected in request order above; the public contract is
     // document order, so sort by document page index before returning. Page
@@ -288,7 +309,7 @@ fn validate_request(request: &SetPageBoxesRequest) -> Result<(), SetPageBoxesErr
 enum PagePlan {
     Edit {
         report: EditedPage,
-        dirty_object: DirtyObjectBytes,
+        planned: PlannedDirtyObject,
     },
     Skip(SkippedPageEdit),
 }
@@ -340,7 +361,7 @@ fn plan_page_edit(
         }));
     }
 
-    Ok(build_leaf_edit(input, page, edit, media, crop))
+    Ok(build_leaf_edit(input, page, edit, media, crop, &decision))
 }
 
 /// Normalize an optional requested rectangle, rejecting non-finite/zero-area.
@@ -474,27 +495,21 @@ fn read_parent(input: &[u8], page: &PageBoxesInspection) -> Option<IndirectRef> 
     parent
 }
 
-/// One byte-range edit against the leaf dictionary body.
-struct BodyEdit {
-    /// Body-relative inclusive start offset.
-    start: usize,
-    /// Body-relative exclusive end offset (equal to `start` for an insert).
-    end: usize,
-    /// Replacement bytes.
-    bytes: Vec<u8>,
-    /// Tie-break rank for equal-`start` inserts (lower is spliced first, so it
-    /// ends up rightmost); `MediaBox` sorts leftmost in the output.
-    tie: u8,
-}
-
-/// Build the rewritten leaf body and its edit report, or a skip when the leaf
-/// dictionary cannot be read for editing.
+/// Build the rewritten leaf body, its edit report, and the backend-agnostic
+/// dirty-object plan record, or a skip when the leaf dictionary cannot be read
+/// for editing.
+///
+/// Boundary records are built with [`plan_set_page_box_boundaries`] from the
+/// same replace/insert decision that drives the byte edits, so the planned
+/// mutation intent and the rewritten body always agree. Ownership is passed in
+/// already proven `InPlaceMutation` by [`plan_page_edit`].
 fn build_leaf_edit(
     input: &[u8],
     page: &PageBoxesInspection,
     edit: &PageBoxEdit,
     media: Option<PageRectangle>,
     crop: Option<PageRectangle>,
+    ownership: &IndirectObjectEditDecision,
 ) -> PagePlan {
     let leaf_unreadable = || {
         PagePlan::Skip(SkippedPageEdit {
@@ -515,41 +530,54 @@ fn build_leaf_edit(
 
     let dict_open = dictionary.dictionary_open_byte_offset;
     let dict_after_close = dictionary.after_dictionary_close_byte_offset;
-    // Insertion point is immediately after the opening `<<`.
-    let insert_at = dict_open + 2;
+    let dictionary_range = ByteRange {
+        start: dict_open,
+        end: dict_after_close,
+    };
 
-    let mut edits: Vec<BodyEdit> = Vec::new();
-    let media_applied = media.map(|rect| {
-        push_box_edit(
-            &mut edits,
-            PageBoxKind::MediaBox,
-            rect,
-            &page.media_box.source,
-            page.leaf_reference,
-            insert_at,
-        )
-    });
-    let crop_applied = crop.map(|rect| {
-        push_box_edit(
-            &mut edits,
-            PageBoxKind::CropBox,
-            rect,
-            &page.crop_box.source,
-            page.leaf_reference,
-            insert_at,
-        )
-    });
+    let mut edits = Vec::new();
+    let (media_applied, media_locator) = media
+        .map(|rect| {
+            push_box_edit(
+                &mut edits,
+                PageBoxKind::MediaBox,
+                rect,
+                &page.media_box.source,
+                page.leaf_reference,
+                dictionary_range,
+            )
+        })
+        .unzip();
+    let (crop_applied, crop_locator) = crop
+        .map(|rect| {
+            push_box_edit(
+                &mut edits,
+                PageBoxKind::CropBox,
+                rect,
+                &page.crop_box.source,
+                page.leaf_reference,
+                dictionary_range,
+            )
+        })
+        .unzip();
 
-    // Apply the edits against a copy of the original dictionary body, in
-    // descending start-offset order so earlier offsets stay valid. Equal-start
-    // inserts are ordered by `tie` so `/MediaBox` precedes `/CropBox`.
     let mut body = input[dict_open..dict_after_close].to_vec();
-    edits.sort_by(|a, b| b.start.cmp(&a.start).then(a.tie.cmp(&b.tie)));
-    for change in &edits {
-        let start = change.start - dict_open;
-        let end = change.end - dict_open;
-        body.splice(start..end, change.bytes.iter().copied());
-    }
+    apply_body_edits(&mut body, edits, dict_open);
+
+    // Boundary records reuse the action planner over the same normalized
+    // rectangles and located locators; the writer never gates on them beyond the
+    // plan-bridge validation.
+    let action = SetPageBox {
+        media_box: media,
+        crop_box: crop,
+    };
+    let boundaries = plan_set_page_box_boundaries(
+        &action,
+        page.leaf_reference,
+        ownership,
+        media_locator,
+        crop_locator,
+    );
 
     PagePlan::Edit {
         report: EditedPage {
@@ -558,88 +586,12 @@ fn build_leaf_edit(
             media_box: media_applied,
             crop_box: crop_applied,
         },
-        dirty_object: DirtyObjectBytes {
+        planned: PlannedDirtyObject {
             reference: page.leaf_reference,
+            boundaries,
             body_bytes: body,
         },
     }
-}
-
-/// Push one box edit (replace a direct leaf entry, or insert after `<<`) and
-/// return the applied-box report.
-fn push_box_edit(
-    edits: &mut Vec<BodyEdit>,
-    kind: PageBoxKind,
-    rectangle: PageRectangle,
-    source: &PageBoxSource,
-    leaf: IndirectRef,
-    insert_at: usize,
-) -> AppliedBox {
-    let tie = match kind {
-        PageBoxKind::MediaBox => 1,
-        PageBoxKind::CropBox => 0,
-    };
-    let op = match source {
-        PageBoxSource::Direct {
-            target,
-            key_range,
-            value_range,
-        } if *target == leaf => {
-            edits.push(BodyEdit {
-                start: key_range.start,
-                end: value_range.end,
-                bytes: serialize_entry(kind, rectangle, false),
-                tie,
-            });
-            DictionaryEntryWrite::Replace
-        }
-        // Inherited, defaulted, or an unexpected foreign-target direct value all
-        // become an explicit insert on this leaf; ancestors stay untouched.
-        _ => {
-            edits.push(BodyEdit {
-                start: insert_at,
-                end: insert_at,
-                bytes: serialize_entry(kind, rectangle, true),
-                tie,
-            });
-            DictionaryEntryWrite::Insert
-        }
-    };
-    AppliedBox {
-        kind,
-        rectangle,
-        op,
-    }
-}
-
-/// Serialize `/MediaBox [llx lly urx ury]` minimally. `leading_space` prefixes a
-/// single space for inserts after `<<`.
-fn serialize_entry(kind: PageBoxKind, rectangle: PageRectangle, leading_space: bool) -> Vec<u8> {
-    let key: &str = match kind {
-        PageBoxKind::MediaBox => "/MediaBox",
-        PageBoxKind::CropBox => "/CropBox",
-    };
-    let prefix = if leading_space { " " } else { "" };
-    format!(
-        "{prefix}{key} [{} {} {} {}]",
-        format_number(rectangle.llx),
-        format_number(rectangle.lly),
-        format_number(rectangle.urx),
-        format_number(rectangle.ury),
-    )
-    .into_bytes()
-}
-
-/// Format a finite `f64` as a minimal PDF decimal literal: no exponent, no
-/// trailing zeros, and `0` for negative zero.
-fn format_number(value: f64) -> String {
-    if value == 0.0 {
-        // Covers both `0.0` and `-0.0`.
-        return "0".to_owned();
-    }
-    // Rust's `f64` `Display` is the shortest round-trip decimal with no exponent
-    // and no trailing zeros, so it already matches the required literal shape.
-    format!("{value}")
 }
 
 #[cfg(test)]
@@ -648,38 +600,7 @@ mod tests {
 
     use presslint_pdf::{PageBoxKind, PageRectangle, SkippedPageBox, SkippedPageBoxReason};
 
-    use super::{
-        SetPageBoxSkipReason, format_number, map_inspector_skip, normalize, serialize_entry,
-    };
-
-    #[test]
-    fn minimal_number_formatting() {
-        assert_eq!(format_number(0.0), "0");
-        assert_eq!(format_number(-0.0), "0");
-        assert_eq!(format_number(612.0), "612");
-        assert_eq!(format_number(1.5), "1.5");
-        assert_eq!(format_number(-5.0), "-5");
-        // No exponent even for magnitudes that `{:e}` would abbreviate.
-        assert_eq!(format_number(1_000_000.0), "1000000");
-    }
-
-    #[test]
-    fn serialize_entry_shapes() {
-        let rect = PageRectangle {
-            llx: 0.0,
-            lly: 0.0,
-            urx: 612.0,
-            ury: 792.0,
-        };
-        assert_eq!(
-            serialize_entry(PageBoxKind::MediaBox, rect, false),
-            b"/MediaBox [0 0 612 792]"
-        );
-        assert_eq!(
-            serialize_entry(PageBoxKind::CropBox, rect, true),
-            b" /CropBox [0 0 612 792]"
-        );
-    }
+    use super::{SetPageBoxSkipReason, map_inspector_skip, normalize};
 
     #[test]
     fn normalize_orders_and_rejects() {

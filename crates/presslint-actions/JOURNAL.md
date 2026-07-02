@@ -112,6 +112,33 @@
   request/locator gating, verbatim ownership) is covered by `set_page_box`
   tests in `src/tests/patch_boundary.rs`.
 
+- T120 added the backend-agnostic incremental-revision plan contract in
+  `src/incremental_revision.rs`:
+  - `IncrementalRevisionPlan { dirty_objects: Vec<PlannedDirtyObject> }` and
+    `PlannedDirtyObject { reference: IndirectRef, boundaries: Vec<MutationBoundary>,
+    body_bytes: Vec<u8> }`. Both derive
+    `Debug, Clone, PartialEq, Serialize, Deserialize` (no `Eq`, because
+    `MutationBoundary` transitively carries `f64` through
+    `PlannedValueProvenance::ActionGenerated`).
+  - `body_bytes` is the replacement indirect-object *body* only, matching
+    `presslint-write`'s `DirtyObjectBytes`: no `N G obj` header and no `endobj`.
+  - **The plan models dirty-object intent only and is backend-agnostic by
+    contract.** It carries no cross-reference table, cross-reference stream,
+    trailer, `/Prev`, `/Size`, `/Root`, `/ID`, `/Info`,
+    object-number-allocation, or classic-vs-stream backend-selection mechanics —
+    those stay owned by the writer, so a future xref-stream writer backend can
+    consume the same plan shape. Boundaries carry references, ranges, ownership
+    decisions, and provenance only; no source PDF bytes are copied into plan
+    records. The single owned byte payload is `PlannedDirtyObject::body_bytes`,
+    the replacement-body payload the `DirtyObjectBytes` contract already requires.
+  - The public JSON shapes of both types are locked by focused round-trip tests
+    in `src/tests/incremental_revision.rs`: `reference` → `{object_number,
+    generation}`, `boundaries` → the existing `MutationBoundary` array shape, and
+    `body_bytes` → a byte array. Ordering of `dirty_objects` is not significant;
+    the writer sorts deterministically by `IndirectRef`.
+  - No new dependency: the contract reuses the existing `presslint-pdf`
+    (`IndirectRef`) dependency and the crate-local `MutationBoundary`.
+
 ## Follow-Ups
 
 - Add the first executor only after patch byte serialization and mutation

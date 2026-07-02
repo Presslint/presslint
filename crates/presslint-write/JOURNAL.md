@@ -7,6 +7,69 @@
 (`write_incremental_revision`) and the first *semantic* mutation built on it,
 `set_page_boxes_incremental`.
 
+## Plan-to-writer bridge (T120)
+
+`write_incremental_revision_plan(input: &[u8], plan:
+&presslint_actions::IncrementalRevisionPlan) -> Result<Vec<u8>,
+PlannedWriteError>` (in `src/planned.rs`) is the validating bridge from the
+backend-agnostic action plan contract to the byte writer.
+
+### Validation order (all before any bytes are assembled)
+
+1. Empty plan → `EmptyPlan`.
+2. Sort dirty objects deterministically by `IndirectRef`, then reject duplicate
+   object numbers → `DuplicateDirtyObject { object_number }`.
+3. For each dirty object: no boundaries → `EmptyBoundaries { reference }`; then
+   validate every boundary. This slice executes only
+   `MutationBoundary::DictionaryEntry`: its `target` must equal the dirty
+   object's `reference` (else `BoundaryTargetMismatch`) and its ownership
+   disposition must be `InPlaceMutation` (else `OwnershipNotInPlace`).
+   `ContentStreamOperand`, `WholeStream`, and `IndirectObjectClone` are rejected
+   as `UnsupportedBoundaryKind { reference, kind }`.
+4. Only after full-plan validation are dirty objects converted to
+   `DirtyObjectBytes` and passed to `write_incremental_revision`; a delegated
+   failure is wrapped verbatim as `PlannedWriteError::Write { error }`.
+
+`PlannedWriteError` is serde-tagged (`stage`) and `UnsupportedBoundaryKind` is a
+serde `snake_case` enum. Two focused tests use non-existent dirty object numbers
+to prove `OwnershipNotInPlace` and `BoundaryTargetMismatch` reject *before*
+delegation (the byte writer would otherwise report `DirtyObjectNotInUse`).
+
+### Boundary contract stays writer-owned vs plan-owned
+
+The plan carries dirty-object intent only. The writer keeps sole ownership of
+classic-vs-stream dispatch, `/Prev`, `/Size`, `/Root`, `/ID`, `/Info`,
+encryption/hybrid rejection, and object-currency/header validation — the bridge
+only adds the plan-layer checks the byte writer cannot express (boundary kind,
+boundary target agreement, in-place ownership, duplicate object numbers).
+
+### Copy budget
+
+The bridge copies each `PlannedDirtyObject::body_bytes` once into the
+`DirtyObjectBytes` it hands to the writer — the API-boundary replacement-body
+payload the low-level contract already requires. It copies no source PDF bytes
+and holds only borrowed references (`Vec<&PlannedDirtyObject>`) while validating
+and ordering. New first-party dependencies: `presslint-actions` (the plan
+contract) and `presslint-types` (`ByteRange` for the boundary value locators).
+The dependency direction is `write -> {actions, pdf, types}`; no cycle.
+
+### Page-box reroute
+
+`set_page_boxes_incremental` now builds an `IncrementalRevisionPlan` from its
+already-proven leaf edits and routes through `write_incremental_revision_plan`.
+Each edited leaf produces one `PlannedDirtyObject` whose boundaries come from
+`presslint_actions::plan_set_page_box_boundaries` over the same normalized
+rectangles and located value locators that drive the byte edits, so the planned
+mutation intent and the rewritten body always agree. All existing page-box
+behavior — request validation, rectangle normalization, crop containment, skip
+taxonomy, body serialization, and document-order edited reports — is unchanged.
+When every requested page is skipped the plan would be empty, which the bridge
+rejects by contract, so that no-op case delegates straight to
+`write_incremental_revision` (surfacing as `SetPageBoxesError::Write`); the
+plan-routed case surfaces as the new `SetPageBoxesError::Plan`. Low-level
+page-box serialization and the dictionary body splice were split into
+`src/page_box_serialize.rs` to keep `page_boxes.rs` under the file-size gate.
+
 ## Semantic page-box writing (T119)
 
 ### Public API
@@ -180,6 +243,7 @@ failure folded into `DirtyObjectHeaderMismatch { reference, error }`.
   / compressed-object (type-2) mutation.
 - Object deletion, free-list repair, garbage collection, encryption
   preservation, full rewrite, and PDF repair.
-- Plan-to-writer wiring from `presslint-actions` (the `MutationBoundary` /
-  `IncrementalRevisionPlan` bridge); `set_page_boxes_incremental` and the
-  `SetPageBox` planner currently re-derive boundaries independently.
+- Executing non-dictionary boundaries through the plan bridge: this slice writes
+  only `MutationBoundary::DictionaryEntry`; `ContentStreamOperand`,
+  `WholeStream`, and `IndirectObjectClone` are rejected as unsupported execution
+  shapes.

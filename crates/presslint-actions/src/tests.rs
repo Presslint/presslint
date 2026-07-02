@@ -1,5 +1,6 @@
 #![allow(clippy::expect_used, clippy::missing_errors_doc)]
 
+mod incremental_revision;
 mod json;
 mod patch_boundary;
 

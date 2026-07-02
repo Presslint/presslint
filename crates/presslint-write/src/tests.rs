@@ -8,6 +8,7 @@
 
 mod append;
 mod page_boxes;
+mod planned;
 mod reject;
 
 use presslint_pdf::{
