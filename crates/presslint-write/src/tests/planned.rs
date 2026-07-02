@@ -63,6 +63,16 @@ fn media_entry(target: IndirectRef, ownership: IndirectObjectEditDecision) -> Mu
     }
 }
 
+/// A whole-stream replacement boundary for `target`.
+fn whole_stream(target: IndirectRef, ownership: IndirectObjectEditDecision) -> MutationBoundary {
+    MutationBoundary::WholeStream {
+        target,
+        stream_data_range: Some(ByteRange { start: 40, end: 52 }),
+        ownership,
+        value_provenance: PlannedValueProvenance::DerivedFromObject { object: target },
+    }
+}
+
 /// A `/CropBox` insert dictionary-entry boundary for `target`.
 fn crop_entry(target: IndirectRef, ownership: IndirectObjectEditDecision) -> MutationBoundary {
     MutationBoundary::DictionaryEntry {
@@ -210,6 +220,59 @@ fn empty_plan_and_empty_boundaries_reject_at_plan_layer() {
 }
 
 #[test]
+fn whole_stream_boundary_is_accepted_and_writes_one_dirty_object() {
+    let input = sample_pdf();
+    let obj3 = iref(3);
+    // A WholeStream boundary against object 3 with the existing (currency-valid)
+    // body: the bridge now accepts WholeStream the same way it accepts
+    // DictionaryEntry, so the delegated writer appends one dirty object.
+    let plan = one_object_plan(obj3, vec![whole_stream(obj3, in_place(obj3))], PAGE_BODY);
+
+    let output = write_incremental_revision_plan(&input, &plan).expect("plan writes");
+
+    assert_eq!(&output[..input.len()], input.as_slice());
+    assert_eq!(count(&output[input.len()..], b"3 0 obj"), 1);
+    assert_eq!(page_leaf_numbers(&reopen(&output)), vec![3]);
+}
+
+#[test]
+fn whole_stream_boundary_target_and_ownership_are_validated() {
+    let obj3 = iref(3);
+    let obj99 = iref(99);
+
+    // Target mismatch: the WholeStream boundary names a different object.
+    assert_eq!(
+        write_incremental_revision_plan(
+            &sample_pdf(),
+            &one_object_plan(obj99, vec![whole_stream(obj3, in_place(obj3))], PAGE_BODY)
+        )
+        .unwrap_err(),
+        PlannedWriteError::BoundaryTargetMismatch {
+            reference: obj99,
+            boundary_target: obj3,
+        }
+    );
+
+    // Ownership not in-place: a WholeStream with a private-copy disposition is
+    // rejected before delegation.
+    assert_eq!(
+        write_incremental_revision_plan(
+            &sample_pdf(),
+            &one_object_plan(
+                obj99,
+                vec![whole_stream(obj99, private_copy(obj99))],
+                PAGE_BODY
+            )
+        )
+        .unwrap_err(),
+        PlannedWriteError::OwnershipNotInPlace {
+            reference: obj99,
+            disposition: IndirectObjectEditDisposition::PrivateCopy,
+        }
+    );
+}
+
+#[test]
 fn unsupported_boundary_kinds_reject_explicitly() {
     let obj3 = iref(3);
 
@@ -231,24 +294,6 @@ fn unsupported_boundary_kinds_reject_explicitly() {
         PlannedWriteError::UnsupportedBoundaryKind {
             reference: obj3,
             kind: UnsupportedBoundaryKind::ContentStreamOperand,
-        }
-    );
-
-    let whole = MutationBoundary::WholeStream {
-        target: obj3,
-        stream_data_range: None,
-        ownership: in_place(obj3),
-        value_provenance: PlannedValueProvenance::DerivedFromObject { object: obj3 },
-    };
-    assert_eq!(
-        write_incremental_revision_plan(
-            &sample_pdf(),
-            &one_object_plan(obj3, vec![whole], PAGE_BODY)
-        )
-        .unwrap_err(),
-        PlannedWriteError::UnsupportedBoundaryKind {
-            reference: obj3,
-            kind: UnsupportedBoundaryKind::WholeStream,
         }
     );
 

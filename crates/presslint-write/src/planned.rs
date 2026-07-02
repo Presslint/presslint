@@ -13,9 +13,12 @@
 //! only the plan-layer checks the byte writer cannot express: boundary kind,
 //! boundary target agreement, and ownership disposition.
 //!
-//! This slice executes only [`MutationBoundary::DictionaryEntry`] boundaries.
-//! [`MutationBoundary::ContentStreamOperand`], [`MutationBoundary::WholeStream`],
-//! and [`MutationBoundary::IndirectObjectClone`] are rejected as unsupported
+//! This slice executes [`MutationBoundary::DictionaryEntry`] and
+//! [`MutationBoundary::WholeStream`] boundaries: both validate that the boundary
+//! target matches the dirty object and that ownership is in-place mutation, then
+//! reuse the caller-built replacement `body_bytes`.
+//! [`MutationBoundary::ContentStreamOperand`] and
+//! [`MutationBoundary::IndirectObjectClone`] are still rejected as unsupported
 //! execution shapes.
 
 use presslint_actions::{IncrementalRevisionPlan, MutationBoundary, PlannedDirtyObject};
@@ -161,9 +164,13 @@ fn validate_dirty_object(dirty: &PlannedDirtyObject) -> Result<(), PlannedWriteE
 
 /// Validate one boundary against the dirty object it belongs to.
 ///
-/// Only [`MutationBoundary::DictionaryEntry`] is executed in this slice; its
-/// target must equal `reference` and its ownership disposition must be
-/// in-place mutation. Every other boundary shape is unsupported.
+/// [`MutationBoundary::DictionaryEntry`] and [`MutationBoundary::WholeStream`]
+/// are both executed as in-place object rewrites: their `target` must equal
+/// `reference` and their ownership disposition must be in-place mutation. The
+/// caller has already built the full replacement `body_bytes`, so the bridge
+/// only checks intent, never re-derives the payload.
+/// [`MutationBoundary::ContentStreamOperand`] and
+/// [`MutationBoundary::IndirectObjectClone`] remain unsupported.
 fn validate_boundary(
     reference: IndirectRef,
     boundary: &MutationBoundary,
@@ -171,33 +178,41 @@ fn validate_boundary(
     match boundary {
         MutationBoundary::DictionaryEntry {
             target, ownership, ..
-        } => {
-            if *target != reference {
-                return Err(PlannedWriteError::BoundaryTargetMismatch {
-                    reference,
-                    boundary_target: *target,
-                });
-            }
-            if ownership.disposition != IndirectObjectEditDisposition::InPlaceMutation {
-                return Err(PlannedWriteError::OwnershipNotInPlace {
-                    reference,
-                    disposition: ownership.disposition,
-                });
-            }
-            Ok(())
         }
+        | MutationBoundary::WholeStream {
+            target, ownership, ..
+        } => validate_in_place_target(reference, *target, ownership.disposition),
         MutationBoundary::ContentStreamOperand { .. } => Err(unsupported(
             reference,
             UnsupportedBoundaryKind::ContentStreamOperand,
         )),
-        MutationBoundary::WholeStream { .. } => {
-            Err(unsupported(reference, UnsupportedBoundaryKind::WholeStream))
-        }
         MutationBoundary::IndirectObjectClone { .. } => Err(unsupported(
             reference,
             UnsupportedBoundaryKind::IndirectObjectClone,
         )),
     }
+}
+
+/// Validate that an in-place boundary targets its own dirty object with proven
+/// in-place-mutation ownership.
+fn validate_in_place_target(
+    reference: IndirectRef,
+    target: IndirectRef,
+    disposition: IndirectObjectEditDisposition,
+) -> Result<(), PlannedWriteError> {
+    if target != reference {
+        return Err(PlannedWriteError::BoundaryTargetMismatch {
+            reference,
+            boundary_target: target,
+        });
+    }
+    if disposition != IndirectObjectEditDisposition::InPlaceMutation {
+        return Err(PlannedWriteError::OwnershipNotInPlace {
+            reference,
+            disposition,
+        });
+    }
+    Ok(())
 }
 
 /// Build an [`PlannedWriteError::UnsupportedBoundaryKind`] for `reference`.

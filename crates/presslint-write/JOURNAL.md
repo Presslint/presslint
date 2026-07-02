@@ -3,9 +3,102 @@
 ## Current State
 
 `presslint-write` is the first byte-writing crate: a deterministic classic-xref
-**incremental append** writer. It offers the foundational semantic **no-op**
-(`write_incremental_revision`) and the first *semantic* mutation built on it,
-`set_page_boxes_incremental`.
+and xref-stream **incremental append** writer. It offers the foundational
+semantic **no-op** (`write_incremental_revision`), the first *semantic*
+dictionary mutation built on it (`set_page_boxes_incremental`), and now the first
+**whole-stream** mutation: a no-op content-stream re-encode
+(`reencode_page_content_incremental`) that proves the replace-a-stream-object-body
+pipeline every future content-operand rewrite needs.
+
+## WholeStream executor + no-op content re-encode (T125)
+
+### Plan bridge now executes `WholeStream`
+
+`write_incremental_revision_plan` previously rejected
+`MutationBoundary::WholeStream` as `UnsupportedBoundaryKind::WholeStream`. It now
+executes it exactly like `DictionaryEntry`: `validate_boundary` shares a
+`validate_in_place_target` helper that checks the boundary `target` equals the
+dirty object's `reference` (else `BoundaryTargetMismatch`) and that ownership is
+`InPlaceMutation` (else `OwnershipNotInPlace`). The action already carries the
+full replacement `body_bytes`, so the bridge only validates intent and never
+re-derives the payload. `ContentStreamOperand` and `IndirectObjectClone` remain
+`UnsupportedBoundaryKind` (the `WholeStream` enum variant is kept as a frozen
+public contract but is no longer emitted).
+
+### `reencode_page_content_incremental` (src/reencode_content.rs)
+
+`reencode_page_content_incremental(input, &ReencodePageContentRequest { pages })
+-> Result<ReencodePageContentOutput, ReencodePageContentError>` re-encodes each
+selected single-content-stream page's stream as a **semantic no-op** and appends
+one incremental revision. `PageSelection` is `All` or `Indices(Vec<PageIndex>)`;
+`ReencodePageContentOutput { bytes, reencoded, skipped }` with
+`ReencodedPage { page_index, content_object, filter_kind }`.
+
+Pipeline per selected page (locate -> decode -> re-serialize byte-identical ->
+re-encode -> `WholeStream`-replace -> reopen):
+
+1. Open with `inspect_document_access`; locate each page's single content stream
+   through `inspect_document_page_content_extents_with_lookup` at the resolved
+   page-tree-root offset (a private `lookup_from_backend` maps the backend to an
+   `ObjectLookup`).
+2. Prove single-use ownership: `decide_indirect_object_edit(content_object,
+   owning_leaves)` where the owning leaves are every document page that references
+   the content object. A shared content stream is `OwnershipNotInPlace` (skip).
+3. Read the stream dict via `inspect_indirect_object_dictionary`; find the one
+   direct integer `/Length` value span.
+4. Classify `/Filter` via `classify_content_stream_filter` (raw or single
+   `/FlateDecode`); resolve `/DecodeParms` via `resolve_flate_decode_parameters`
+   and skip a predictor Flate stream.
+5. Slice stream data with `content_stream_data_slice`; decode Flate via
+   `decode_flate_stream`.
+6. **Round-trip proof**: because `serialize_unmodified` is still an identity
+   placeholder, the byte-identical proof uses the real lexical round trip
+   `tokenize` + `serialize_tokens_unmodified` — content that does not tokenize
+   (e.g. an unterminated string) or does not reconstruct exactly is a
+   `ContentRoundTripMismatch` skip, so no page whose syntax does not round-trip is
+   written.
+7. Re-encode: raw uses the re-serialized bytes verbatim (equal to the original
+   stream data -> **true byte no-op**); Flate re-compresses via
+   `encode_flate_stream` (`decode(reopened) == decode(original)` -> semantic
+   no-op, stream bytes may differ).
+8. Rebuild the object body `<< dict-with-/Length-replaced >>\nstream\n<data>\n
+   endstream` (LF separators), replacing exactly the one `/Length` value span with
+   the new data length and preserving every other dictionary byte (incl.
+   `/Filter`, `/DecodeParms`) verbatim.
+9. Route one `WholeStream` boundary + rebuilt body per edited page through
+   `write_incremental_revision_plan`. When every selected page is skipped the plan
+   would be empty, so the no-op revision delegates straight to
+   `write_incremental_revision` (also where an encrypted/hybrid input is
+   rejected on the all-skipped path).
+
+### Skip / error taxonomy
+
+`ReencodePageSkipReason` (structured, one per unsupported shape):
+`MultipleContentStreams`, `NoContentStream`, `CompressedContentObject`,
+`IndirectLength`, `MissingOrDuplicateLength`, `NonDirectNumericLength`,
+`UnsupportedFilter`, `PredictorFlate`, `ContentRoundTripMismatch`,
+`OwnershipNotInPlace`. Whole-op `ReencodePageContentError`: `EmptyRequest`,
+`Open`, `PageIndexOutOfRange`, `Write` (all-skipped delegate), `Plan` (plan
+bridge). Requested indices are deduplicated and ordered so a repeated index never
+produces two dirty objects for the same stream.
+
+### Copy budget
+
+Per edited page: one decoded `Vec<u8>` (Flate) plus one re-encoded/rebuilt-body
+`Vec<u8>`, bounded by `MAX_CONTENT_STREAM_BYTES` (64 MiB). Plus the single output
+`Vec<u8>` from the append writer (owned-bytes API) and the plan bridge's one copy
+of each body into `DirtyObjectBytes`. No source PDF bytes are retained, and no
+whole-document object cache is built — structural facts are read once through
+`presslint-pdf`. The raw path is fully copy-free of decode/encode work: its new
+data equals the original stream slice. New dependency: `presslint-syntax` (for
+`tokenize`/`serialize_tokens_unmodified`); direction stays `write -> {actions,
+pdf, syntax, types}`, no cycle.
+
+### `set_page_boxes_incremental` unchanged
+
+The dictionary-entry semantic writer keeps its exact public behavior; only the
+shared `validate_in_place_target` refactor touches its plan-bridge path, and its
+tests are unchanged.
 
 ## Plan-to-writer bridge (T120)
 

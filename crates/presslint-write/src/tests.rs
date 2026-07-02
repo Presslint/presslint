@@ -10,6 +10,7 @@ mod append;
 mod page_boxes;
 mod page_boxes_xref_stream;
 mod planned;
+mod reencode_content;
 mod reject;
 mod xref_stream_writer;
 

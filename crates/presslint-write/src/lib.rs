@@ -53,6 +53,7 @@
 mod page_box_serialize;
 mod page_boxes;
 mod planned;
+mod reencode_content;
 mod writer;
 mod xref_stream_writer;
 
@@ -62,6 +63,11 @@ pub use page_boxes::{
     set_page_boxes_incremental,
 };
 pub use planned::{PlannedWriteError, UnsupportedBoundaryKind, write_incremental_revision_plan};
+pub use reencode_content::{
+    PageSelection, ReencodeFilterKind, ReencodePageContentError, ReencodePageContentOutput,
+    ReencodePageContentRequest, ReencodePageSkip, ReencodePageSkipReason, ReencodedPage,
+    reencode_page_content_incremental,
+};
 pub use writer::{ActiveTrailerError, DirtyObjectBytes, WriteError, write_incremental_revision};
 
 #[cfg(test)]
