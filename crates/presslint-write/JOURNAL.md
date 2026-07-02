@@ -382,3 +382,54 @@ Deferred deliberately: Flate-compressed xref stream output, hybrid `/XRefStm`
 write/merge support, type-2 compressed-object mutation, object-stream writing,
 clone/private-copy routing, deletion/free-list repair, and encryption
 preservation.
+
+## T126 - Direct RGB-Black Content Operator Rewrite
+
+Added the first semantic content-operand mutation on top of the T125
+WholeStream substrate: `rewrite_rgb_black_to_cmyk_incremental`. The operation is
+an exact page-content operator rewrite only, not color conversion and not a
+visual/colorimetric equivalence claim. It rewrites direct DeviceRGB black color
+operators in eligible page content streams:
+
+- `0 0 0 rg`-class records become canonical `0 0 0 1 k`;
+- `0 0 0 RG`-class records become canonical `0 0 0 1 K`;
+- all other decoded bytes outside the spliced operator records are preserved
+  verbatim.
+
+The T125 re-encode mechanics now live in a shared crate-private edit pipeline:
+locate selected single-stream page content, prove single-use in-place ownership,
+read the stream dictionary and direct `/Length`, decode raw or single
+`/FlateDecode` streams without predictors, prove byte-identical
+`tokenize` + `serialize_tokens_unmodified` round-trip on the original decoded
+bytes, call an edit callback, re-check the edited decoded bytes, re-encode, build
+the stream object body with only `/Length` changed, and execute one
+`MutationBoundary::WholeStream` plan. `reencode_page_content_incremental` is now
+a thin identity-edit wrapper over that pipeline; its public skip enum remains a
+separate T125-owned type and is mapped from the internal skip enum rather than
+aliased.
+
+The RGB-black matcher uses `presslint_syntax::tokenize` and
+`assemble_operators`. A match requires operator token source bytes exactly
+`rg` or `RG`, exactly three operands, and each operand to be exactly one
+`TokenKind::Number` token whose source bytes parse as a finite `f64` equal to
+`0.0` (`0`, `0.0`, `.0`, `+0`, `-0`, `00.00`, etc.). Matching records are
+collected in source order, then applied in descending source offset to an owned
+decoded buffer so earlier byte ranges are not invalidated by later replacements.
+A page with no matching operators is reported as
+`NoMatchingOperators` and its content stream is not rewritten.
+
+The inherited skip taxonomy is preserved for unsupported shapes: multi-stream
+`/Contents`, missing/no stream, compressed object-stream members, indirect or
+non-direct `/Length`, missing/duplicate `/Length`, unsupported filter/filter
+chain, predictor Flate, content round-trip mismatch, and unproven ownership.
+The color rewrite has its own public skip enum and adds only
+`NoMatchingOperators`.
+
+Bounds and copy budget: per edited page the hot path holds one decoded
+`Vec<u8>`, a transient serializer `Vec<u8>` for each byte-identical round-trip
+check, one edited decoded `Vec<u8>` only when a match exists, and one encoded
+`Vec<u8>` for the replacement stream data, plus the final append-writer output.
+The matcher does not retain source bytes or build a whole-document cache; it
+keeps only token/operator records and small splice ranges for the current stream.
+The stream-object-body builder is split into `stream_object_body.rs`, keeping the
+shared pipeline comfortably below the 800-line file-size gate.

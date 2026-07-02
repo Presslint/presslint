@@ -50,13 +50,22 @@
 
 #![forbid(unsafe_code)]
 
+mod content_color_rewrite;
+mod content_edit_pipeline;
 mod page_box_serialize;
 mod page_boxes;
 mod planned;
 mod reencode_content;
+mod stream_object_body;
 mod writer;
 mod xref_stream_writer;
 
+pub use content_color_rewrite::{
+    ContentColorRewriteError, ContentColorRewriteOutput, ContentColorRewriteRequest,
+    ContentColorRewriteSkip, ContentColorRewriteSkipReason, RewrittenPage,
+    rewrite_rgb_black_to_cmyk_incremental,
+};
+pub use content_edit_pipeline::PageSelection;
 pub use page_boxes::{
     AppliedBox, DictionaryEntryWrite, EditedPage, PageBoxEdit, SetPageBoxSkipReason,
     SetPageBoxesError, SetPageBoxesOutput, SetPageBoxesRequest, SkippedPageEdit,
@@ -64,7 +73,7 @@ pub use page_boxes::{
 };
 pub use planned::{PlannedWriteError, UnsupportedBoundaryKind, write_incremental_revision_plan};
 pub use reencode_content::{
-    PageSelection, ReencodeFilterKind, ReencodePageContentError, ReencodePageContentOutput,
+    ReencodeFilterKind, ReencodePageContentError, ReencodePageContentOutput,
     ReencodePageContentRequest, ReencodePageSkip, ReencodePageSkipReason, ReencodedPage,
     reencode_page_content_incremental,
 };
