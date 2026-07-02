@@ -54,6 +54,7 @@ mod black_preservation;
 mod content_color_convert;
 mod content_color_rewrite;
 mod content_edit_pipeline;
+mod link_routing;
 mod page_box_serialize;
 mod page_boxes;
 mod pdf_number_serialize;
@@ -76,6 +77,7 @@ pub use content_color_rewrite::{
     rewrite_rgb_black_to_cmyk_incremental,
 };
 pub use content_edit_pipeline::PageSelection;
+pub use link_routing::{DeviceLinkInput, LinkConversionCounts};
 pub use page_boxes::{
     AppliedBox, DictionaryEntryWrite, EditedPage, PageBoxEdit, SetPageBoxSkipReason,
     SetPageBoxesError, SetPageBoxesOutput, SetPageBoxesRequest, SkippedPageEdit,

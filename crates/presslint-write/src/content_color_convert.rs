@@ -1,18 +1,20 @@
-//! DeviceLink-driven direct device-colour content conversion (F4-2).
+//! DeviceLink-driven direct device-colour content conversion (F4-2..F4-5).
 //!
-//! This is the first real colour conversion of PDF page content. For each direct
-//! device colour-setting operator in a selected page content stream whose
-//! declared colour space equals the supplied DeviceLink's **source** space, it
-//! reads the operands, optionally applies the black-preservation overlay, else
-//! applies the DeviceLink through `presslint-color-lcms` (F4-1), and rewrites the
-//! operator to the DeviceLink's **destination** space with deterministically
-//! serialized operands.
+//! This is the first real colour conversion of PDF page content. A request now
+//! carries a SET of DeviceLinks ([`DeviceLinkInput`]); each is inspected ONCE up
+//! front and routed by its **source** space (see [`crate::link_routing`]). For
+//! each direct device colour-setting operator in a selected page content stream,
+//! the converter looks up the link whose source space equals the operator's
+//! declared space, reads the operands, optionally applies the black-preservation
+//! overlay, else applies that link through `presslint-color-lcms` (F4-1), and
+//! rewrites the operator to the link's **destination** space with
+//! deterministically serialized operands.
 //!
-//! It is source-space GATED: an RGB->CMYK link touches only `rg`/`RG`, a
-//! CMYK->CMYK link only `k`/`K`, a Gray link only `g`/`G`; every other operator
-//! (including a colour operator of a different space) is left byte-verbatim, and
-//! a mismatched colour operator is counted as a skip. Only direct device
-//! operators `g/G`, `rg/RG`, `k/K` are handled; `cs/CS`, `sc/scn`, `SC/SCN`,
+//! Routing keeps the exact source-space gate: an RGB->CMYK link touches only
+//! `rg`/`RG`, a CMYK->CMYK link only `k`/`K`, a Gray link only `g`/`G`. An
+//! operator whose declared space matches NO supplied link's source is left
+//! byte-verbatim and counted as `no_matching_link`. Only direct device operators
+//! `g/G`, `rg/RG`, `k/K` are handled; `cs/CS`, `sc/scn`, `SC/SCN`,
 //! ICCBased/Separation/DeviceN/Indexed/Pattern colour spaces, and resource
 //! colour-space lookups are out of scope (they need graphics-state tracking) and
 //! are simply not matched here.
@@ -24,9 +26,7 @@
 
 use std::cell::RefCell;
 
-use presslint_color_lcms::{
-    DeviceLinkSpace, LcmsError, apply_device_link_f64, inspect_device_link,
-};
+use presslint_color_lcms::{DeviceLinkSpace, LcmsError, apply_device_link_f64};
 use presslint_pdf::{
     DictionaryValueKind, DocumentAccessError, IndirectObjectEditDisposition, IndirectRef,
 };
@@ -42,13 +42,15 @@ use crate::{
         EditPageContentError, EditedContent, PageSelection, PipelinePageSkip, PipelineSkipReason,
         edit_page_content_incremental_indexed,
     },
+    link_routing::{DeviceLinkInput, LinkConversionCounts, LinkRouting, build_link_routing},
     pdf_number_serialize::serialize_color_component,
     selector_match::{
         OperatorView, UnsupportedTargetLeaf, collect_unsupported_leaves, selector_matches,
     },
 };
 
-/// Request to convert direct device colours in selected pages via ONE DeviceLink.
+/// Request to convert direct device colours in selected pages via a SET of
+/// DeviceLinks, routed by source space.
 ///
 /// `PartialEq` only (not `Eq`): the optional `target` selector may carry
 /// floating-point colour components.
@@ -56,8 +58,9 @@ use crate::{
 pub struct ConvertContentColorsRequest {
     /// Page selection (reuses the shared content-edit pipeline selection).
     pub pages: PageSelection,
-    /// Raw ICC DeviceLink profile bytes, inspected once up front.
-    pub device_link_bytes: Vec<u8>,
+    /// The DeviceLinks to route content colours through, each inspected once up
+    /// front. A single-link caller passes a one-element vec.
+    pub device_links: Vec<DeviceLinkInput>,
     /// Optional pre-DeviceLink black-preservation overlay.
     #[serde(default)]
     pub black_preservation: BlackPreservationPolicy,
@@ -78,31 +81,34 @@ pub struct ConvertContentColorsRequest {
 /// Per-page aggregate operator-skip taxonomy (honest coverage reporting).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperatorSkipCounts {
-    /// Colour operators of a space other than the DeviceLink source space.
-    pub source_space_mismatch: usize,
-    /// Source-space operators whose operand count did not match the space.
+    /// Valid direct device operators whose declared space matched NO supplied
+    /// link's source space (a coverage gap; left byte-verbatim).
+    pub no_matching_link: usize,
+    /// Direct device operators whose operand count did not match the space.
     pub wrong_operand_count: usize,
-    /// Source-space operators with a non-number / multi-token operand.
+    /// Direct device operators with a non-number / multi-token operand.
     pub non_number_operand: usize,
-    /// Source-space operators with an operand outside `[0.0, 1.0]`.
+    /// Direct device operators with an operand outside `[0.0, 1.0]`.
     pub operand_out_of_range: usize,
-    /// Valid source-space operators excluded by the request `target` selector.
+    /// Valid direct device operators excluded by the request `target` selector.
     pub selector_excluded: usize,
 }
 
 /// Report for one page whose direct device colours were analysed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConvertedPage {
     /// Zero-based document page index.
     pub page_index: PageIndex,
     /// Indirect reference of the analysed content-stream object.
     pub content_object: IndirectRef,
-    /// Number of operators converted in this page stream.
+    /// Total number of operators converted in this page stream (all links).
     pub operators_converted: usize,
-    /// Number of source-space neutral-black operators preserved before the link.
+    /// Number of neutral-black operators preserved before the routed link.
     pub black_preserved: usize,
     /// Aggregate per-page operator-skip counts.
     pub operator_skips: OperatorSkipCounts,
+    /// Per-link conversion counts, one entry per supplied link in request order.
+    pub links: Vec<LinkConversionCounts>,
 }
 
 /// One requested page skipped for a structural reason before operator analysis.
@@ -183,8 +189,14 @@ pub struct ConvertContentColorsOutput {
 pub enum ConvertContentColorsError {
     /// The request selected no pages (an empty index list).
     EmptyRequest,
-    /// The DeviceLink bytes could not be inspected (invalid / not a DeviceLink).
+    /// The request supplied no DeviceLinks (`device_links` was empty).
+    NoDeviceLinks,
+    /// One link's bytes could not be inspected (invalid / not a DeviceLink).
     DeviceLinkInspectFailed {
+        /// Zero-based index of the offending link in `device_links`.
+        index: usize,
+        /// The offending link's opaque caller label, if any.
+        id: Option<String>,
         /// Delegated `presslint-color-lcms` inspection failure.
         error: LcmsError,
     },
@@ -196,13 +208,27 @@ pub enum ConvertContentColorsError {
         /// Every unsupported leaf found in the selector tree, in pre-order.
         unsupported: Vec<UnsupportedTargetLeaf>,
     },
-    /// The DeviceLink source or destination space is Lab or unsupported, so no
-    /// direct device operator can be converted through it.
+    /// A link's source or destination space is Lab or unsupported, so no direct
+    /// device operator can be converted through it.
     UnsupportedLinkSpace {
-        /// The DeviceLink's inspected source space.
+        /// Zero-based index of the offending link in `device_links`.
+        index: usize,
+        /// The offending link's opaque caller label, if any.
+        id: Option<String>,
+        /// The link's inspected source space.
         source: DeviceLinkSpace,
-        /// The DeviceLink's inspected destination space.
+        /// The link's inspected destination space.
         destination: DeviceLinkSpace,
+    },
+    /// Two supplied links declared the same source space, so routing an operator
+    /// of that space would be an ambiguous silent guess.
+    AmbiguousLinkSource {
+        /// The shared inspected source space.
+        space: DeviceLinkSpace,
+        /// Index of the first link declaring `space`.
+        first_index: usize,
+        /// Index of the second link declaring `space`.
+        second_index: usize,
     },
     /// The input could not be opened through the document-access spine.
     Open {
@@ -229,7 +255,10 @@ pub enum ConvertContentColorsError {
 }
 
 /// A direct device colour space shared by this crate's content-colour helpers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Ord` is derived (declaration order Gray < Rgb < Cmyk) so it can key the
+/// deterministic routing `BTreeMap` in [`crate::link_routing`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DeviceColorSpace {
     Gray,
     Rgb,
@@ -248,7 +277,7 @@ impl DeviceColorSpace {
 
     /// Narrow a DeviceLink space to a directly-convertible device space.
     /// Lab and unsupported spaces have no direct device operator.
-    const fn from_link(space: DeviceLinkSpace) -> Option<Self> {
+    pub const fn from_link(space: DeviceLinkSpace) -> Option<Self> {
         match space {
             DeviceLinkSpace::Gray => Some(Self::Gray),
             DeviceLinkSpace::Rgb => Some(Self::Rgb),
@@ -290,39 +319,35 @@ struct PageTally {
     converted: usize,
     black_preserved: usize,
     skips: OperatorSkipCounts,
+    /// Conversions attributed to each link, indexed by `link_index`.
+    link_converted: Vec<usize>,
 }
 
 /// Convert direct device colour operators in selected page content streams via
-/// ONE DeviceLink and append one incremental revision.
+/// a SET of DeviceLinks (routed by source space) and append one incremental
+/// revision.
 ///
-/// The DeviceLink is inspected exactly once up front; a Lab or unsupported
-/// source/destination space is a whole-operation [`ConvertContentColorsError`]
-/// before any page is traversed. Only operators whose declared colour space
-/// equals the DeviceLink source space are converted; every other byte is
-/// preserved verbatim, so `output.bytes[..input.len()] == input`.
+/// Every link is inspected exactly once up front and a deterministic routing map
+/// is built (see [`build_link_routing`]); an empty `device_links`, a bad link, a
+/// Lab/unsupported link space, or two links sharing a source space are all
+/// whole-operation [`ConvertContentColorsError`]s before any page is traversed.
+/// Only operators whose declared colour space equals SOME link's source space
+/// are converted; every other byte is preserved verbatim, so
+/// `output.bytes[..input.len()] == input`.
 ///
 /// # Errors
 ///
-/// Returns [`ConvertContentColorsError`] when the DeviceLink cannot be inspected
-/// or its spaces are unconvertible, the request is empty, the input cannot be
-/// opened, a requested page index is out of range, or the append writer / plan
-/// bridge rejects the input.
+/// Returns [`ConvertContentColorsError`] when routing rejects the links (empty,
+/// inspect failure, unsupported space, ambiguous source), the request selects no
+/// pages, the input cannot be opened, a requested page index is out of range, or
+/// the append writer / plan bridge rejects the input.
 pub fn convert_content_colors_incremental(
     input: &[u8],
     request: &ConvertContentColorsRequest,
 ) -> Result<ConvertContentColorsOutput, ConvertContentColorsError> {
-    // Inspect the DeviceLink ONCE up front, before any content traversal.
-    let info = inspect_device_link(&request.device_link_bytes)
-        .map_err(|error| ConvertContentColorsError::DeviceLinkInspectFailed { error })?;
-    let (Some(source), Some(destination)) = (
-        DeviceColorSpace::from_link(info.source_space),
-        DeviceColorSpace::from_link(info.destination_space),
-    ) else {
-        return Err(ConvertContentColorsError::UnsupportedLinkSpace {
-            source: info.source_space,
-            destination: info.destination_space,
-        });
-    };
+    // Inspect every link ONCE up front and build the routing map before any
+    // content traversal.
+    let routing = build_link_routing(&request.device_links)?;
 
     // Reject unsupported selector leaves UP FRONT, before any page traversal, so
     // an unanswerable target never silently under-converts.
@@ -334,7 +359,6 @@ pub fn convert_content_colors_incremental(
     }
 
     let tallies: RefCell<Vec<PageTally>> = RefCell::new(Vec::new());
-    let link_bytes = request.device_link_bytes.as_slice();
     let target = request.target.as_ref();
 
     let output =
@@ -342,9 +366,7 @@ pub fn convert_content_colors_incremental(
             match convert_decoded(
                 page_index,
                 decoded,
-                link_bytes,
-                source,
-                destination,
+                &routing,
                 request.black_preservation,
                 target,
             ) {
@@ -368,7 +390,12 @@ pub fn convert_content_colors_incremental(
         })
         .map_err(map_error)?;
 
-    let converted = attach_tallies(&output.edited, &output.skipped, tallies.into_inner());
+    let converted = attach_tallies(
+        &output.edited,
+        &output.skipped,
+        tallies.into_inner(),
+        &routing,
+    );
     let skipped = output
         .skipped
         .into_iter()
@@ -383,7 +410,7 @@ pub fn convert_content_colors_incremental(
     })
 }
 
-/// Apply the DeviceLink to one decoded content stream.
+/// Convert one decoded content stream, routing each operator to its source link.
 ///
 /// Returns `Some((edited, tally))` when the stream tokenized and assembled.
 /// `edited` is empty when no real splice is needed, otherwise it is the spliced
@@ -393,16 +420,17 @@ pub fn convert_content_colors_incremental(
 fn convert_decoded(
     page_index: PageIndex,
     decoded: &[u8],
-    link_bytes: &[u8],
-    source: DeviceColorSpace,
-    destination: DeviceColorSpace,
+    routing: &LinkRouting,
     black_preservation: BlackPreservationPolicy,
     target: Option<&Selector>,
 ) -> Option<(Vec<u8>, PageTally)> {
     let tokens = tokenize(decoded).ok()?;
     let assembled = assemble_operators(&tokens).ok()?;
 
-    let mut tally = PageTally::default();
+    let mut tally = PageTally {
+        link_converted: vec![0; routing.links().len()],
+        ..PageTally::default()
+    };
     let mut splices: Vec<(ByteRange, Vec<u8>)> = Vec::new();
 
     for record in assembled.records {
@@ -411,10 +439,9 @@ fn convert_decoded(
             // Not a direct device colour operator: leave verbatim, do not count.
             continue;
         };
-        if space != source {
-            tally.skips.source_space_mismatch += 1;
-            continue;
-        }
+        // Operand count/number/range validation happens BEFORE route lookup, so a
+        // malformed operator is attributed to the precise operand skip rather than
+        // to `no_matching_link` (which is reserved for well-formed coverage gaps).
         if record.operands.len() != space.channels() {
             tally.skips.wrong_operand_count += 1;
             continue;
@@ -431,8 +458,8 @@ fn convert_decoded(
             }
         };
         // Selector check (F4-4): a cheap per-operator boolean eval over a
-        // borrowed operator view, BEFORE the heavier black-preservation /
-        // DeviceLink apply. A non-match leaves the operator byte-verbatim.
+        // borrowed operator view, BEFORE routing and the heavier
+        // black-preservation / DeviceLink apply. A non-match leaves it verbatim.
         if let Some(selector) = target {
             let view = OperatorView {
                 page_index,
@@ -449,10 +476,16 @@ fn convert_decoded(
                 continue;
             }
         }
+        // Route lookup: the link whose SOURCE space equals this operator's space.
+        // No matching link is an honest coverage gap, left byte-verbatim.
+        let Some(link) = routing.route(space) else {
+            tally.skips.no_matching_link += 1;
+            continue;
+        };
         if let Some(replacement) = black_preservation_replacement(
             &operands,
-            source,
-            destination,
+            space,
+            link.destination,
             stroking,
             black_preservation,
         ) {
@@ -462,16 +495,17 @@ fn convert_decoded(
             }
             continue;
         }
-        let Ok(components) = apply_device_link_f64(link_bytes, &operands) else {
-            // Unreachable after the up-front space gate + per-operand validation
+        let Ok(components) = apply_device_link_f64(link.bytes, &operands) else {
+            // Unreachable after the source-space route + per-operand validation
             // (channel count and range are already guaranteed); leave verbatim.
             continue;
         };
         splices.push((
             record.range,
-            replacement_bytes(&components, destination, stroking),
+            replacement_bytes(&components, link.destination, stroking),
         ));
         tally.converted += 1;
+        tally.link_converted[link.index] += 1;
     }
 
     if splices.is_empty() {
@@ -548,6 +582,7 @@ fn attach_tallies(
     edited: &[crate::content_edit_pipeline::PipelineEditedPage],
     skipped: &[PipelinePageSkip],
     tallies: Vec<PageTally>,
+    routing: &LinkRouting,
 ) -> Vec<ConvertedPage> {
     let mut analysed: Vec<(PageIndex, IndirectRef)> = Vec::new();
     for page in edited {
@@ -571,6 +606,23 @@ fn attach_tallies(
             operators_converted: tally.converted,
             black_preserved: tally.black_preserved,
             operator_skips: tally.skips,
+            links: link_counts(routing, &tally.link_converted),
+        })
+        .collect()
+}
+
+/// Build the per-page per-link report, one entry per supplied link in request
+/// order (`link_index`), carrying that page's conversions through each link.
+fn link_counts(routing: &LinkRouting, link_converted: &[usize]) -> Vec<LinkConversionCounts> {
+    routing
+        .links()
+        .iter()
+        .map(|link| LinkConversionCounts {
+            link_index: link.index,
+            link_id: link.id.clone(),
+            source: link.source_link_space,
+            destination: link.destination_link_space,
+            operators_converted: link_converted.get(link.index).copied().unwrap_or(0),
         })
         .collect()
 }

@@ -18,7 +18,7 @@ use crate::{
 
 use super::content_color_convert::{
     RGB_TO_CMYK_LINK, classic_raw_pdf, classic_two_page_pdf, contains, convert,
-    convert_with_target, link_bytes, operands_of, page_decoded_stream, predicate, xref_stream_pdf,
+    convert_with_target, one_link, operands_of, page_decoded_stream, predicate, xref_stream_pdf,
 };
 use super::reopen;
 
@@ -343,9 +343,11 @@ fn colorspace_cmyk_selector_excludes_rgb_operator() {
 }
 
 #[test]
-fn source_space_gate_precedes_selector_for_offspace_operators() {
-    // Under an RGB link, g/k are source-space mismatches (counted there), never
-    // reaching the selector check; only the rg operator is selector-evaluated.
+fn selector_precedes_route_lookup_for_offspace_operators() {
+    // F4-5 order: operand validation → selector → route lookup. Under an
+    // `RGB`-only selector the off-space g/k operators fail the selector FIRST, so
+    // they are counted `selector_excluded` and never reach the route lookup
+    // (`no_matching_link` is reserved for selector-included coverage gaps).
     let input = classic_raw_pdf(b"0.5 g\n0 0 0 1 k\n1 0 0 rg\n");
     let output = convert_with_target(
         &input,
@@ -356,8 +358,8 @@ fn source_space_gate_precedes_selector_for_offspace_operators() {
     );
 
     assert_eq!(output.converted[0].operators_converted, 1);
-    assert_eq!(output.converted[0].operator_skips.source_space_mismatch, 2);
-    assert_eq!(output.converted[0].operator_skips.selector_excluded, 0);
+    assert_eq!(output.converted[0].operator_skips.selector_excluded, 2);
+    assert_eq!(output.converted[0].operator_skips.no_matching_link, 0);
 }
 
 #[test]
@@ -543,7 +545,7 @@ fn object_kind_selector_is_rejected_up_front() {
         &input,
         &ConvertContentColorsRequest {
             pages: PageSelection::All,
-            device_link_bytes: link_bytes(RGB_TO_CMYK_LINK),
+            device_links: one_link(RGB_TO_CMYK_LINK),
             black_preservation: BlackPreservationPolicy::None,
             target: Some(predicate(Predicate::ObjectKind {
                 object_kind: ObjectKind::Text,
@@ -569,7 +571,7 @@ fn scope_selector_is_rejected_up_front() {
         &input,
         &ConvertContentColorsRequest {
             pages: PageSelection::All,
-            device_link_bytes: link_bytes(RGB_TO_CMYK_LINK),
+            device_links: one_link(RGB_TO_CMYK_LINK),
             black_preservation: BlackPreservationPolicy::None,
             target: Some(predicate(Predicate::Scope {
                 scope: presslint_types::ContentScope::Page,
@@ -590,7 +592,7 @@ fn editable_selector_is_rejected_up_front() {
         &input,
         &ConvertContentColorsRequest {
             pages: PageSelection::All,
-            device_link_bytes: link_bytes(RGB_TO_CMYK_LINK),
+            device_links: one_link(RGB_TO_CMYK_LINK),
             black_preservation: BlackPreservationPolicy::None,
             target: Some(predicate(Predicate::Editable {
                 capability: EditCapability::RewriteColorOperand,

@@ -11,7 +11,90 @@ dictionary mutation built on it (`set_page_boxes_incremental`), the first
 (`rewrite_rgb_black_to_cmyk_incremental`, an exact syntactic RGB-black rewrite),
 and now the first REAL colour conversion of PDF content:
 `convert_content_colors_incremental`, a DeviceLink-driven direct device-colour
-conversion (F4-2).
+conversion (F4-2), generalised to MULTI-LINK source-space routing (F4-5).
+
+## T131 - Multi-Link Routing for DeviceLink Colour Conversion (F4-5)
+
+`convert_content_colors_incremental` now carries a SET of DeviceLinks and routes
+each direct device colour operator to the link whose SOURCE space equals the
+operator's declared space. One call can carry, e.g., an RGB->CMYK link AND a
+CMYK->CMYK link and convert both `rg` and `k` content correctly in a single
+pass; content whose space matches no supplied link is left intact and honestly
+reported.
+
+### Multi-link request
+
+`ConvertContentColorsRequest.device_link_bytes: Vec<u8>` is replaced by
+`device_links: Vec<DeviceLinkInput>`, where
+`DeviceLinkInput { id: Option<String>, bytes: Vec<u8> }`. The `id` is an OPAQUE
+caller label echoed into the report only — this slice does NOT resolve names to
+files or profiles (a later CLI concern). A single-link caller passes a
+one-element vec and reproduces the exact F4-2..F4-4 behaviour.
+
+### Routing map + duplicate-source rule (`link_routing.rs`)
+
+`build_link_routing` inspects each link ONCE up front (before any page
+traversal) and builds a deterministic `BTreeMap<DeviceColorSpace, RoutedLink>`
+keyed by narrowed source space. Whole-op errors, all returned before a single
+page is opened:
+
+- `NoDeviceLinks` when `device_links` is empty.
+- `DeviceLinkInspectFailed { index, id, error }` when a link's bytes are not a
+  DeviceLink (carries the offending link index + label).
+- `UnsupportedLinkSpace { index, id, source, destination }` when a link's source
+  OR destination is Lab / unsupported.
+- `AmbiguousLinkSource { space, first_index, second_index }` when two links
+  declare the same source space — routing would be a silent guess, so it is a
+  hard error, not a first-wins pick.
+
+`RoutedLink` borrows the request's ICC bytes (`&'a [u8]`) for
+`apply_device_link_f64`; the only owned copies are the small optional `id`
+labels (one per link).
+
+### Per-operator order (extends F4-2..F4-4)
+
+Per operator: classify direct device op -> operand count/number/range
+validation -> selector check (F4-4; `selector_excluded`) -> **route lookup** ->
+black-preservation (per the routed link, only when its destination is CMYK) ->
+apply the routed link, rewrite the operator to the routed link's destination
+space (stroking preserved), splice. Splices descend by start offset; everything
+else is byte-verbatim, so `output.bytes[..input.len()] == input`.
+
+Note the reorder vs the single-link slice: operand validation and the selector
+now run BEFORE the route lookup, so `no_matching_link` is reserved for
+well-formed, selector-included operators whose space matches no link's source (a
+genuine coverage gap). A malformed off-space operator is attributed to its
+precise operand skip; an off-space operator excluded by the target selector is
+attributed to `selector_excluded`. The exact source-space gate itself (an
+operator converts iff its space equals SOME link's source) is unchanged.
+
+### Report + `no_matching_link` rename
+
+`ConvertedPage` keeps `operators_converted` (total across all links) +
+`black_preserved`, and adds `links: Vec<LinkConversionCounts>` — one entry per
+supplied link in request order, each carrying
+`{ link_index, link_id, source, destination, operators_converted }` for that
+page. `OperatorSkipCounts` renames `source_space_mismatch` -> `no_matching_link`
+(the other four skip counts are unchanged). `ConvertedPage` is no longer `Copy`
+(it owns the `links` vec).
+
+### Copy budget
+
+The routing table is built ONCE per call (N link inspections + one BTreeMap);
+per-operator routing is a single map lookup. Link ICC bytes are borrowed from
+the request, never cloned into the table. One owned decoded output per edited
+page (unchanged from F4-2). The per-page `link_converted` tally is a
+`Vec<usize>` sized to the link count; the per-link report clones only the small
+`id` labels.
+
+### Scope-ripple note
+
+The request-shape change rippled into two test files outside this task's
+declared write scope: `src/tests/selector_match.rs` (mechanical
+`device_link_bytes` -> `device_links` wiring, plus the
+`selector_precedes_route_lookup_for_offspace_operators` test re-expressed for
+the new selector-before-route order) — a required, honest consequence of the
+brief's explicit reorder, not a weakening.
 
 ## T128 - DeviceLink Content-Colour Conversion (F4-2)
 

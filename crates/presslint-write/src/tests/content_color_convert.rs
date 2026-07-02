@@ -25,8 +25,8 @@ use presslint_types::PageIndex;
 
 use crate::{
     BlackPreservationPolicy, ConvertContentColorsError, ConvertContentColorsOutput,
-    ConvertContentColorsRequest, ConvertPageSkipReason, OperatorSkipCounts, PageSelection,
-    convert_content_colors_incremental,
+    ConvertContentColorsRequest, ConvertPageSkipReason, DeviceLinkInput, OperatorSkipCounts,
+    PageSelection, convert_content_colors_incremental,
 };
 
 use super::{reopen, xref_record};
@@ -36,15 +36,23 @@ const CATALOG: &[u8] = b"<< /Type /Catalog /Pages 2 0 R >>";
 
 // SYNTHETIC DeviceLinks (grid-2 CLUT placeholders). Source->destination spaces:
 pub(super) const RGB_TO_CMYK_LINK: &str = "000001746c636d73043000006c696e6b52474220434d594b07ea00070002000f00040004616373704150504c0000000000000000000000000000000000000000000000000000f6d6000100000000d32d6c636d730000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014132423000000090000000e46d4142200000000003040000000000a40000000000000000000000500000002070617261000000000000000000010000706172610000000000000000000100007061726100000000000000000001000002020200000000000000000000000000020000000005002a004f0074009900be00e30108012d01520177019c01c101e6020b0230025500220047006c009100b600db01000125014a016f019401b901de0203022870617261000000000000000000010000706172610000000000000000000100007061726100000000000000000001000070617261000000000000000000010000";
-const CMYK_TO_CMYK_LINK: &str = "000001c46c636d73043000006c696e6b434d594b434d594b07ea00070002000f00040004616373704150504c0000000000000000000000000000000000000000000000000000f6d6000100000000d32d6c636d730000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014132423000000090000001346d4142200000000004040000000000f4000000000000000000000060000000207061726100000000000000000001000070617261000000000000000000010000706172610000000000000000000100007061726100000000000000000001000002020202000000000000000000000000020000000005002a004f0074009900be00e30108012d01520177019c01c101e6020b0230025500220047006c009100b600db01000125014a016f019401b901de02030228024d001a003f0064008900ae00d300f8011d01420167018c01b101d601fb0220024500120037005c008100a600cb00f00115013a015f018401a901ce01f3021870617261000000000000000000010000706172610000000000000000000100007061726100000000000000000001000070617261000000000000000000010000";
-const GRAY_TO_GRAY_LINK: &str = "000000e86c636d73043000006c696e6b475241594752415907ea00070002000f00040004616373704150504c0000000000000000000000000000000000000000000000000000f6d6000100000000d32d6c636d730000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014132423000000090000000586d41422000000000010100000000004800000000000000000000003000000020706172610000000000000000000100000200000000000000000000000000000002000000000703ec70617261000000000000000000010000";
-const LAB_TO_RGB_LINK: &str = "000000846c636d73043000006c696e6b4c6162205247422007ea00070002000f00040004616373704150504c0000000000000000000000000000000000000000000000000000f6d6000100000000d32d6c636d73000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+pub(super) const CMYK_TO_CMYK_LINK: &str = "000001c46c636d73043000006c696e6b434d594b434d594b07ea00070002000f00040004616373704150504c0000000000000000000000000000000000000000000000000000f6d6000100000000d32d6c636d730000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014132423000000090000001346d4142200000000004040000000000f4000000000000000000000060000000207061726100000000000000000001000070617261000000000000000000010000706172610000000000000000000100007061726100000000000000000001000002020202000000000000000000000000020000000005002a004f0074009900be00e30108012d01520177019c01c101e6020b0230025500220047006c009100b600db01000125014a016f019401b901de02030228024d001a003f0064008900ae00d300f8011d01420167018c01b101d601fb0220024500120037005c008100a600cb00f00115013a015f018401a901ce01f3021870617261000000000000000000010000706172610000000000000000000100007061726100000000000000000001000070617261000000000000000000010000";
+pub(super) const GRAY_TO_GRAY_LINK: &str = "000000e86c636d73043000006c696e6b475241594752415907ea00070002000f00040004616373704150504c0000000000000000000000000000000000000000000000000000f6d6000100000000d32d6c636d730000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014132423000000090000000586d41422000000000010100000000004800000000000000000000003000000020706172610000000000000000000100000200000000000000000000000000000002000000000703ec70617261000000000000000000010000";
+pub(super) const LAB_TO_RGB_LINK: &str = "000000846c636d73043000006c696e6b4c6162205247422007ea00070002000f00040004616373704150504c0000000000000000000000000000000000000000000000000000f6d6000100000000d32d6c636d73000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
 pub(super) fn link_bytes(hex: &str) -> Vec<u8> {
     (0..hex.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex"))
         .collect()
+}
+
+/// A one-element `device_links` vec (single-link caller) from a hex link.
+pub(super) fn one_link(hex: &str) -> Vec<DeviceLinkInput> {
+    vec![DeviceLinkInput {
+        id: None,
+        bytes: link_bytes(hex),
+    }]
 }
 
 fn stream_body(dict_extra: &str, data: &[u8]) -> Vec<u8> {
@@ -273,7 +281,7 @@ fn convert_with_policy(
         input,
         &ConvertContentColorsRequest {
             pages: PageSelection::All,
-            device_link_bytes: link_bytes(link),
+            device_links: one_link(link),
             black_preservation,
             target: None,
         },
@@ -295,7 +303,7 @@ pub(super) fn convert_with_target(
         input,
         &ConvertContentColorsRequest {
             pages: PageSelection::All,
-            device_link_bytes: link_bytes(link),
+            device_links: one_link(link),
             black_preservation: BlackPreservationPolicy::None,
             target: Some(target),
         },
@@ -360,7 +368,7 @@ fn source_space_gate_leaves_cmyk_and_gray_verbatim_under_rgb_link() {
     // source-space mismatches and left byte-verbatim.
     assert_eq!(output.converted[0].operators_converted, 1);
     assert_eq!(output.converted[0].black_preserved, 0);
-    assert_eq!(output.converted[0].operator_skips.source_space_mismatch, 2);
+    assert_eq!(output.converted[0].operator_skips.no_matching_link, 2);
 
     let decoded = page_decoded_stream(&output.bytes, false);
     assert!(contains(&decoded, b"0 0 0 1 k"));
@@ -483,7 +491,7 @@ fn source_space_gate_still_leaves_rgb_black_under_cmyk_link() {
 
     assert_eq!(output.converted[0].operators_converted, 0);
     assert_eq!(output.converted[0].black_preserved, 1);
-    assert_eq!(output.converted[0].operator_skips.source_space_mismatch, 1);
+    assert_eq!(output.converted[0].operator_skips.no_matching_link, 1);
     let decoded = page_decoded_stream(&output.bytes, false);
     assert!(contains(&decoded, b"0 0 0 rg"));
     assert!(contains(&decoded, b"0 0 0 1 k"));
@@ -618,7 +626,7 @@ fn lab_sided_link_is_a_whole_op_unsupported_space_error() {
         &input,
         &ConvertContentColorsRequest {
             pages: PageSelection::All,
-            device_link_bytes: link_bytes(LAB_TO_RGB_LINK),
+            device_links: one_link(LAB_TO_RGB_LINK),
             black_preservation: BlackPreservationPolicy::None,
             target: None,
         },
@@ -637,7 +645,10 @@ fn invalid_link_bytes_are_a_whole_op_inspect_failure() {
         &input,
         &ConvertContentColorsRequest {
             pages: PageSelection::All,
-            device_link_bytes: b"not an icc profile".to_vec(),
+            device_links: vec![DeviceLinkInput {
+                id: None,
+                bytes: b"not an icc profile".to_vec(),
+            }],
             black_preservation: BlackPreservationPolicy::None,
             target: None,
         },
@@ -656,7 +667,7 @@ fn empty_page_index_request_is_rejected() {
         &input,
         &ConvertContentColorsRequest {
             pages: PageSelection::Indices(vec![]),
-            device_link_bytes: link_bytes(RGB_TO_CMYK_LINK),
+            device_links: one_link(RGB_TO_CMYK_LINK),
             black_preservation: BlackPreservationPolicy::None,
             target: None,
         },
@@ -695,7 +706,7 @@ fn rerunning_rgb_link_does_not_reconvert_the_now_cmyk_operator() {
         &first.bytes,
         &ConvertContentColorsRequest {
             pages: PageSelection::Indices(vec![PageIndex(0)]),
-            device_link_bytes: link_bytes(RGB_TO_CMYK_LINK),
+            device_links: one_link(RGB_TO_CMYK_LINK),
             black_preservation: BlackPreservationPolicy::None,
             target: None,
         },
@@ -705,7 +716,7 @@ fn rerunning_rgb_link_does_not_reconvert_the_now_cmyk_operator() {
     assert_eq!(&second.bytes[..first.bytes.len()], first.bytes.as_slice());
     // The operator is now `k` (CMYK), a source-space mismatch under the RGB link.
     assert_eq!(second.converted[0].operators_converted, 0);
-    assert_eq!(second.converted[0].operator_skips.source_space_mismatch, 1);
+    assert_eq!(second.converted[0].operator_skips.no_matching_link, 1);
 }
 
 #[test]
@@ -719,7 +730,7 @@ fn cmyk_link_reconverts_an_already_cmyk_operator() {
         &first.bytes,
         &ConvertContentColorsRequest {
             pages: PageSelection::Indices(vec![PageIndex(0)]),
-            device_link_bytes: link_bytes(CMYK_TO_CMYK_LINK),
+            device_links: one_link(CMYK_TO_CMYK_LINK),
             black_preservation: BlackPreservationPolicy::None,
             target: None,
         },
