@@ -1,6 +1,9 @@
 //! Structured run reports and deterministic rendering.
 
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    time::Duration,
+};
 
 use presslint::{ColorAuditStatus, ColorUsageAudit};
 use presslint_write::{ConvertContentColorsOutput, ConvertPageSkip, ConvertedPage};
@@ -211,6 +214,33 @@ fn render_warnings(out: &mut dyn Write, warnings: &[String]) -> Result<(), CliEr
     Ok(())
 }
 
+/// Render a deterministic timing block from already-measured durations.
+pub fn render_timing(
+    phases: &[(&str, Duration)],
+    total: Duration,
+    out: &mut impl Write,
+) -> Result<(), CliError> {
+    write!(out, "timing:").map_err(stderr_error)?;
+    for (label, duration) in phases {
+        write!(out, " {label} {}", format_duration(*duration)).map_err(stderr_error)?;
+    }
+    writeln!(out, " total {}", format_duration(total)).map_err(stderr_error)
+}
+
+/// Render already-measured timing to the CLI diagnostics stream.
+pub fn write_timing(phases: &[(&str, Duration)], total: Duration) -> Result<(), CliError> {
+    let mut stderr = io::stderr().lock();
+    render_timing(phases, total, &mut stderr)
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.as_millis() > 0 {
+        format!("{}ms", duration.as_millis())
+    } else {
+        format!("{}µs", duration.as_micros())
+    }
+}
+
 const fn stderr_error(source: io::Error) -> CliError {
     CliError::io_stream("write report to stderr", source)
 }
@@ -290,3 +320,7 @@ struct ConvertJsonOutput<'a> {
     converted: &'a [ConvertedPage],
     skipped: &'a [ConvertPageSkip],
 }
+
+#[cfg(test)]
+#[path = "tests/timing.rs"]
+mod timing_tests;

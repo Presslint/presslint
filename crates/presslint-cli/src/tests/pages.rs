@@ -62,6 +62,7 @@ fn rejects_json_report_when_pdf_would_use_stdout() {
         pages: "all".to_owned(),
         preserve_black: false,
         json: true,
+        timing: false,
         output: "-".to_owned(),
     };
 

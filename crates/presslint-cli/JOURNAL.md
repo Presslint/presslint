@@ -47,3 +47,22 @@ Verification status to update before hand-back:
 Implementation note: the environment could not fetch new crates, so the CLI
 uses `clap`'s builder API with the already-locked `std` feature instead of the
 derive macro crate. The command surface and parsing behavior remain the same.
+
+## T135: CLI coarse wall-clock timing
+
+- Added `--timing` to `presslint convert` and `presslint audit`.
+- Timing is measured with `std::time::Instant` at CLI phase boundaries only:
+  - convert: `read_input`, `convert`, `write_output`, plus `total`;
+  - audit: `read_input`, `audit`, plus `total`.
+- Timing is observational and stderr-only. It is never included in converted
+  PDF bytes and never included in the JSON machine report on stdout, so
+  deterministic artifacts remain byte-reproducible with or without `--timing`.
+- Without `--timing`, the command path does not collect or render timing lines;
+  existing output and exit behavior are preserved.
+- The timing renderer is a pure function over supplied labels and `Duration`
+  values, with unit tests using injected durations rather than wall-clock
+  assertions.
+- The CLI remains a thin driver: no library API changed, and no dependency was
+  added.
+- Follow-up: internal per-stage library timing should use tracing spans or an
+  explicit returned timing structure when the library is instrumented.

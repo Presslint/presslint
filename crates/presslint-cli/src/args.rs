@@ -53,6 +53,8 @@ pub struct ConvertArgs {
     pub preserve_black: bool,
     /// Print the run report as JSON to stdout.
     pub json: bool,
+    /// Print coarse per-phase wall-clock timing to stderr.
+    pub timing: bool,
     /// Output PDF path, or - for stdout.
     pub output: String,
 }
@@ -64,6 +66,8 @@ pub struct AuditArgs {
     pub input: PathBuf,
     /// Print the run report as JSON to stdout.
     pub json: bool,
+    /// Print coarse per-phase wall-clock timing to stderr.
+    pub timing: bool,
 }
 
 impl Cli {
@@ -123,6 +127,7 @@ impl ConvertArgs {
             pages: required_string(matches, "pages"),
             preserve_black: matches.get_flag("preserve-black"),
             json: matches.get_flag("json"),
+            timing: matches.get_flag("timing"),
             output: required_string(matches, "output"),
         }
     }
@@ -133,6 +138,7 @@ impl AuditArgs {
         Self {
             input: PathBuf::from(required_string(matches, "input")),
             json: matches.get_flag("json"),
+            timing: matches.get_flag("timing"),
         }
     }
 }
@@ -192,6 +198,12 @@ fn convert_command() -> ClapCommand {
                 .help("Print the run report as JSON to stdout."),
         )
         .arg(
+            Arg::new("timing")
+                .long("timing")
+                .action(ArgAction::SetTrue)
+                .help("Print coarse read/compute/write wall-clock timing to stderr."),
+        )
+        .arg(
             Arg::new("output")
                 .short('o')
                 .long("output")
@@ -211,6 +223,12 @@ fn audit_command() -> ClapCommand {
                 .long("json")
                 .action(ArgAction::SetTrue)
                 .help("Print the run report as JSON to stdout."),
+        )
+        .arg(
+            Arg::new("timing")
+                .long("timing")
+                .action(ArgAction::SetTrue)
+                .help("Print coarse read/compute wall-clock timing to stderr."),
         )
 }
 

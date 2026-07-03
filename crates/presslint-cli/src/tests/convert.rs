@@ -23,6 +23,7 @@ fn convert_run_writes_output_and_renders_report() {
         pages: "all".to_owned(),
         preserve_black: false,
         json: false,
+        timing: false,
         output: output_path.to_string_lossy().into_owned(),
     };
 

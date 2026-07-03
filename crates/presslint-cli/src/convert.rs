@@ -4,6 +4,7 @@ use std::{
     fs, io,
     io::Write,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use presslint_write::{
@@ -16,13 +17,30 @@ use crate::{
         ConvertArgs, parse_device_link_arg, parse_pages, parse_selector_arg, same_input_output,
     },
     error::CliError,
-    report::RunReport,
+    report::{RunReport, write_timing},
 };
 
 /// Execute a `convert` command.
 pub fn run(args: &ConvertArgs) -> Result<RunReport, CliError> {
+    run_inner(args, None)
+}
+
+#[cfg(test)]
+pub fn run_with_pdf_stdout(
+    args: &ConvertArgs,
+    pdf_stdout: &mut dyn Write,
+) -> Result<RunReport, CliError> {
+    run_inner(args, Some(pdf_stdout))
+}
+
+fn run_inner(
+    args: &ConvertArgs,
+    pdf_stdout: Option<&mut dyn Write>,
+) -> Result<RunReport, CliError> {
     validate_output_routing(args)?;
 
+    let total_start = args.timing.then(Instant::now);
+    let phase_start = args.timing.then(Instant::now);
     let input = fs::read(&args.input)
         .map_err(|source| CliError::io("read input PDF", &args.input, source))?;
     if args.output != "-" {
@@ -34,19 +52,30 @@ pub fn run(args: &ConvertArgs) -> Result<RunReport, CliError> {
         }
     }
 
-    let request = ConvertContentColorsRequest {
-        pages: parse_pages(&args.pages)?,
-        device_links: read_device_links(&args.device_links)?,
-        black_preservation: if args.preserve_black {
-            BlackPreservationPolicy::NeutralBlackToK
-        } else {
-            BlackPreservationPolicy::None
-        },
-        target: parse_selector_arg(args.select.as_deref())?,
-    };
+    let request = build_request(args)?;
+    let read_input = phase_start.map(|start| start.elapsed());
 
+    let phase_start = args.timing.then(Instant::now);
     let output = convert_content_colors_incremental(&input, &request)?;
-    write_output(&args.output, &output.bytes)?;
+    let convert = phase_start.map(|start| start.elapsed());
+
+    let phase_start = args.timing.then(Instant::now);
+    write_output(&args.output, &output.bytes, pdf_stdout)?;
+    let write_output_duration = phase_start.map(|start| start.elapsed());
+
+    if let (Some(total_start), Some(read_input), Some(convert), Some(write_output_duration)) =
+        (total_start, read_input, convert, write_output_duration)
+    {
+        write_timing(
+            &[
+                ("read_input", read_input),
+                ("convert", convert),
+                ("write_output", write_output_duration),
+            ],
+            total_start.elapsed(),
+        )?;
+    }
+
     Ok(RunReport::convert(output))
 }
 
@@ -58,6 +87,19 @@ pub fn validate_output_routing(args: &ConvertArgs) -> Result<(), CliError> {
         ));
     }
     Ok(())
+}
+
+fn build_request(args: &ConvertArgs) -> Result<ConvertContentColorsRequest, CliError> {
+    Ok(ConvertContentColorsRequest {
+        pages: parse_pages(&args.pages)?,
+        device_links: read_device_links(&args.device_links)?,
+        black_preservation: if args.preserve_black {
+            BlackPreservationPolicy::NeutralBlackToK
+        } else {
+            BlackPreservationPolicy::None
+        },
+        target: parse_selector_arg(args.select.as_deref())?,
+    })
 }
 
 fn read_device_links(inputs: &[String]) -> Result<Vec<DeviceLinkInput>, CliError> {
@@ -75,15 +117,28 @@ fn read_device_links(inputs: &[String]) -> Result<Vec<DeviceLinkInput>, CliError
         .collect()
 }
 
-fn write_output(output: &str, bytes: &[u8]) -> Result<(), CliError> {
+fn write_output(
+    output: &str,
+    bytes: &[u8],
+    pdf_stdout: Option<&mut dyn Write>,
+) -> Result<(), CliError> {
     if output == "-" {
-        let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(bytes)
-            .map_err(|source| CliError::io_stream("write PDF to stdout", source))?;
-        stdout
-            .flush()
-            .map_err(|source| CliError::io_stream("flush PDF stdout", source))?;
+        if let Some(stdout) = pdf_stdout {
+            stdout
+                .write_all(bytes)
+                .map_err(|source| CliError::io_stream("write PDF to stdout", source))?;
+            stdout
+                .flush()
+                .map_err(|source| CliError::io_stream("flush PDF stdout", source))?;
+        } else {
+            let mut stdout = io::stdout().lock();
+            stdout
+                .write_all(bytes)
+                .map_err(|source| CliError::io_stream("write PDF to stdout", source))?;
+            stdout
+                .flush()
+                .map_err(|source| CliError::io_stream("flush PDF stdout", source))?;
+        }
         return Ok(());
     }
 
