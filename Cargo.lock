@@ -292,6 +292,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "presslint-cli"
+version = "0.0.1"
+dependencies = [
+ "clap",
+ "presslint",
+ "presslint-selectors",
+ "presslint-types",
+ "presslint-write",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "presslint-color"
 version = "0.0.1"
 dependencies = [

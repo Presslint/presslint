@@ -11,6 +11,7 @@ members = [
     "crates/presslint-color",
     "crates/presslint-color-lcms",
     "crates/presslint-write",
+    "crates/presslint-cli",
 ]
 
 [workspace.package]
@@ -36,7 +37,9 @@ presslint-color = { path = "crates/presslint-color", version = "0.0.1" }
 presslint-color-lcms = { path = "crates/presslint-color-lcms", version = "0.0.1" }
 presslint-write = { path = "crates/presslint-write", version = "0.0.1" }
 
+clap = { version = "4.6.1", default-features = false, features = ["std", "help", "usage"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.150"
 criterion = { version = "0.5", default-features = false }
 miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-alloc"] }
 # Little CMS 2 FFI (MIT; wraps Little CMS, MIT). Pinned EXACT because an lcms2

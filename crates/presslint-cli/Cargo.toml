@@ -1,0 +1,24 @@
+[package]
+name = "presslint-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Command-line driver for presslint PDF prepress checks and conversions."
+
+[[bin]]
+name = "presslint"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+presslint.workspace = true
+presslint-selectors.workspace = true
+presslint-types.workspace = true
+presslint-write.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
