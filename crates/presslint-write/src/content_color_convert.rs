@@ -25,6 +25,7 @@
 #![allow(clippy::doc_markdown)]
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use presslint_color_lcms::{DeviceLinkSpace, LcmsError, apply_device_link_f64};
 use presslint_pdf::{
@@ -42,6 +43,7 @@ use crate::{
         EditPageContentError, EditedContent, PageSelection, PipelinePageSkip, PipelineSkipReason,
         edit_page_content_incremental_indexed,
     },
+    content_stream_plan::StreamMode,
     link_routing::{DeviceLinkInput, LinkConversionCounts, LinkRouting, build_link_routing},
     pdf_number_serialize::serialize_color_component,
     selector_match::{
@@ -99,9 +101,11 @@ pub struct OperatorSkipCounts {
 pub struct ConvertedPage {
     /// Zero-based document page index.
     pub page_index: PageIndex,
-    /// Indirect reference of the analysed content-stream object.
-    pub content_object: IndirectRef,
-    /// Total number of operators converted in this page stream (all links).
+    /// Indirect references of the analysed content-stream objects of this page,
+    /// in stream-ordinal order. A multi-content-stream page carries one entry per
+    /// analysed stream object; a single-stream page carries exactly one.
+    pub content_objects: Vec<IndirectRef>,
+    /// Total number of operators converted in this page (all streams, all links).
     pub operators_converted: usize,
     /// Number of neutral-black operators preserved before the routed link.
     pub black_preserved: usize,
@@ -361,8 +365,11 @@ pub fn convert_content_colors_incremental(
     let tallies: RefCell<Vec<PageTally>> = RefCell::new(Vec::new());
     let target = request.target.as_ref();
 
-    let output =
-        edit_page_content_incremental_indexed(input, &request.pages, |page_index, decoded| {
+    let output = edit_page_content_incremental_indexed(
+        input,
+        &request.pages,
+        StreamMode::MultiStream,
+        |page_index, decoded| {
             match convert_decoded(
                 page_index,
                 decoded,
@@ -387,8 +394,9 @@ pub fn convert_content_colors_incremental(
                 }
                 None => EditedContent::Rejected(PipelineSkipReason::ContentRoundTripMismatch),
             }
-        })
-        .map_err(map_error)?;
+        },
+    )
+    .map_err(map_error)?;
 
     let converted = attach_tallies(
         &output.edited,
@@ -570,45 +578,104 @@ fn replacement_bytes(components: &[f64], destination: DeviceColorSpace, stroking
     bytes
 }
 
-/// Associate the per-invocation tallies with the analysed pages.
+/// One analysed content-stream object of a page, in closure-invocation order.
+struct AnalysedStream {
+    page_index: PageIndex,
+    stream_ordinal: usize,
+    content_object: IndirectRef,
+}
+
+/// Per-page accumulator that aggregates every analysed stream of one page.
+struct PageAccumulator {
+    content_objects: Vec<IndirectRef>,
+    converted: usize,
+    black_preserved: usize,
+    skips: OperatorSkipCounts,
+    link_converted: Vec<usize>,
+}
+
+/// Associate the per-invocation tallies with the analysed content-stream objects
+/// and AGGREGATE them per page.
 ///
-/// The edit closure is invoked once per page reaching operator analysis, in
-/// ascending selected-page order, pushing exactly one tally each time. Analysed
-/// pages surface either as an edited page (a conversion happened) or as an
-/// `Unchanged` skip (analysed, zero conversions). Collecting both and ordering
-/// by page index reproduces the closure-invocation order, so a positional zip is
-/// exact.
+/// The edit closure is invoked once per content-stream OBJECT reaching operator
+/// analysis, in `(page index, stream ordinal)` order, pushing exactly one tally
+/// each time. Each analysed stream surfaces either as an edited stream (a splice
+/// happened) or as an `Unchanged` skip (analysed, zero splices). Collecting both
+/// and ordering by `(page index, stream ordinal)` reproduces the closure-
+/// invocation order, so a positional zip is exact; the streams are then folded
+/// into one [`ConvertedPage`] per page (deterministic page order via `BTreeMap`),
+/// with `content_objects` in stream-ordinal order and every count summed.
 fn attach_tallies(
     edited: &[crate::content_edit_pipeline::PipelineEditedPage],
     skipped: &[PipelinePageSkip],
     tallies: Vec<PageTally>,
     routing: &LinkRouting,
 ) -> Vec<ConvertedPage> {
-    let mut analysed: Vec<(PageIndex, IndirectRef)> = Vec::new();
+    let mut analysed: Vec<AnalysedStream> = Vec::new();
     for page in edited {
-        analysed.push((page.page_index, page.content_object));
+        analysed.push(AnalysedStream {
+            page_index: page.page_index,
+            stream_ordinal: page.stream_ordinal,
+            content_object: page.content_object,
+        });
     }
     for skip in skipped {
         if skip.reason == PipelineSkipReason::Unchanged {
             if let Some(content_object) = skip.content_object {
-                analysed.push((skip.page_index, content_object));
+                analysed.push(AnalysedStream {
+                    page_index: skip.page_index,
+                    stream_ordinal: skip.stream_ordinal,
+                    content_object,
+                });
             }
         }
     }
-    analysed.sort_by_key(|(page_index, _)| page_index.0);
+    analysed.sort_by_key(|stream| (stream.page_index.0, stream.stream_ordinal));
 
-    analysed
+    let mut pages: BTreeMap<u32, PageAccumulator> = BTreeMap::new();
+    for (stream, tally) in analysed.into_iter().zip(tallies) {
+        let accumulator = pages
+            .entry(stream.page_index.0)
+            .or_insert_with(|| PageAccumulator {
+                content_objects: Vec::new(),
+                converted: 0,
+                black_preserved: 0,
+                skips: OperatorSkipCounts::default(),
+                link_converted: vec![0; routing.links().len()],
+            });
+        accumulator.content_objects.push(stream.content_object);
+        accumulator.converted += tally.converted;
+        accumulator.black_preserved += tally.black_preserved;
+        add_operator_skips(&mut accumulator.skips, &tally.skips);
+        for (slot, count) in accumulator
+            .link_converted
+            .iter_mut()
+            .zip(&tally.link_converted)
+        {
+            *slot += count;
+        }
+    }
+
+    pages
         .into_iter()
-        .zip(tallies)
-        .map(|((page_index, content_object), tally)| ConvertedPage {
-            page_index,
-            content_object,
-            operators_converted: tally.converted,
-            black_preserved: tally.black_preserved,
-            operator_skips: tally.skips,
-            links: link_counts(routing, &tally.link_converted),
+        .map(|(page_index, accumulator)| ConvertedPage {
+            page_index: PageIndex(page_index),
+            content_objects: accumulator.content_objects,
+            operators_converted: accumulator.converted,
+            black_preserved: accumulator.black_preserved,
+            operator_skips: accumulator.skips,
+            links: link_counts(routing, &accumulator.link_converted),
         })
         .collect()
+}
+
+/// Add one stream's operator-skip counts into a per-page aggregate.
+const fn add_operator_skips(total: &mut OperatorSkipCounts, part: &OperatorSkipCounts) {
+    total.no_matching_link += part.no_matching_link;
+    total.wrong_operand_count += part.wrong_operand_count;
+    total.non_number_operand += part.non_number_operand;
+    total.operand_out_of_range += part.operand_out_of_range;
+    total.selector_excluded += part.selector_excluded;
 }
 
 /// Build the per-page per-link report, one entry per supplied link in request

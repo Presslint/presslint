@@ -11,7 +11,122 @@ dictionary mutation built on it (`set_page_boxes_incremental`), the first
 (`rewrite_rgb_black_to_cmyk_incremental`, an exact syntactic RGB-black rewrite),
 and now the first REAL colour conversion of PDF content:
 `convert_content_colors_incremental`, a DeviceLink-driven direct device-colour
-conversion (F4-2), generalised to MULTI-LINK source-space routing (F4-5).
+conversion (F4-2), generalised to MULTI-LINK source-space routing (F4-5) and, as
+of T136, to MULTI-content-stream pages (each content-stream OBJECT edited
+independently).
+
+## T136 - Multi-Stream Page Colour Conversion (per-stream-object editing)
+
+`convert_content_colors_incremental` now converts direct device colour operators
+on MULTI-content-stream pages. Previously a page with more than one `/Contents`
+member was skipped whole as `MultipleContentStreams`; now each content-stream
+OBJECT of the page is located, ownership-gated, decoded, edited, re-encoded, and
+emitted as its OWN `PlannedDirtyObject` — N dirty objects in ONE incremental
+revision. The read side has concatenated multi-stream content since T105; T136
+brings the WRITE/edit path up to the same reachability without a concatenation
+buffer.
+
+### Per-stream-object design (`content_stream_plan.rs` + `content_edit_pipeline.rs`)
+
+The pipeline was split. The pure LOCATION step lives in the new sibling
+`content_stream_plan.rs`:
+
+- `LocatedContentStream { page_index, stream_ordinal, content_object,
+  object_byte_offset, extent }` — one source-addressable content-stream object.
+- `StreamOutcome::{ Located(..) | Skip { stream_ordinal, content_object, reason } }`
+  and `PageStreamsPlan::{ PageSkip { .. } | Streams(Vec<StreamOutcome>) }`.
+- `plan_page_streams(page, mode)` enumerates a page's `extents.entries`
+  (source-ordered, one per resolved `/Contents` reference) into ordered
+  per-stream outcomes.
+
+`content_edit_pipeline.rs` keeps the per-stream EDIT step: `plan_stream` runs the
+existing ownership-gate → dict/`/Length` → filter → decode → round-trip → edit →
+re-encode → `WholeStream` boundary machinery for ONE located object, producing a
+`StreamPlan::{ Edit { report, planned } | Skip(..) }`. All decode/edit/re-encode
+helpers are reused verbatim from the single-stream path.
+
+`StreamMode` gates the two behaviours. `StreamMode::SingleOnly` preserves the
+exact pre-T136 taxonomy (a >1-stream page is a whole-page `MultipleContentStreams`
+skip) and still backs `edit_page_content_incremental`, which
+`content_color_rewrite` (the superseded T126 syntactic rewrite) drives unchanged.
+`StreamMode::MultiStream` edits every stream object and backs the colour
+converter AND the no-op re-encoder (`reencode_page_content_incremental`, which now
+re-encodes each stream object of a multi-stream page byte/semantic-identically).
+
+### Ownership unit = the content-stream OBJECT
+
+Ownership is decided PER content-stream object via `decide_indirect_object_edit`
+over the existing owner map (`content_object_owners`, one owning leaf pushed per
+direct `/Contents` occurrence). An object referenced by more than one page is
+`Shared` → `PrivateCopy` → skipped as `OwnershipNotInPlace` (no private-copy/
+`/Kids` rewiring yet); its private siblings on the same page still convert.
+
+### Duplicate-dirty-object merge rule
+
+`write_incremental_revision_plan` rejects two dirty objects with the same object
+number. Two layers prevent that:
+
+1. `plan_page_streams` deduplicates by content object WITHIN a page: a page whose
+   `/Contents` names the same object twice (e.g. `[4 0 R 4 0 R]`) yields ONE
+   outcome for it. Since same-object edits are identical (same source bytes, same
+   deterministic edit), this IS the merge — the object is edited and counted
+   once. (`decide_indirect_object_edit` deduplicates consumers, so such a page
+   still proves single-use in-place.)
+2. `merge_duplicate_dirty_objects` is a defensive net over the global dirty-object
+   list before plan building (keeps the first per object number).
+
+### Reporting change: `content_objects: Vec<IndirectRef>`
+
+`ConvertedPage.content_object: IndirectRef` → `content_objects: Vec<IndirectRef>`,
+in stream-ordinal order (one entry per ANALYSED stream object; a single-stream
+page carries exactly one). Per-page aggregate counts (`operators_converted`,
+`black_preserved`, `operator_skips`, `links`) are summed across the page's
+streams. A per-stream structural skip (ownership, filter, round-trip, …) is one
+`ConvertPageSkip` carrying that stream's `content_object`. Determinism: analysed
+streams are ordered by `(page index, stream ordinal)` for the positional
+tally-zip, then folded per page via a `BTreeMap<u32, _>`; edited stream reports
+sort by `(page index, stream ordinal)`; the plan orders dirty objects by
+`IndirectRef`. No `HashMap` iteration order reaches any report or plan. The CLI
+default human report stays aggregate-per-page and the JSON wraps the library
+shape, so the rename flows through serde.
+
+### Honest boundary-spanning skip
+
+A colour operator split across a `/Contents` boundary is handled implicitly and
+honestly: per-stream tokenization sees only one stream's bytes, so a partial
+operator (operands with no operator, or an operator with the wrong operand count)
+is simply left byte-verbatim (counted under the existing per-operand skips). No
+cross-stream offset remapping is built.
+
+### Scope
+
+Uncompressed leaves with ordinary uncompressed content-stream objects only.
+Compressed leaves / compressed content-stream objects keep their existing skips
+(the write path is offset/provenance based); compressed-leaf conversion needs the
+resolved + ownership-safe edit design and stays OUT.
+
+### Copy budget
+
+Each content-stream object is decoded/edited/re-encoded ONCE, exactly as the
+single-stream path did — no concatenation buffer and no whole-page content copy
+beyond the per-object decoded bytes. The per-page location dedup uses a small
+`BTreeSet<IndirectRef>`; the report is O(streams). No per-operator heap churn
+beyond today's single-stream path.
+
+### Real-file validation (LOCAL only, never committed)
+
+Validated on a LOCAL-only multi-stream catalog (`_local/…` corpus + DeviceLink
+paths, never committed; `presslint convert … --device-link … -o …`), a 160-page
+CMYK catalog whose pages each carry two content streams:
+
+- BEFORE T136: 1/160 pages converted; 159 pages skipped as
+  `MultipleContentStreams { count: 2 }`.
+- AFTER T136: 160/160 pages analysed, 0 pages skipped (MultipleContentStreams
+  skips → 0), 956 direct device operators converted through a CMYK→CMYK link.
+- Output byte-prefix preserving (`sha256(input) == sha256(output[..input.len()])`,
+  ~225 KB appended) and reopens valid (a second convert reopens it: 160 analysed,
+  0 skipped — a CMYK→CMYK link re-touches `k`/`K` each pass, as expected).
+  COMMITTED tests stay SYNTHETIC and never reference the corpus path.
 
 ## T131 - Multi-Link Routing for DeviceLink Colour Conversion (F4-5)
 

@@ -8,6 +8,7 @@
 
 mod append;
 mod content_color_convert;
+mod content_color_convert_multistream;
 mod content_color_rewrite;
 mod link_routing;
 mod page_boxes;

@@ -54,6 +54,7 @@ mod black_preservation;
 mod content_color_convert;
 mod content_color_rewrite;
 mod content_edit_pipeline;
+mod content_stream_plan;
 mod link_routing;
 mod page_box_serialize;
 mod page_boxes;

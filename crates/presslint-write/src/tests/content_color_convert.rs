@@ -25,8 +25,8 @@ use presslint_types::PageIndex;
 
 use crate::{
     BlackPreservationPolicy, ConvertContentColorsError, ConvertContentColorsOutput,
-    ConvertContentColorsRequest, ConvertPageSkipReason, DeviceLinkInput, OperatorSkipCounts,
-    PageSelection, convert_content_colors_incremental,
+    ConvertContentColorsRequest, DeviceLinkInput, OperatorSkipCounts, PageSelection,
+    convert_content_colors_incremental,
 };
 
 use super::{reopen, xref_record};
@@ -55,7 +55,7 @@ pub(super) fn one_link(hex: &str) -> Vec<DeviceLinkInput> {
     }]
 }
 
-fn stream_body(dict_extra: &str, data: &[u8]) -> Vec<u8> {
+pub(super) fn stream_body(dict_extra: &str, data: &[u8]) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(
         format!("<< /Length {}{dict_extra} >>\nstream\n", data.len()).as_bytes(),
@@ -65,7 +65,7 @@ fn stream_body(dict_extra: &str, data: &[u8]) -> Vec<u8> {
     body
 }
 
-fn assemble_classic(bodies: &[Vec<u8>]) -> Vec<u8> {
+pub(super) fn assemble_classic(bodies: &[Vec<u8>]) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(b"%PDF-1.4\n");
     let mut offsets = Vec::new();
@@ -88,7 +88,7 @@ fn assemble_classic(bodies: &[Vec<u8>]) -> Vec<u8> {
     buf
 }
 
-fn page_body(contents: &str) -> Vec<u8> {
+pub(super) fn page_body(contents: &str) -> Vec<u8> {
     format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {contents} >>")
         .into_bytes()
 }
@@ -188,6 +188,11 @@ fn test_lookup(backend: &DocumentAccessBackend) -> ObjectLookup<'_> {
 }
 
 fn page_encoded_stream(bytes: &[u8]) -> Vec<u8> {
+    page_encoded_stream_at(bytes, 0, 0)
+}
+
+/// Encoded content-stream data of the `ordinal`-th located stream of `page`.
+pub(super) fn page_encoded_stream_at(bytes: &[u8], page: usize, ordinal: usize) -> Vec<u8> {
     let access = reopen(bytes);
     let lookup = test_lookup(&access.backend);
     let document = inspect_document_page_content_extents_with_lookup(
@@ -196,11 +201,11 @@ fn page_encoded_stream(bytes: &[u8]) -> Vec<u8> {
         access.page_tree_root.object_byte_offset,
     )
     .expect("locate content extents");
-    let page = &document.pages[0];
+    let page = &document.pages[page];
     let DocumentPageContentExtentResult::Inspected { extents, .. } = &page.result else {
         panic!("page content not inspected");
     };
-    let PageContentExtentInspection::Located { extent, .. } = &extents.entries[0] else {
+    let PageContentExtentInspection::Located { extent, .. } = &extents.entries[ordinal] else {
         panic!("page content not located");
     };
     content_stream_data_slice(bytes, extent)
@@ -265,7 +270,7 @@ pub(super) fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-fn occurrence_count(haystack: &[u8], needle: &[u8]) -> usize {
+pub(super) fn occurrence_count(haystack: &[u8], needle: &[u8]) -> usize {
     haystack
         .windows(needle.len())
         .filter(|window| *window == needle)
@@ -677,8 +682,10 @@ fn empty_page_index_request_is_rejected() {
 }
 
 #[test]
-fn structural_skip_is_reported_separately_from_converted() {
-    // Two content streams on one page is an inherited structural skip.
+fn multi_content_stream_page_is_no_longer_skipped_and_converts_both_streams() {
+    // Two content streams on one page: since T136 each content-stream object is
+    // edited independently, so the page converts instead of being skipped whole as
+    // `MultipleContentStreams`.
     let input = assemble_classic(&[
         CATALOG.to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
@@ -688,12 +695,20 @@ fn structural_skip_is_reported_separately_from_converted() {
     ]);
     let output = convert(&input, RGB_TO_CMYK_LINK);
 
-    assert!(output.converted.is_empty());
-    assert_eq!(output.skipped.len(), 1);
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    assert!(output.skipped.is_empty());
+    assert_eq!(output.converted.len(), 1);
+    let page = &output.converted[0];
+    assert_eq!(page.operators_converted, 2);
+    // Both content-stream objects are reported in stream-ordinal order.
     assert_eq!(
-        output.skipped[0].reason,
-        ConvertPageSkipReason::MultipleContentStreams { count: 2 }
+        page.content_objects
+            .iter()
+            .map(|reference| reference.object_number)
+            .collect::<Vec<_>>(),
+        vec![4, 5]
     );
+    assert!(reopen(&output.bytes).page_leaves.leaves.len() == 1);
 }
 
 #[test]

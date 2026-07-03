@@ -17,10 +17,10 @@ fn convert_report_warns_on_zero_conversion_and_skips() {
         bytes: b"%PDF".to_vec(),
         converted: vec![ConvertedPage {
             page_index: PageIndex(0),
-            content_object: IndirectRef {
+            content_objects: vec![IndirectRef {
                 object_number: 4,
                 generation: 0,
-            },
+            }],
             operators_converted: 0,
             black_preserved: 0,
             operator_skips: OperatorSkipCounts {
@@ -56,10 +56,10 @@ fn human_convert_report_surfaces_page_coverage_counts() {
         bytes: Vec::new(),
         converted: vec![ConvertedPage {
             page_index: PageIndex(1),
-            content_object: IndirectRef {
+            content_objects: vec![IndirectRef {
                 object_number: 7,
                 generation: 0,
-            },
+            }],
             operators_converted: 3,
             black_preserved: 1,
             operator_skips: OperatorSkipCounts {
@@ -89,10 +89,10 @@ fn json_convert_report_wraps_library_output_and_omits_pdf_bytes() {
         bytes: b"%PDF bytes must not appear in JSON".to_vec(),
         converted: vec![ConvertedPage {
             page_index: PageIndex(0),
-            content_object: IndirectRef {
+            content_objects: vec![IndirectRef {
                 object_number: 4,
                 generation: 0,
-            },
+            }],
             operators_converted: 2,
             black_preserved: 1,
             operator_skips: OperatorSkipCounts::default(),
@@ -110,6 +110,9 @@ fn json_convert_report_wraps_library_output_and_omits_pdf_bytes() {
     assert!(result["library_output"].get("converted").is_some());
     assert!(result["library_output"].get("skipped").is_some());
     assert!(result["library_output"].get("bytes").is_none());
+    let converted = &result["library_output"]["converted"][0];
+    assert!(converted.get("content_objects").is_some());
+    assert!(converted.get("content_object").is_none());
 }
 
 #[test]

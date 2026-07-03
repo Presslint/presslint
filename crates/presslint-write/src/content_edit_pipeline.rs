@@ -1,18 +1,28 @@
 //! Shared page-content decode -> edit -> encode -> whole-stream write pipeline.
+//!
+//! T136 makes this pipeline MULTI-content-stream aware: a page's `/Contents` may
+//! name more than one content-stream object, and each object is located,
+//! ownership-gated, decoded, edited, re-encoded, and emitted as its own
+//! [`PlannedDirtyObject`] — N dirty objects in ONE incremental revision. The
+//! per-stream LOCATION step lives in [`crate::content_stream_plan`]; this module
+//! owns the per-stream EDIT step and the revision assembly.
+//!
+//! Two stream modes are exposed. [`edit_page_content_incremental`] keeps the
+//! legacy single-stream taxonomy (a >1-stream page is skipped whole) for callers
+//! that have not adopted the per-stream model. The page-aware and re-encode
+//! callers drive [`StreamMode::MultiStream`] and edit every stream object.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use presslint_actions::{
     IncrementalRevisionPlan, MutationBoundary, PlannedDirtyObject, PlannedValueProvenance,
 };
 use presslint_pdf::{
-    ContentStreamDataExtentInspection, ContentStreamDataExtentInspectionRejection,
-    ContentStreamFilterClassification, DictionaryEntrySpan, DictionaryValueKind,
-    DocumentAccessBackend, DocumentAccessError, DocumentAccessRejection,
+    ContentStreamDataExtentInspection, ContentStreamFilterClassification, DictionaryEntrySpan,
+    DictionaryValueKind, DocumentAccessBackend, DocumentAccessError, DocumentAccessRejection,
     DocumentPageContentExtentInspection, DocumentPageContentExtentResult, FlateDecodeParameters,
     FlateDecodeParametersResolution, IndirectObjectEditDecision, IndirectObjectEditDisposition,
-    IndirectRef, ObjectLookup, ObjectLookupLocation, PageContentExtentInspection,
-    SkippedPageContentTargetReason, classify_content_stream_filter, content_stream_data_slice,
+    IndirectRef, ObjectLookup, classify_content_stream_filter, content_stream_data_slice,
     decide_indirect_object_edit, decode_flate_stream, encode_flate_stream, inspect_document_access,
     inspect_document_page_content_extents_with_lookup, inspect_indirect_object_dictionary,
     resolve_flate_decode_parameters,
@@ -22,7 +32,12 @@ use presslint_types::{ByteRange, PageIndex};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    PlannedWriteError, WriteError, stream_object_body::build_stream_object_body,
+    PlannedWriteError, WriteError,
+    content_stream_plan::{
+        LocatedContentStream, PageStreamsPlan, StreamMode, StreamOutcome, page_index_of,
+        plan_page_streams,
+    },
+    stream_object_body::build_stream_object_body,
     write_incremental_revision, write_incremental_revision_plan,
 };
 
@@ -55,17 +70,25 @@ pub enum EditedContent {
     Rewritten { decoded: Vec<u8>, edit_count: usize },
 }
 
+/// Report for one edited content-stream OBJECT (one stream of a page).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipelineEditedPage {
     pub page_index: PageIndex,
+    /// Zero-based source-order ordinal of this stream within the page's
+    /// `/Contents` (always `0` for a single-stream page).
+    pub stream_ordinal: usize,
     pub content_object: IndirectRef,
     pub filter_kind: PipelineFilterKind,
     pub edit_count: usize,
 }
 
+/// Structured skip for one content-stream slot (or a whole non-editable page).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipelinePageSkip {
     pub page_index: PageIndex,
+    /// Zero-based source-order ordinal of the skipped slot (`0` for a whole-page
+    /// skip that carries no per-stream detail).
+    pub stream_ordinal: usize,
     pub content_object: Option<IndirectRef>,
     pub reason: PipelineSkipReason,
 }
@@ -100,7 +123,10 @@ pub enum PipelineSkipReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditPageContentOutput {
     pub bytes: Vec<u8>,
+    /// Edited content-stream objects, ordered by `(page_index, stream_ordinal)`.
     pub edited: Vec<PipelineEditedPage>,
+    /// Skipped content-stream slots and whole-page skips, in `(page_index,
+    /// stream_ordinal)` source order.
     pub skipped: Vec<PipelinePageSkip>,
 }
 
@@ -122,11 +148,13 @@ pub enum EditPageContentError {
     },
 }
 
-/// Page-index-ignoring content edit: thin wrapper over
-/// [`edit_page_content_incremental_indexed`] that discards the page index.
+/// Single-content-stream content edit: a page with more than one content stream
+/// is skipped whole as [`PipelineSkipReason::MultipleContentStreams`].
 ///
-/// Kept so [`crate::reencode_content`] and [`crate::content_color_rewrite`], which
-/// do not need per-page context, stay byte-for-byte unchanged.
+/// Kept so [`crate::content_color_rewrite`] (whose skip taxonomy pins the
+/// single-stream shape) stays byte-for-byte unchanged. Callers that want
+/// per-stream editing drive [`edit_page_content_incremental_indexed`] with
+/// [`StreamMode::MultiStream`].
 pub fn edit_page_content_incremental<F>(
     input: &[u8],
     pages: &PageSelection,
@@ -135,17 +163,28 @@ pub fn edit_page_content_incremental<F>(
 where
     F: Fn(&[u8]) -> EditedContent,
 {
-    edit_page_content_incremental_indexed(input, pages, |_page_index, decoded| edit(decoded))
+    edit_page_content_incremental_indexed(input, pages, StreamMode::SingleOnly, |_page, decoded| {
+        edit(decoded)
+    })
 }
 
-/// Page-aware content edit: the edit closure receives the zero-based document
-/// [`PageIndex`] of the page whose decoded content-stream bytes it is editing, so
-/// callers such as the selector-targeted colour converter can evaluate per-page
-/// predicates. All decode/round-trip/re-encode/write mechanics are shared with
-/// (and identical to) the index-ignoring wrapper.
+/// Page-aware, MULTI-stream-capable content edit: the edit closure receives the
+/// zero-based document [`PageIndex`] of the page whose decoded content-stream
+/// bytes it is editing (the same page index is passed once per content-stream
+/// object of that page), so callers such as the selector-targeted colour
+/// converter can evaluate per-page predicates.
+///
+/// Each content-stream object of every selected page is located
+/// ([`plan_page_streams`]), ownership-gated
+/// ([`decide_indirect_object_edit`]) per object, decoded / edited / re-encoded
+/// independently, and emitted as one [`PlannedDirtyObject`]. All resulting dirty
+/// objects are written in ONE appended incremental revision; a content object
+/// reached more than once is edited and reported once and never yields two dirty
+/// objects with the same number.
 pub fn edit_page_content_incremental_indexed<F>(
     input: &[u8],
     pages: &PageSelection,
+    mode: StreamMode,
     edit: F,
 ) -> Result<EditPageContentOutput, EditPageContentError>
 where
@@ -176,14 +215,52 @@ where
     let mut dirty_objects: Vec<PlannedDirtyObject> = Vec::new();
 
     for index in selected {
-        match plan_page(input, &document.pages[index], &owners, &edit) {
-            PagePlan::Edit { report, planned } => {
-                edited.push(report);
-                dirty_objects.push(planned);
+        let page = &document.pages[index];
+        match plan_page_streams(page, mode) {
+            PageStreamsPlan::PageSkip {
+                content_object,
+                reason,
+            } => skipped.push(PipelinePageSkip {
+                page_index: page_index_of(page),
+                stream_ordinal: 0,
+                content_object,
+                reason,
+            }),
+            PageStreamsPlan::Streams(outcomes) => {
+                for outcome in outcomes {
+                    match outcome {
+                        StreamOutcome::Skip {
+                            stream_ordinal,
+                            content_object,
+                            reason,
+                        } => skipped.push(PipelinePageSkip {
+                            page_index: page_index_of(page),
+                            stream_ordinal,
+                            content_object,
+                            reason,
+                        }),
+                        StreamOutcome::Located(located) => {
+                            match plan_stream(input, &located, &owners, &edit) {
+                                StreamPlan::Edit { report, planned } => {
+                                    edited.push(report);
+                                    dirty_objects.push(planned);
+                                }
+                                StreamPlan::Skip(skip) => skipped.push(skip),
+                            }
+                        }
+                    }
+                }
             }
-            PagePlan::Skip(skip) => skipped.push(skip),
         }
     }
+
+    // DUPLICATE-DIRTY-OBJECT SAFETY: merge any dirty objects that share an object
+    // number down to one before plan building (the plan rejects duplicates). The
+    // per-page location dedup already guarantees uniqueness within a page and the
+    // ownership gate blocks cross-page sharing, so this is a defensive net that in
+    // practice removes nothing; keeping the first is exact because same-object
+    // edits are identical.
+    merge_duplicate_dirty_objects(&mut dirty_objects);
 
     let bytes = if dirty_objects.is_empty() {
         write_incremental_revision(input, &[]).map_err(|error| EditPageContentError::Write {
@@ -198,7 +275,7 @@ where
         })?
     };
 
-    edited.sort_by_key(|report| report.page_index.0);
+    edited.sort_by_key(|report| (report.page_index.0, report.stream_ordinal));
 
     Ok(EditPageContentOutput {
         bytes,
@@ -249,6 +326,12 @@ fn select_indices(
     }
 }
 
+/// Build the per-content-object owner map from every enumerated page's
+/// `/Contents` references.
+///
+/// The key is the content-stream object; the value lists one owning leaf per
+/// direct `/Contents` occurrence (a page naming an object twice pushes it twice,
+/// so the ownership decision — which deduplicates — still proves single use).
 fn content_object_owners(
     pages: &[DocumentPageContentExtentInspection],
 ) -> BTreeMap<IndirectRef, Vec<IndirectRef>> {
@@ -271,7 +354,15 @@ fn content_object_owners(
     owners
 }
 
-enum PagePlan {
+/// Drop dirty objects that repeat an object number already planned, keeping the
+/// first. Same-object edits are identical, so this is a merge, not a loss.
+fn merge_duplicate_dirty_objects(dirty_objects: &mut Vec<PlannedDirtyObject>) {
+    let mut seen: BTreeSet<u32> = BTreeSet::new();
+    dirty_objects.retain(|dirty| seen.insert(dirty.reference.object_number));
+}
+
+/// Plan for one located content-stream object.
+enum StreamPlan {
     Edit {
         report: PipelineEditedPage,
         planned: PlannedDirtyObject,
@@ -279,41 +370,31 @@ enum PagePlan {
     Skip(PipelinePageSkip),
 }
 
-struct LocatedStream<'a> {
-    content_object: IndirectRef,
-    object_byte_offset: usize,
-    extent: &'a ContentStreamDataExtentInspection,
-}
-
-fn plan_page<F>(
+/// Ownership-gate, decode, edit, re-encode, and build one located stream object.
+fn plan_stream<F>(
     input: &[u8],
-    page: &DocumentPageContentExtentInspection,
+    located: &LocatedContentStream<'_>,
     owners: &BTreeMap<IndirectRef, Vec<IndirectRef>>,
     edit: &F,
-) -> PagePlan
+) -> StreamPlan
 where
     F: Fn(PageIndex, &[u8]) -> EditedContent,
 {
-    let page_index = page_index_of(page);
-    let located = match locate_single_stream(page) {
-        Ok(located) => located,
-        Err((content_object, reason)) => {
-            return PagePlan::Skip(PipelinePageSkip {
-                page_index,
-                content_object,
-                reason,
-            });
-        }
-    };
+    let page_index = located.page_index;
+    let stream_ordinal = located.stream_ordinal;
     let content_object = located.content_object;
     let skip = |reason: PipelineSkipReason| {
-        PagePlan::Skip(PipelinePageSkip {
+        StreamPlan::Skip(PipelinePageSkip {
             page_index,
+            stream_ordinal,
             content_object: Some(content_object),
             reason,
         })
     };
 
+    // OWNERSHIP unit = the content-stream OBJECT: an object referenced by more than
+    // one page (or twice with distinct owners) is not a single-use in-place
+    // mutation, so it is skipped (no private-copy yet).
     let consumers = owners
         .get(&content_object)
         .map_or([].as_slice(), Vec::as_slice);
@@ -358,9 +439,10 @@ where
     );
     let boundary = whole_stream_boundary(content_object, located.extent, &decision);
 
-    PagePlan::Edit {
+    StreamPlan::Edit {
         report: PipelineEditedPage {
             page_index,
+            stream_ordinal,
             content_object,
             filter_kind: filter,
             edit_count: new_data.edit_count,
@@ -370,114 +452,6 @@ where
             boundaries: vec![boundary],
             body_bytes: body,
         },
-    }
-}
-
-fn locate_single_stream(
-    page: &DocumentPageContentExtentInspection,
-) -> Result<LocatedStream<'_>, (Option<IndirectRef>, PipelineSkipReason)> {
-    // Only an `Inspected` result carries a locatable single content stream. A
-    // `ContentsFailed`, a `CompressedLeaf`, or a `CompressedLeafInspected` leaf all
-    // fall into this `NoContentStream` skip path. A compressed leaf has no source
-    // offset for its dictionary, so compressed-leaf CONVERSION needs a separate
-    // resolved + ownership-safe edit design (out of scope); this READ-ONLY inventory
-    // slice never edits it. No write behaviour changes.
-    //
-    // (In practice the write pipeline drives the OFFSET-based
-    // `inspect_document_page_content_extents_with_lookup`, which never emits either
-    // compressed-leaf variant; this arm keeps the match total and future-proof.)
-    let DocumentPageContentExtentResult::Inspected {
-        contents, extents, ..
-    } = &page.result
-    else {
-        return Err((None, PipelineSkipReason::NoContentStream));
-    };
-
-    let count = contents.contents.len();
-    if count == 0 {
-        return Err((None, PipelineSkipReason::NoContentStream));
-    }
-    if count > 1 || !contents.skipped.is_empty() {
-        return Err((None, PipelineSkipReason::MultipleContentStreams { count }));
-    }
-
-    match extents.entries.first() {
-        Some(PageContentExtentInspection::Located {
-            content_reference,
-            object_byte_offset,
-            extent,
-        }) => {
-            if matches!(extent, ContentStreamDataExtentInspection::IndirectLength(_)) {
-                return Err((
-                    Some(content_reference.reference),
-                    PipelineSkipReason::IndirectLength,
-                ));
-            }
-            Ok(LocatedStream {
-                content_object: content_reference.reference,
-                object_byte_offset: *object_byte_offset,
-                extent,
-            })
-        }
-        Some(PageContentExtentInspection::Skipped {
-            content_reference,
-            reason,
-        }) => Err((
-            Some(content_reference.reference),
-            skip_reason_from_target(reason),
-        )),
-        Some(PageContentExtentInspection::Failed {
-            content_reference,
-            error,
-            ..
-        }) => Err((
-            Some(content_reference.reference),
-            skip_reason_from_extent_failure(&error.reason),
-        )),
-        None => Err((None, PipelineSkipReason::NoContentStream)),
-    }
-}
-
-const fn skip_reason_from_target(reason: &SkippedPageContentTargetReason) -> PipelineSkipReason {
-    if let SkippedPageContentTargetReason::UnresolvedLookupLocation {
-        location:
-            ObjectLookupLocation::XrefStreamCompressed {
-                object_stream_number,
-                index_within_object_stream,
-                ..
-            },
-    } = reason
-    {
-        return PipelineSkipReason::CompressedContentObject {
-            object_stream_number: *object_stream_number,
-            index_within_object_stream: *index_within_object_stream,
-        };
-    }
-    PipelineSkipReason::NoContentStream
-}
-
-const fn skip_reason_from_extent_failure(
-    reason: &ContentStreamDataExtentInspectionRejection,
-) -> PipelineSkipReason {
-    match reason {
-        ContentStreamDataExtentInspectionRejection::MissingLength
-        | ContentStreamDataExtentInspectionRejection::DuplicateLength { .. } => {
-            PipelineSkipReason::MissingOrDuplicateLength
-        }
-        ContentStreamDataExtentInspectionRejection::UnsupportedLengthValueKind { value_kind } => {
-            PipelineSkipReason::NonDirectNumericLength {
-                value_kind: *value_kind,
-            }
-        }
-        ContentStreamDataExtentInspectionRejection::IndirectLengthRequiresXrefTable
-        | ContentStreamDataExtentInspectionRejection::IndirectLength { .. }
-        | ContentStreamDataExtentInspectionRejection::LookupIndirectLength { .. } => {
-            PipelineSkipReason::IndirectLength
-        }
-        ContentStreamDataExtentInspectionRejection::StreamStart { .. }
-        | ContentStreamDataExtentInspectionRejection::DirectLength { .. } => {
-            PipelineSkipReason::NoContentStream
-        }
     }
 }
 
@@ -608,8 +582,4 @@ fn whole_stream_boundary(
             object: content_object,
         },
     }
-}
-
-fn page_index_of(page: &DocumentPageContentExtentInspection) -> PageIndex {
-    PageIndex(u32::try_from(page.ordinal).unwrap_or(u32::MAX))
 }

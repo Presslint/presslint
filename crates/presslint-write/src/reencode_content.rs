@@ -1,8 +1,12 @@
-//! Semantic **no-op** content-stream re-encode over single-content-stream pages.
+//! Semantic **no-op** content-stream re-encode over page content streams.
 //!
 //! This public T125 wrapper preserves the original API and skip taxonomy while
 //! delegating the shared locate -> decode -> edit -> encode -> `WholeStream` write
-//! mechanics to `content_edit_pipeline`.
+//! mechanics to `content_edit_pipeline`. Since T136 it drives the per-stream
+//! ([`StreamMode::MultiStream`]) path, so a MULTI-content-stream page re-encodes
+//! each of its content-stream objects independently (one [`ReencodedPage`] per
+//! object) instead of being skipped whole; the no-op stays byte/semantic-identical
+//! per object.
 
 use presslint_pdf::{
     DictionaryValueKind, DocumentAccessError, IndirectObjectEditDisposition, IndirectRef,
@@ -13,8 +17,9 @@ use crate::{
     PlannedWriteError, WriteError,
     content_edit_pipeline::{
         EditPageContentError, EditedContent, PageSelection, PipelineEditedPage, PipelineFilterKind,
-        PipelinePageSkip, PipelineSkipReason, edit_page_content_incremental,
+        PipelinePageSkip, PipelineSkipReason, edit_page_content_incremental_indexed,
     },
+    content_stream_plan::StreamMode,
 };
 
 /// Request to re-encode selected pages' single content streams as a no-op.
@@ -61,8 +66,9 @@ pub struct ReencodePageSkip {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum ReencodePageSkipReason {
-    /// The page declared more than one content stream; this slice edits
-    /// single-stream pages only.
+    /// Retained for API stability. Since T136 the re-encode path edits every
+    /// content-stream object of a multi-stream page, so this variant is no longer
+    /// produced.
     MultipleContentStreams {
         /// Number of direct `/Contents` references observed.
         count: usize,
@@ -162,12 +168,16 @@ pub fn reencode_page_content_incremental(
     input: &[u8],
     request: &ReencodePageContentRequest,
 ) -> Result<ReencodePageContentOutput, ReencodePageContentError> {
-    let output =
-        edit_page_content_incremental(input, &request.pages, |decoded| EditedContent::Rewritten {
+    let output = edit_page_content_incremental_indexed(
+        input,
+        &request.pages,
+        StreamMode::MultiStream,
+        |_page_index, decoded| EditedContent::Rewritten {
             decoded: decoded.to_vec(),
             edit_count: 0,
-        })
-        .map_err(map_error)?;
+        },
+    )
+    .map_err(map_error)?;
 
     Ok(ReencodePageContentOutput {
         bytes: output.bytes,

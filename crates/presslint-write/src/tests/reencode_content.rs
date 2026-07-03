@@ -230,6 +230,35 @@ fn page_stream(bytes: &[u8], page_index: usize) -> (Vec<u8>, usize) {
     (data, *object_byte_offset)
 }
 
+/// Return a page's `ordinal`-th located content-stream encoded data plus its
+/// resolved object byte offset.
+fn page_stream_at_ordinal(bytes: &[u8], page_index: usize, ordinal: usize) -> (Vec<u8>, usize) {
+    let access = reopen(bytes);
+    let lookup = test_lookup(&access.backend);
+    let document = inspect_document_page_content_extents_with_lookup(
+        bytes,
+        lookup,
+        access.page_tree_root.object_byte_offset,
+    )
+    .expect("locate content extents");
+    let page = &document.pages[page_index];
+    let DocumentPageContentExtentResult::Inspected { extents, .. } = &page.result else {
+        panic!("page {page_index} content not inspected");
+    };
+    let PageContentExtentInspection::Located {
+        extent,
+        object_byte_offset,
+        ..
+    } = &extents.entries[ordinal]
+    else {
+        panic!("page {page_index} stream {ordinal} not located");
+    };
+    let data = content_stream_data_slice(bytes, extent)
+        .expect("slice")
+        .to_vec();
+    (data, *object_byte_offset)
+}
+
 /// Dictionary bytes (`<< ... >>`) of a page's content-stream object.
 fn content_dict_bytes(bytes: &[u8], page_index: usize) -> Vec<u8> {
     let (_, offset) = page_stream(bytes, page_index);
@@ -352,15 +381,30 @@ fn reopens_on_an_xref_stream_fixture() {
 }
 
 #[test]
-fn multiple_content_streams_are_skipped() {
+fn multiple_content_streams_each_reencode_without_regression() {
+    // Since T136 the re-encode path edits every content-stream object of a
+    // multi-stream page independently: both objects (4 and 5) re-encode as a
+    // byte/semantic-identical no-op, none is skipped, and the input is preserved
+    // verbatim as the output prefix.
     let input = classic_multi_stream_pdf();
     let output = reencode(&input, PageSelection::All);
-    assert!(output.reencoded.is_empty());
-    assert_eq!(output.skipped.len(), 1);
-    assert_eq!(
-        output.skipped[0].reason,
-        ReencodePageSkipReason::MultipleContentStreams { count: 2 }
-    );
+
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    assert!(output.skipped.is_empty());
+    assert_eq!(output.reencoded.len(), 2);
+    let objects: Vec<u32> = output
+        .reencoded
+        .iter()
+        .map(|page| page.content_object.object_number)
+        .collect();
+    assert_eq!(objects, vec![4, 5]);
+    // Both re-encoded streams decode back to their original content.
+    let (first, _) = page_stream_at_ordinal(&output.bytes, 0, 0);
+    let (second, _) = page_stream_at_ordinal(&output.bytes, 0, 1);
+    assert_eq!(first, b"q Q\n");
+    assert_eq!(second, b"q Q\n");
+    // The output reopens with the single leaf intact.
+    assert_eq!(leaf_numbers(&reopen(&output.bytes)), vec![3]);
 }
 
 #[test]
