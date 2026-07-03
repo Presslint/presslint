@@ -119,7 +119,8 @@ pub use document_access::{
 pub use document_page_content_extents::{
     DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
     DocumentPageContentExtentsInspection, DocumentPageContentExtentsInspectionError,
-    inspect_document_page_content_extents, inspect_document_page_content_extents_with_lookup,
+    inspect_document_page_content_extents, inspect_document_page_content_extents_resolved,
+    inspect_document_page_content_extents_with_lookup,
 };
 pub use form_xobject_resources::{FormXObjectResourcesInspection, inspect_form_xobject_resources};
 pub use image_xobject::{

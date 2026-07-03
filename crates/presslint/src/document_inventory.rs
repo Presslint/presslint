@@ -76,6 +76,15 @@ pub enum ClassicPdfInventorySkip {
         /// Delegated page `/Contents` inspection failure.
         error: presslint_pdf::PageContentsInspectionError,
     },
+    /// The leaf `/Page` object is a type-2 compressed object-stream member; the
+    /// classic offset-based path never produces this, but the shared skip
+    /// vocabulary carries it so the conversion stays total.
+    CompressedLeaf {
+        /// Object number of the containing object stream.
+        object_stream_number: usize,
+        /// Index of this object inside the object stream.
+        index_within_object_stream: usize,
+    },
     /// The page had no content-stream targets.
     NoContentStreams,
     /// The page had more than one content-stream target.
@@ -324,6 +333,18 @@ pub fn decode_page_content<'input>(
                 error: error.clone(),
             });
         }
+        // A compressed leaf `/Page` has no source byte offset to read a
+        // `/Contents` value from, so it is enumerated and honestly skipped rather
+        // than inventoried; compressed-leaf content inventory is a follow-up.
+        DocumentPageContentExtentResult::CompressedLeaf {
+            object_stream_number,
+            index_within_object_stream,
+        } => {
+            return Err(InventoryPageSkip::CompressedLeaf {
+                object_stream_number: *object_stream_number,
+                index_within_object_stream: *index_within_object_stream,
+            });
+        }
     };
 
     if extents.entries.is_empty() {
@@ -350,6 +371,11 @@ pub fn decode_page_content<'input>(
 pub enum InventoryPageSkip {
     ContentsFailed {
         error: presslint_pdf::PageContentsInspectionError,
+    },
+    /// The leaf `/Page` object is a type-2 compressed object-stream member.
+    CompressedLeaf {
+        object_stream_number: usize,
+        index_within_object_stream: usize,
     },
     NoContentStreams,
     MultipleContentStreams {
@@ -404,6 +430,13 @@ impl From<InventoryPageSkip> for ClassicPdfInventorySkip {
     fn from(skip: InventoryPageSkip) -> Self {
         match skip {
             InventoryPageSkip::ContentsFailed { error } => Self::ContentsFailed { error },
+            InventoryPageSkip::CompressedLeaf {
+                object_stream_number,
+                index_within_object_stream,
+            } => Self::CompressedLeaf {
+                object_stream_number,
+                index_within_object_stream,
+            },
             InventoryPageSkip::NoContentStreams => Self::NoContentStreams,
             InventoryPageSkip::MultipleContentStreams { stream_count } => {
                 Self::MultipleContentStreams { stream_count }

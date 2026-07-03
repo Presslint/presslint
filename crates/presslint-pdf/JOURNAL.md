@@ -1,8 +1,53 @@
 # presslint-pdf Journal
 
-Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.md).
+Older accumulated journal history lives in [JOURNAL-archive-2.md](JOURNAL-archive-2.md).
 
 ## Current State
+
+### T133 - Resolved-Object-Aware Content-Extents (Compressed Page-Tree Navigation)
+
+- Adds `inspect_document_page_content_extents_resolved(input, lookup,
+  resolved_root: &ResolvedObjectData, max_decoded_object_stream_bytes)`, the
+  resolved-object-aware sibling of
+  `inspect_document_page_content_extents_with_lookup`. It enumerates leaves via
+  the existing `inspect_page_tree_leaves_resolved` (T114), so a page tree whose
+  ROOT or INTERMEDIATE `/Pages` nodes are type-2 compressed object-stream members
+  navigates to its leaves instead of hard-failing when the offset-only walk reads
+  an indirect-object header at the fabricated offset `0`. Leaf order is preserved
+  exactly (`leaves.leaves.iter().copied().enumerate()`).
+- `DocumentPageContentExtentResult` gains an additive serde-tagged variant
+  `CompressedLeaf { object_stream_number, index_within_object_stream }`. Per
+  enumerated leaf the resolved bridge branches on `leaf.position`: an
+  `Uncompressed` leaf runs the SAME offset-only `/Contents` → target → extent
+  path as the legacy bridge (extracted into a shared
+  `content_extent_result_at_offset` helper, so uncompressed leaves stay
+  byte-identical); a `Compressed` leaf becomes `CompressedLeaf` — its `/Contents`
+  is never read through the offset-only path and offset `0` is never fed into
+  `inspect_page_contents`. `DocumentPageContentExtentInspection::is_located`
+  returns `false` for `CompressedLeaf`.
+- The offset-based `inspect_document_page_content_extents` and
+  `inspect_document_page_content_extents_with_lookup` are unchanged (no signature
+  change); classic/legacy callers stay byte-identical. Compressed-LEAF CONTENT
+  inventory (resolving a compressed leaf `/Page` dict from its `/ObjStm` and
+  reading its `/Contents`) is a deliberate follow-up: `inspect_page_contents` is
+  offset-only, so a resolved `/Contents` path is needed first.
+- Performance/copy budget: the report still carries only offsets, ordinals, small
+  enums, and delegated per-leaf reports — no PDF bytes, object bodies, or decoded
+  object-stream buffers are retained. The resolved leaf enumeration decodes object
+  streams bounded by `max_decoded_object_stream_bytes` (already threaded); this
+  bridge adds no per-leaf object-stream re-decode of its own.
+- Tests (synthetic fixtures only, reusing the T113/T114 `/ObjStm` builders):
+  a compressed INTERMEDIATE `/Pages` node with uncompressed leaves now enumerates
+  and inspects those leaves where the offset-only bridge skipped them; a
+  compressed ROOT feeds offset `0` into the legacy bridge (reproduced hard error)
+  yet the resolved bridge navigates it; compressed leaves report `CompressedLeaf`
+  (never located, serde round-trips with the `compressed_leaf` tag and leaks no
+  member body bytes); a focused `is_located`-false unit test. Real before/after:
+  no local corpus is checked into the public tree, so the 104MB reproduction is
+  validated on a LOCAL-only file (`_local/…` corpus path, never committed) —
+  `presslint audit` moved from a hard `PageContentExtents`/`PageTreeKidTargets ->
+  MalformedHeader` failure to returning an audit; the synthetic fixtures above
+  model that exact failure shape.
 
 ### T122 - Accept Single-Filter DecodeParms Arrays
 
@@ -714,57 +759,3 @@ Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.
 - Deferred: this slice does not thread the new lookup through page-tree/document
   access, follow `/Prev`, merge incremental xref sections, support hybrid
   references, or extract object streams. That remains future spine wiring.
-
-### T100 - Navigate Single-Section Xref Streams Through Document Access
-
-- Threads the T099 `ObjectLookup<'_>` boundary through page-tree traversal with
-  `_with_lookup` variants for `inspect_page_tree_reference_target`,
-  `inspect_page_tree_kid_targets`, and `inspect_page_tree_leaves`. The generic
-  path resolves references via `locate_xref_object`, accepts only classic in-use
-  or xref-stream uncompressed entries, preserves the generation check and node
-  type classification flow, and reports compressed/reserved xref-stream entries
-  as structured unresolved skips rather than fabricated offsets.
-- Keeps the classic helpers as compatibility wrappers over
-  `ObjectLookup::ClassicXref`, preserving their report and error shapes. Classic
-  unresolved locate results are mapped back to the existing
-  `UnresolvedXrefLocation` rejection while xref-stream-only failures use the new
-  backend-neutral `UnresolvedLookupLocation` variant.
-- Adds the neutral `inspect_document_access(input)` spine. It selects the
-  backend from `startxref` section classification: classic tables parse the
-  matching classic xref/trailer, while `/Type /XRef` sections decode exactly one
-  xref stream and read `/Root` from that section's trailer data. Both paths then
-  resolve the catalog, catalog `/Pages`, page-tree root, and document-ordered
-  leaves through `resolve_xref_object_offset` and the lookup-backed page-tree
-  walk.
-- Adds `DocumentAccess`, `DocumentAccessBackend`, `DocumentAccessError`, and
-  `DocumentAccessRejection` as the backend-neutral report and rejection taxonomy.
-  The report retains only structural metadata from delegated inspections and no
-  PDF source bytes, object bodies, stream bodies, decoded stream buffers, or
-  source slices.
-- A decoded xref-stream section with `/Prev` now stops with
-  `PrevPresentUnsupported { prev_byte_offset }`. The spine never follows the
-  offset, decodes a previous section, merges incremental entries, or consults
-  hybrid-reference `/XRefStm` data.
-- Focused tests cover classic-delegation parity for the new lookup-backed
-  helpers, xref-stream-backed page-tree leaf enumeration, neutral classic and
-  `/FlateDecode` xref-stream document navigation, the `/Prev` stop,
-  backend-selection and per-stage failures, compressed xref-stream entries as
-  non-leaf skips, no-retained-bytes checks, and serde round-trips for the new
-  neutral report and rejection shapes.
-- Deferred: `/Prev` chaining, multi-section merging, `/XRefStm` hybrid-reference
-  support, object-stream extraction, type-2 compressed-object resolution,
-  document-level object maps/caches/openers, and filesystem I/O remain separate
-  future work.
-
-### T124 - Add Deterministic Flate Encode
-
-- Adds `encode_flate_stream(input, input_limit)`, a pure byte transform that
-  rejects inputs over the caller bound with `InputLimitExceeded`, then emits a
-  zlib-wrapped `/FlateDecode` payload via
-  `miniz_oxide::deflate::compress_to_vec_zlib`.
-- Pins `FLATE_ENCODE_LEVEL` to `6`; no date, random, dictionary, predictor, or
-  platform-dependent option is introduced. Output is one owned `Vec<u8>` and
-  the borrowed input is not retained.
-- Tests cover empty, small, large, high-entropy, already-compressed, and real
-  decoded content-stream bodies, deterministic repeat encode, default-parameter
-  decode round-trip, bounded rejection, and the structured error shape.

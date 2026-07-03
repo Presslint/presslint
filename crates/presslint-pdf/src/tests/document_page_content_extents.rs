@@ -11,10 +11,11 @@ use serde_harness::{from_serde_value, serde_value};
 
 use crate::{
     ClassicXrefEntryState, ClassicXrefTableInspection, ContentStreamDataExtentInspection,
-    DocumentPageContentExtentResult, DocumentPageContentExtentsInspection, ObjectLookup,
-    PageContentExtentInspection, PageContentsInspectionRejection, PageTreeLeavesTruncation,
-    SkippedPageTreeLeafReason, XrefStreamEntry, XrefStreamEntryRecord, XrefStreamSection,
-    inspect_classic_xref_table, inspect_document_page_content_extents,
+    DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
+    DocumentPageContentExtentsInspection, ObjectLookup, PageContentExtentInspection,
+    PageContentsInspectionRejection, PageTreeLeaf, PageTreeLeavesTruncation,
+    ResolvedObjectPosition, SkippedPageTreeLeafReason, XrefStreamEntry, XrefStreamEntryRecord,
+    XrefStreamSection, inspect_classic_xref_table, inspect_document_page_content_extents,
     inspect_document_page_content_extents_with_lookup,
 };
 
@@ -308,6 +309,26 @@ fn document_page_content_extents_preserves_leaf_skips_and_truncation_separately(
             PageContentsInspectionRejection::MissingContents
         );
     }
+}
+
+#[test]
+fn compressed_leaf_result_is_never_located() {
+    let page = DocumentPageContentExtentInspection {
+        ordinal: 0,
+        leaf: PageTreeLeaf {
+            reference: indirect_ref(3, 0),
+            object_byte_offset: 0,
+            position: ResolvedObjectPosition::Compressed {
+                object_stream_number: 5,
+                index_within_object_stream: 2,
+            },
+        },
+        result: DocumentPageContentExtentResult::CompressedLeaf {
+            object_stream_number: 5,
+            index_within_object_stream: 2,
+        },
+    };
+    assert!(!page.is_located());
 }
 
 #[test]

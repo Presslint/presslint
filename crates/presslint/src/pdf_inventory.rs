@@ -3,12 +3,13 @@
 use presslint_inventory::Inventory;
 use presslint_pdf::{
     ContentStreamDataExtentInspectionError, ContentStreamDataSliceError,
-    ContentStreamFilterClassification, ContentStreamFilterClassificationError,
-    DocumentAccessBackend, DocumentAccessError, DocumentPageContentExtentsInspectionError,
+    ContentStreamFilterClassification, ContentStreamFilterClassificationError, DocumentAccess,
+    DocumentAccessBackend, DocumentAccessError, DocumentAccessRejection,
+    DocumentPageContentExtentsInspection, DocumentPageContentExtentsInspectionError,
     FlateDecodeParametersResolution, FlateDecodeParametersResolutionError, FlateDecodeStreamError,
     ObjectLookup, SkippedPageContentTargetReason, inspect_document_access,
-    inspect_document_page_content_extents_with_lookup,
-    inspect_document_page_xobject_resources_with_lookup,
+    inspect_document_page_content_extents_resolved,
+    inspect_document_page_xobject_resources_with_lookup, resolve_object,
 };
 use presslint_types::PageIndex;
 use serde::{Deserialize, Serialize};
@@ -79,6 +80,16 @@ pub enum PdfInventorySkip {
     ContentsFailed {
         /// Delegated page `/Contents` inspection failure.
         error: presslint_pdf::PageContentsInspectionError,
+    },
+    /// The leaf `/Page` object is a type-2 compressed object-stream member. The
+    /// page is COUNTED as enumerated with zero colour observations; its content
+    /// is a coverage gap (`SkippedPage`) rather than a hard failure, since
+    /// compressed-leaf content inventory is a deliberate follow-up.
+    CompressedLeaf {
+        /// Object number of the containing object stream.
+        object_stream_number: usize,
+        /// Index of this object inside the object stream.
+        index_within_object_stream: usize,
     },
     /// The page had no content-stream targets.
     NoContentStreams,
@@ -201,9 +212,9 @@ pub enum PdfInventoryRejection {
 /// The bridge accepts borrowed PDF bytes and never mutates them. It supports a
 /// classic-xref backend, bounded same-type classic-table `/Prev` chains, one
 /// `/Type /XRef` stream backend, and bounded same-type xref-stream `/Prev`
-/// chains selected by [`inspect_document_access`], then locates page
-/// content-stream data extents through
-/// [`inspect_document_page_content_extents_with_lookup`].
+/// chains selected by [`inspect_document_access`], then resolves the page-tree
+/// root and locates page content-stream data extents through the resolved
+/// content-extents bridge.
 ///
 /// Raw single streams are passed to syntax and inventory as borrowed slices.
 /// Flate streams allocate only the bounded decoded buffer returned by
@@ -240,19 +251,7 @@ pub fn build_pdf_inventory(
         }
         DocumentAccessBackend::XrefStreamChain { chain } => ObjectLookup::XrefStreamChain(chain),
     };
-    let extents = inspect_document_page_content_extents_with_lookup(
-        input,
-        lookup,
-        access.page_tree_root.object_byte_offset,
-    )
-    .map_err(|error| {
-        inventory_error(
-            input,
-            PdfInventoryRejection::PageContentExtents {
-                error: Box::new(error),
-            },
-        )
-    })?;
+    let extents = resolved_page_content_extents(input, lookup, &access, max_decoded_stream_bytes)?;
     let xobject_resources = inspect_document_page_xobject_resources_with_lookup(
         input,
         lookup,
@@ -329,6 +328,13 @@ impl From<InventoryPageSkip> for PdfInventorySkip {
     fn from(skip: InventoryPageSkip) -> Self {
         match skip {
             InventoryPageSkip::ContentsFailed { error } => Self::ContentsFailed { error },
+            InventoryPageSkip::CompressedLeaf {
+                object_stream_number,
+                index_within_object_stream,
+            } => Self::CompressedLeaf {
+                object_stream_number,
+                index_within_object_stream,
+            },
             InventoryPageSkip::NoContentStreams => Self::NoContentStreams,
             InventoryPageSkip::MultipleContentStreams { stream_count } => {
                 Self::MultipleContentStreams { stream_count }
@@ -406,6 +412,56 @@ impl From<InventoryPageSkip> for PdfInventorySkip {
             },
         }
     }
+}
+
+/// Re-resolve the page-tree root to body-aware data and locate document page
+/// content-stream extents through the resolved bridge.
+///
+/// `access.page_tree_root` is a `ResolvedStructuralObject`, which does NOT retain
+/// the decoded bytes of a compressed page-tree root, so this re-resolves the root
+/// to `ResolvedObjectData` and routes through
+/// [`inspect_document_page_content_extents_resolved`]. That lets a page tree
+/// whose root or intermediate `/Pages` nodes are compressed object-stream members
+/// navigate to its leaves instead of hard-failing on an offset-0 header read.
+/// Exactly one `resolve_object` runs for the root; the resolved leaf enumeration
+/// owns any bounded object-stream decode, capped by `max_decoded_stream_bytes`.
+fn resolved_page_content_extents(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    access: &DocumentAccess,
+    max_decoded_stream_bytes: usize,
+) -> Result<DocumentPageContentExtentsInspection, PdfInventoryError> {
+    let resolved_root = resolve_object(
+        input,
+        lookup,
+        access.page_tree_root.reference,
+        max_decoded_stream_bytes,
+    )
+    .map_err(|error| {
+        inventory_error(
+            input,
+            PdfInventoryRejection::DocumentAccess {
+                error: Box::new(DocumentAccessError {
+                    byte_len: input.len(),
+                    reason: DocumentAccessRejection::PagesObject { error },
+                }),
+            },
+        )
+    })?;
+    inspect_document_page_content_extents_resolved(
+        input,
+        lookup,
+        &resolved_root,
+        max_decoded_stream_bytes,
+    )
+    .map_err(|error| {
+        inventory_error(
+            input,
+            PdfInventoryRejection::PageContentExtents {
+                error: Box::new(error),
+            },
+        )
+    })
 }
 
 const fn inventory_error(input: &[u8], reason: PdfInventoryRejection) -> PdfInventoryError {

@@ -9,9 +9,9 @@ use serde_harness::{from_serde_value, serde_value};
 
 use super::{classic_pdf, multi_stream_page_pdf, single_page_pdf, vector_content};
 use crate::{
-    ClassicPdfInventoryPageResult, ObjectKind, PdfInventory, PdfInventoryError, PdfInventoryPage,
-    PdfInventoryPageResult, PdfInventoryRejection, PdfInventorySkip, build_classic_pdf_inventory,
-    build_pdf_inventory,
+    ClassicPdfInventoryPageResult, ColorAuditStatus, CoverageGapKind, ObjectKind, PdfInventory,
+    PdfInventoryError, PdfInventoryPage, PdfInventoryPageResult, PdfInventoryRejection,
+    PdfInventorySkip, audit_color_usage, build_classic_pdf_inventory, build_pdf_inventory,
 };
 
 fn xref_record(entry_type: u8, field2: usize, generation: u8) -> Result<[u8; 4], String> {
@@ -536,6 +536,228 @@ fn real_pdf_do_operators_become_image_and_form_inventory_entries() -> Result<(),
             entry_count: 2,
             form_skipped: Vec::new()
         }
+    );
+    Ok(())
+}
+
+/// Build a raw (uncompressed) `/ObjStm` object carrying the given members.
+fn object_stream(number: u32, members: &[(u32, &[u8])]) -> Vec<u8> {
+    let mut header = Vec::new();
+    let mut offset = 0usize;
+    for (object_number, body) in members {
+        header.extend_from_slice(format!("{object_number} {offset} ").as_bytes());
+        offset += body.len();
+    }
+    let first = header.len();
+    let mut stream_body = header;
+    for (_, body) in members {
+        stream_body.extend_from_slice(body);
+    }
+    let mut object = format!(
+        "{number} 0 obj\n<< /Type /ObjStm /N {} /First {first} /Length {} >>\nstream\n",
+        members.len(),
+        stream_body.len()
+    )
+    .into_bytes();
+    object.extend_from_slice(&stream_body);
+    object.extend_from_slice(b"\nendstream\nendobj\n");
+    object
+}
+
+/// A cross-reference-stream PDF whose catalog, ROOT `/Pages` node, and both leaf
+/// `/Page` objects are all type-2 compressed members of `/ObjStm` `5`. The
+/// pre-change bridge fed the fabricated root offset `0` into the offset-only
+/// walk and hard-failed; the resolved bridge navigates the compressed root and
+/// reports each compressed leaf honestly.
+fn compressed_page_tree_pdf() -> Result<Vec<u8>, String> {
+    let catalog: &[u8] = b"<< /Type /Catalog /Pages 2 0 R >>";
+    let pages: &[u8] = b"<< /Type /Pages /Kids [ 3 0 R 4 0 R ] /Count 2 >>";
+    let leaf3: &[u8] = b"<< /Type /Page /Parent 2 0 R >>";
+    let leaf4: &[u8] = b"<< /Type /Page /Parent 2 0 R >>";
+    let objstm = object_stream(5, &[(1, catalog), (2, pages), (3, leaf3), (4, leaf4)]);
+
+    let mut source = b"%PDF-1.5\n".to_vec();
+    let objstm_offset = source.len();
+    source.extend_from_slice(&objstm);
+    let xref_offset = source.len();
+    let size = 8;
+
+    let mut records = Vec::new();
+    records.extend_from_slice(&xref_record(0, 0, 0)?);
+    for index in 0..4u8 {
+        records.extend_from_slice(&xref_record(2, 5, index)?);
+    }
+    records.extend_from_slice(&xref_record(1, objstm_offset, 0)?);
+    records.extend_from_slice(&xref_record(0, 0, 0)?);
+    records.extend_from_slice(&xref_record(1, xref_offset, 0)?);
+
+    source.extend_from_slice(
+        format!(
+            "7 0 obj\n<< /Type /XRef /Size {size} /W [ 1 2 1 ] /Index [ 0 {size} ] /Root 1 0 R /Length {} >>\nstream\n",
+            records.len()
+        )
+        .as_bytes(),
+    );
+    source.extend_from_slice(&records);
+    source.extend_from_slice(b"\nendstream\nendobj\n");
+    source.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+    Ok(source)
+}
+
+/// A cross-reference-stream PDF with an UNCOMPRESSED root `/Pages` node (`2`), a
+/// COMPRESSED intermediate `/Pages` node (`3`, inside `/ObjStm` `5`), and two
+/// UNCOMPRESSED leaf `/Page` objects (`6`, `7`) with vector content. The
+/// resolved bridge navigates the compressed intermediate node and inventories
+/// the uncompressed leaves normally.
+fn compressed_intermediate_uncompressed_leaves_pdf() -> Result<Vec<u8>, String> {
+    let intermediate: &[u8] = b"<< /Type /Pages /Kids [ 6 0 R 7 0 R ] /Count 2 >>";
+    let objstm = object_stream(5, &[(3, intermediate)]);
+    let content = vector_content();
+    let content_object = |number: u32| -> Vec<u8> {
+        let mut object =
+            format!("{number} 0 obj\n<< /Length {} >>\nstream\n", content.len()).into_bytes();
+        object.extend_from_slice(content);
+        object.extend_from_slice(b"\nendstream\nendobj\n");
+        object
+    };
+
+    let mut source = b"%PDF-1.5\n".to_vec();
+    let catalog_offset = source.len();
+    source.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    let root_offset = source.len();
+    source.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [ 3 0 R ] /Count 2 >>\nendobj\n");
+    let objstm_offset = source.len();
+    source.extend_from_slice(&objstm);
+    let leaf6_offset = source.len();
+    source.extend_from_slice(b"6 0 obj\n<< /Type /Page /Parent 3 0 R /Contents 8 0 R >>\nendobj\n");
+    let leaf7_offset = source.len();
+    source.extend_from_slice(b"7 0 obj\n<< /Type /Page /Parent 3 0 R /Contents 9 0 R >>\nendobj\n");
+    let content8_offset = source.len();
+    source.extend_from_slice(&content_object(8));
+    let content9_offset = source.len();
+    source.extend_from_slice(&content_object(9));
+    let xref_offset = source.len();
+    let size = 10;
+
+    let mut records = Vec::new();
+    records.extend_from_slice(&xref_record(0, 0, 0)?);
+    records.extend_from_slice(&xref_record(1, catalog_offset, 0)?);
+    records.extend_from_slice(&xref_record(1, root_offset, 0)?);
+    records.extend_from_slice(&xref_record(2, 5, 0)?);
+    records.extend_from_slice(&xref_record(1, xref_offset, 0)?);
+    records.extend_from_slice(&xref_record(1, objstm_offset, 0)?);
+    records.extend_from_slice(&xref_record(1, leaf6_offset, 0)?);
+    records.extend_from_slice(&xref_record(1, leaf7_offset, 0)?);
+    records.extend_from_slice(&xref_record(1, content8_offset, 0)?);
+    records.extend_from_slice(&xref_record(1, content9_offset, 0)?);
+
+    source.extend_from_slice(
+        format!(
+            "4 0 obj\n<< /Type /XRef /Size {size} /W [ 1 2 1 ] /Index [ 0 {size} ] /Root 1 0 R /Length {} >>\nstream\n",
+            records.len()
+        )
+        .as_bytes(),
+    );
+    source.extend_from_slice(&records);
+    source.extend_from_slice(b"\nendstream\nendobj\n");
+    source.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+    Ok(source)
+}
+
+#[test]
+fn build_pdf_inventory_navigates_compressed_root_instead_of_hard_failing() -> Result<(), String> {
+    let source = compressed_page_tree_pdf()?;
+
+    // Before the resolved bridge this returned a hard `PdfInventoryError`; now it
+    // navigates the compressed root and enumerates both compressed leaves.
+    let report = build_pdf_inventory(&source, 4096).map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(report.pages.len(), 2);
+    for page in &report.pages {
+        assert!(matches!(
+            page.result,
+            PdfInventoryPageResult::Skipped {
+                reason: PdfInventorySkip::CompressedLeaf {
+                    object_stream_number: 5,
+                    ..
+                }
+            }
+        ));
+    }
+    // A compressed leaf carries zero colour observations.
+    assert_eq!(report.inventory.len(), 0);
+    Ok(())
+}
+
+#[test]
+fn audit_over_compressed_leaves_counts_pages_with_skipped_page_gaps() -> Result<(), String> {
+    let source = compressed_page_tree_pdf()?;
+
+    let audit = audit_color_usage(&source, 4096).map_err(|error| format!("{error:?}"))?;
+
+    // Both compressed-leaf pages are COUNTED as enumerated, each with an empty
+    // per-page summary and exactly one page-scoped `SkippedPage` coverage gap.
+    // (The document-level `XObject` resource pass still uses the offset-only root,
+    // which for a compressed root cannot begin and adds one honest
+    // `ResourceInspectionError` gap; that is out of scope for this content-extents
+    // slice and is not a hard failure.)
+    assert_eq!(audit.status, ColorAuditStatus::Incomplete);
+    assert_eq!(audit.pages.len(), 2);
+    let skipped_page_gaps = audit
+        .coverage_gaps
+        .iter()
+        .filter(|gap| gap.kind == CoverageGapKind::SkippedPage)
+        .count();
+    assert_eq!(skipped_page_gaps, 2);
+    // No per-page CONTENT colour gap is produced: a compressed leaf never yields
+    // an unmodeled-colour-space or undecoded-image observation.
+    assert!(
+        audit
+            .coverage_gaps
+            .iter()
+            .all(|gap| gap.kind == CoverageGapKind::SkippedPage
+                || gap.kind == CoverageGapKind::ResourceInspectionError)
+    );
+    assert!(audit.rgb_findings.is_empty());
+    assert!(audit.document.color_space_counts.is_empty());
+    for page in &audit.pages {
+        assert!(page.summary.color_space_counts.is_empty());
+        assert!(page.summary.object_kind_counts.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn build_pdf_inventory_navigates_compressed_intermediate_node_to_uncompressed_leaves()
+-> Result<(), String> {
+    let source = compressed_intermediate_uncompressed_leaves_pdf()?;
+
+    let report = build_pdf_inventory(&source, 4096).map_err(|error| format!("{error:?}"))?;
+
+    // The compressed intermediate node is navigated and both uncompressed leaves
+    // inventory their real vector content.
+    assert_eq!(report.pages.len(), 2);
+    assert_eq!(
+        report.pages[0].result,
+        PdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
+    );
+    assert_eq!(
+        report.pages[1].result,
+        PdfInventoryPageResult::Inventoried {
+            entry_count: 1,
+            form_skipped: Vec::new()
+        }
+    );
+    assert_eq!(report.inventory.len(), 2);
+    assert!(
+        report
+            .inventory
+            .entries
+            .iter()
+            .all(|entry| entry.kind == ObjectKind::Vector)
     );
     Ok(())
 }

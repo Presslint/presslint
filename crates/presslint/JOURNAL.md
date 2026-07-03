@@ -1,5 +1,50 @@
 # presslint Journal
 
+## T133 - Compressed Page-Tree Navigation In The Inventory Bridge
+
+- `build_pdf_inventory` now re-resolves the page-tree root to body-aware
+  `ResolvedObjectData` via `resolve_object(input, lookup,
+  access.page_tree_root.reference, max_decoded_stream_bytes)` and routes through
+  the new `inspect_document_page_content_extents_resolved` bridge (extracted into
+  a `resolved_page_content_extents` helper to keep the function within the
+  line-count gate). `access.page_tree_root` is a `ResolvedStructuralObject`, which
+  does NOT retain the decoded bytes of a compressed root, so the re-resolve is
+  required. Exactly ONE `resolve_object` runs for the root; the resolved leaf
+  enumeration owns any bounded object-stream decode. A root resolve failure maps
+  into the existing `PdfInventoryRejection::DocumentAccess` /
+  `DocumentAccessRejection::PagesObject` error, mirroring `inspect_document_page_boxes`.
+- Effect: a real xref-stream PDF whose page-tree root or an intermediate `/Pages`
+  node is a compressed object-stream member no longer hard-fails the whole
+  `audit`/`query`/convert path. `audit_color_usage`/`query_pdf_inventory` inherit
+  the fix because they build on `build_pdf_inventory`.
+- Honest coverage semantics: a compressed leaf `/Page` flows
+  `DocumentPageContentExtentResult::CompressedLeaf` → `decode_page_content` returns
+  `Err(InventoryPageSkip::CompressedLeaf { object_stream_number,
+  index_within_object_stream })` → `PdfInventoryPageResult::Skipped` →
+  `CoverageGapKind::SkippedPage`. The page is COUNTED as enumerated, carries zero
+  colour observations, and yields exactly one page-scoped coverage gap — it is
+  neither dropped silently nor claimed as full coverage. The new variant was
+  threaded through both `InventoryPageSkip`, `PdfInventorySkip`, and
+  `ClassicPdfInventorySkip` (the classic offset-based path never emits it, but the
+  shared skip conversion stays total). Uncompressed leaves inventory exactly as
+  before (byte-identical regression) and the classic-xref path is unchanged.
+- Deferred (follow-up): inventorying compressed-LEAF CONTENT (reading a compressed
+  leaf `/Page` dict's `/Contents` from its `/ObjStm`) needs a resolved `/Contents`
+  path since `inspect_page_contents` is offset-only. Also out of scope this slice:
+  the document-level `/XObject` resource pass still uses the offset-only root, so a
+  compressed root adds one honest `ResourceInspectionError` coverage gap (not a
+  hard failure).
+- `presslint-write`'s `content_edit_pipeline` needed no behaviour change: both its
+  `content_object_owners` (`if let Inspected`) and `locate_single_stream` (`let …
+  else`) already skip any non-`Inspected` result, so a `CompressedLeaf` falls into
+  the existing `NoContentStream` skip path (comments added).
+- Tests (synthetic fixtures only): `build_pdf_inventory` over a compressed-root
+  fixture returns `Ok` with two `Skipped { CompressedLeaf }` pages and zero colour
+  entries; the audit over it counts two pages with two `SkippedPage` gaps and no
+  colour observations; a compressed-intermediate-node fixture inventories its two
+  uncompressed vector leaves normally. Real before/after recorded on a LOCAL-only
+  corpus path (never committed): `audit` moved from hard-fail to returning.
+
 ## T122 - Single-Filter DecodeParms Arrays End To End
 
 - No public surface change. `build_pdf_inventory` now inventories Flate pages

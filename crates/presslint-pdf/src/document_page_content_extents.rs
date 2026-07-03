@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ClassicXrefTableInspection, ObjectLookup, PageContentExtentsInspection,
     PageContentTargetsInspection, PageContentsInspection, PageContentsInspectionError,
-    PageTreeLeaf, PageTreeLeavesInspection, PageTreeLeavesInspectionError,
-    inspect_page_content_extents_with_lookup, inspect_page_content_targets_with_lookup,
-    inspect_page_contents, inspect_page_tree_leaves_with_lookup,
+    PageTreeLeaf, PageTreeLeavesInspection, PageTreeLeavesInspectionError, ResolvedObjectData,
+    ResolvedObjectPosition, inspect_page_content_extents_with_lookup,
+    inspect_page_content_targets_with_lookup, inspect_page_contents,
+    inspect_page_tree_leaves_resolved, inspect_page_tree_leaves_with_lookup,
 };
 
 /// Document-order locate-only report for page content-stream data extents.
@@ -62,7 +63,8 @@ impl DocumentPageContentExtentInspection {
             DocumentPageContentExtentResult::Inspected { extents, .. } => {
                 extents.located_count() == extents.entries.len()
             }
-            DocumentPageContentExtentResult::ContentsFailed { .. } => false,
+            DocumentPageContentExtentResult::ContentsFailed { .. }
+            | DocumentPageContentExtentResult::CompressedLeaf { .. } => false,
         }
     }
 }
@@ -86,6 +88,17 @@ pub enum DocumentPageContentExtentResult {
     ContentsFailed {
         /// Delegated `/Contents` inspection failure.
         error: PageContentsInspectionError,
+    },
+    /// The leaf `/Page` object is a type-2 compressed object-stream member. Its
+    /// `/Contents` cannot be inspected through the offset-only page-content path
+    /// (there is no source byte offset to read a `/Contents` value from), so it
+    /// is reported honestly as a compressed leaf rather than fabricating an
+    /// offset-0 parse failure. Compressed-leaf CONTENT inventory is a follow-up.
+    CompressedLeaf {
+        /// Object number of the containing object stream.
+        object_stream_number: usize,
+        /// Index of this object inside the object stream.
+        index_within_object_stream: usize,
     },
 }
 
@@ -168,28 +181,121 @@ pub fn inspect_document_page_content_extents_with_lookup(
             error,
         })?;
 
+    Ok(assemble_document_page_extents(input, leaves, |leaf| {
+        content_extent_result_at_offset(input, lookup, leaf.object_byte_offset)
+    }))
+}
+
+/// Inspect document-ordered page content-stream data extents from a body-aware
+/// resolved page-tree root through any [`ObjectLookup`] backend.
+///
+/// This is the resolved-object-aware sibling of
+/// [`inspect_document_page_content_extents_with_lookup`]: it enumerates leaves
+/// through [`inspect_page_tree_leaves_resolved`], so a page tree whose
+/// INTERMEDIATE `/Pages` nodes are type-2 compressed object-stream members is
+/// navigated instead of hard-failing when the offset-only walk reads an
+/// indirect-object header at the fabricated offset `0`. Leaf order is preserved
+/// exactly (`leaves.leaves.iter().copied().enumerate()`).
+///
+/// Per enumerated leaf, the result branches on the resolved
+/// [`PageTreeLeaf::position`]:
+///
+/// - an [`ResolvedObjectPosition::Uncompressed`] leaf is inspected through the
+///   same offset-only `/Contents`/target/extent path as the legacy bridge, so
+///   uncompressed leaves stay byte-identical;
+/// - a [`ResolvedObjectPosition::Compressed`] leaf is reported as
+///   [`DocumentPageContentExtentResult::CompressedLeaf`]. A compressed leaf's
+///   `/Contents` is never read through the offset-only path and offset `0` is
+///   never fed into [`inspect_page_contents`]; compressed-leaf content inventory
+///   is a deliberate follow-up.
+///
+/// The report retains or copies no PDF bytes, object bodies, or decoded
+/// object-stream buffers: it carries only offsets, ordinals, small enums, and
+/// the delegated per-leaf reports, exactly like the offset-based bridge. The
+/// resolved leaf enumeration decodes object streams bounded by
+/// `max_decoded_object_stream_bytes`; this bridge adds no further object-stream
+/// decode of its own.
+///
+/// # Errors
+///
+/// Returns [`DocumentPageContentExtentsInspectionError`] only when the delegated
+/// resolved root leaf enumeration fails.
+pub fn inspect_document_page_content_extents_resolved(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    resolved_root: &ResolvedObjectData,
+    max_decoded_object_stream_bytes: usize,
+) -> Result<DocumentPageContentExtentsInspection, DocumentPageContentExtentsInspectionError> {
+    let leaves = inspect_page_tree_leaves_resolved(
+        input,
+        lookup,
+        resolved_root,
+        max_decoded_object_stream_bytes,
+    )
+    .map_err(|error| DocumentPageContentExtentsInspectionError {
+        root_node_byte_offset: error.root_node_byte_offset,
+        byte_len: input.len(),
+        error,
+    })?;
+
+    Ok(assemble_document_page_extents(
+        input,
+        leaves,
+        |leaf| match leaf.position {
+            ResolvedObjectPosition::Uncompressed {
+                object_byte_offset, ..
+            } => content_extent_result_at_offset(input, lookup, object_byte_offset),
+            ResolvedObjectPosition::Compressed {
+                object_stream_number,
+                index_within_object_stream,
+            } => DocumentPageContentExtentResult::CompressedLeaf {
+                object_stream_number,
+                index_within_object_stream,
+            },
+        },
+    ))
+}
+
+/// Assemble the document-ordered report from an enumerated leaf report, deriving
+/// each per-page result through `result_for`.
+///
+/// Leaf order is preserved exactly (`leaves.leaves.iter().copied().enumerate()`),
+/// and the report keeps only offsets, ordinals, small enums, and the delegated
+/// per-leaf results — no PDF bytes, object bodies, or decoded object-stream
+/// buffers. Both the offset-based and resolved bridges share this assembly; they
+/// differ only in how a leaf maps to a [`DocumentPageContentExtentResult`].
+fn assemble_document_page_extents(
+    input: &[u8],
+    leaves: PageTreeLeavesInspection,
+    mut result_for: impl FnMut(PageTreeLeaf) -> DocumentPageContentExtentResult,
+) -> DocumentPageContentExtentsInspection {
     let pages = leaves
         .leaves
         .iter()
         .copied()
         .enumerate()
-        .map(|(ordinal, leaf)| inspect_leaf_page(input, lookup, ordinal, leaf))
+        .map(|(ordinal, leaf)| DocumentPageContentExtentInspection {
+            ordinal,
+            leaf,
+            result: result_for(leaf),
+        })
         .collect();
 
-    Ok(DocumentPageContentExtentsInspection {
+    DocumentPageContentExtentsInspection {
         byte_len: input.len(),
         leaves,
         pages,
-    })
+    }
 }
 
-fn inspect_leaf_page(
+/// Run the shared offset-only `/Contents` → target → extent path for one
+/// uncompressed leaf `/Page` object located at `object_byte_offset`.
+fn content_extent_result_at_offset(
     input: &[u8],
     lookup: ObjectLookup<'_>,
-    ordinal: usize,
-    leaf: PageTreeLeaf,
-) -> DocumentPageContentExtentInspection {
-    let result = match inspect_page_contents(input, leaf.object_byte_offset) {
+    object_byte_offset: usize,
+) -> DocumentPageContentExtentResult {
+    match inspect_page_contents(input, object_byte_offset) {
         Ok(contents) => {
             let targets = inspect_page_content_targets_with_lookup(input, lookup, &contents);
             let extents = inspect_page_content_extents_with_lookup(input, lookup, &targets);
@@ -200,11 +306,5 @@ fn inspect_leaf_page(
             }
         }
         Err(error) => DocumentPageContentExtentResult::ContentsFailed { error },
-    };
-
-    DocumentPageContentExtentInspection {
-        ordinal,
-        leaf,
-        result,
     }
 }

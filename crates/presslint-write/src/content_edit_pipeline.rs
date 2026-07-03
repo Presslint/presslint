@@ -254,6 +254,8 @@ fn content_object_owners(
 ) -> BTreeMap<IndirectRef, Vec<IndirectRef>> {
     let mut owners: BTreeMap<IndirectRef, Vec<IndirectRef>> = BTreeMap::new();
     for page in pages {
+        // Compressed-leaf and contents-failed pages carry no `/Contents`
+        // references, so they contribute no owners; only `Inspected` pages do.
         if let DocumentPageContentExtentResult::Inspected { contents, .. } = &page.result {
             for reference in &contents.contents {
                 owners
@@ -371,6 +373,10 @@ where
 fn locate_single_stream(
     page: &DocumentPageContentExtentInspection,
 ) -> Result<LocatedStream<'_>, (Option<IndirectRef>, PipelineSkipReason)> {
+    // Only an `Inspected` result carries a locatable single content stream. A
+    // `ContentsFailed` or a `CompressedLeaf` leaf (a compressed page-tree leaf
+    // has no source offset to edit) both fall into this `NoContentStream` skip
+    // path; no write behaviour changes.
     let DocumentPageContentExtentResult::Inspected {
         contents, extents, ..
     } = &page.result
