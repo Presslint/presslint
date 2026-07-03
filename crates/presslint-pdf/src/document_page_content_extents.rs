@@ -6,7 +6,8 @@ use crate::{
     PageTreeLeaf, PageTreeLeavesInspection, PageTreeLeavesInspectionError, ResolvedObjectData,
     ResolvedObjectPosition, inspect_page_content_extents_with_lookup,
     inspect_page_content_targets_with_lookup, inspect_page_contents,
-    inspect_page_tree_leaves_resolved, inspect_page_tree_leaves_with_lookup,
+    inspect_page_contents_resolved, inspect_page_tree_leaves_resolved,
+    inspect_page_tree_leaves_with_lookup, page_contents_inspection_from_resolved, resolve_object,
 };
 
 /// Document-order locate-only report for page content-stream data extents.
@@ -60,7 +61,8 @@ impl DocumentPageContentExtentInspection {
     #[must_use]
     pub fn is_located(&self) -> bool {
         match &self.result {
-            DocumentPageContentExtentResult::Inspected { extents, .. } => {
+            DocumentPageContentExtentResult::Inspected { extents, .. }
+            | DocumentPageContentExtentResult::CompressedLeafInspected { extents, .. } => {
                 extents.located_count() == extents.entries.len()
             }
             DocumentPageContentExtentResult::ContentsFailed { .. }
@@ -99,6 +101,25 @@ pub enum DocumentPageContentExtentResult {
         object_stream_number: usize,
         /// Index of this object inside the object stream.
         index_within_object_stream: usize,
+    },
+    /// The leaf `/Page` object is a type-2 compressed object-stream member whose
+    /// `/Contents` was READ from its resolved (decoded) member body, and whose
+    /// referenced content-stream objects were resolved to source-valid extents.
+    ///
+    /// RESOLVED-BODY PROVENANCE BOUNDARY: the leaf dictionary itself lives in
+    /// decoded `/ObjStm` bytes with no stable source offset, so this variant NEVER
+    /// carries the leaf-dict-side `/Contents` byte spans. Only `targets` and
+    /// `extents` are reported, and they carry ONLY the source-valid offsets of the
+    /// referenced content-stream objects (ordinary uncompressed objects). A content
+    /// target that is itself compressed remains an honest located-skip inside
+    /// `extents`. This variant is additive to [`Self::CompressedLeaf`], which is
+    /// retained for the un-inspectable case (dict unresolvable, or missing /
+    /// duplicate / malformed `/Contents`).
+    CompressedLeafInspected {
+        /// Delegated content target resolution report for the resolved references.
+        targets: PageContentTargetsInspection,
+        /// Delegated content-stream data extent report (source-valid offsets).
+        extents: PageContentExtentsInspection,
     },
 }
 
@@ -203,18 +224,23 @@ pub fn inspect_document_page_content_extents_with_lookup(
 /// - an [`ResolvedObjectPosition::Uncompressed`] leaf is inspected through the
 ///   same offset-only `/Contents`/target/extent path as the legacy bridge, so
 ///   uncompressed leaves stay byte-identical;
-/// - a [`ResolvedObjectPosition::Compressed`] leaf is reported as
-///   [`DocumentPageContentExtentResult::CompressedLeaf`]. A compressed leaf's
-///   `/Contents` is never read through the offset-only path and offset `0` is
-///   never fed into [`inspect_page_contents`]; compressed-leaf content inventory
-///   is a deliberate follow-up.
+/// - a [`ResolvedObjectPosition::Compressed`] leaf has its body resolved once and
+///   its `/Contents` READ from the decoded member body (never offset `0` fed into
+///   [`inspect_page_contents`]); the referenced content-stream objects are resolved
+///   to source-valid extents and reported as
+///   [`DocumentPageContentExtentResult::CompressedLeafInspected`]. When the body
+///   cannot be resolved, or `/Contents` is missing / duplicate / malformed /
+///   non-reference, the honest [`DocumentPageContentExtentResult::CompressedLeaf`]
+///   skip is retained. A `/Contents` target that is itself compressed stays a
+///   located-skip inside the reported `extents`.
 ///
 /// The report retains or copies no PDF bytes, object bodies, or decoded
 /// object-stream buffers: it carries only offsets, ordinals, small enums, and
 /// the delegated per-leaf reports, exactly like the offset-based bridge. The
 /// resolved leaf enumeration decodes object streams bounded by
-/// `max_decoded_object_stream_bytes`; this bridge adds no further object-stream
-/// decode of its own.
+/// `max_decoded_object_stream_bytes`, and each compressed leaf is resolved exactly
+/// once (same bound) to read its `/Contents`; the decoded buffer is dropped after
+/// the references are extracted, so no `/ObjStm` buffer is retained in the report.
 ///
 /// # Errors
 ///
@@ -248,12 +274,64 @@ pub fn inspect_document_page_content_extents_resolved(
             ResolvedObjectPosition::Compressed {
                 object_stream_number,
                 index_within_object_stream,
-            } => DocumentPageContentExtentResult::CompressedLeaf {
+            } => compressed_leaf_content_result(
+                input,
+                lookup,
+                leaf,
+                max_decoded_object_stream_bytes,
                 object_stream_number,
                 index_within_object_stream,
-            },
+            ),
         },
     ))
+}
+
+/// Resolve one compressed leaf `/Page` object's body, read its `/Contents`
+/// references, and locate the referenced content-stream objects' source-valid
+/// extents.
+///
+/// The leaf is resolved exactly once through [`resolve_object`] (bounded by
+/// `max_decoded_object_stream_bytes`); its `/Contents` references are read from the
+/// resolved body through [`inspect_page_contents_resolved`], then adapted into the
+/// shared [`inspect_page_content_targets_with_lookup`] →
+/// [`inspect_page_content_extents_with_lookup`] path via
+/// [`page_contents_inspection_from_resolved`], whose synthetic references carry
+/// provenance-neutral sentinel spans so no member-body offset is ever presented as
+/// a source byte range. When the leaf body cannot be resolved, or its `/Contents`
+/// is missing / duplicate / malformed / non-reference, the honest
+/// [`DocumentPageContentExtentResult::CompressedLeaf`] skip is retained instead of
+/// fabricating extents. The decoded object-stream buffer is dropped after the
+/// references are extracted; the returned result keeps only offsets, refs, and the
+/// small delegated reports.
+fn compressed_leaf_content_result(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    leaf: PageTreeLeaf,
+    max_decoded_object_stream_bytes: usize,
+    object_stream_number: usize,
+    index_within_object_stream: usize,
+) -> DocumentPageContentExtentResult {
+    let compressed_leaf_skip = DocumentPageContentExtentResult::CompressedLeaf {
+        object_stream_number,
+        index_within_object_stream,
+    };
+
+    let Ok(resolved) = resolve_object(
+        input,
+        lookup,
+        leaf.reference,
+        max_decoded_object_stream_bytes,
+    ) else {
+        return compressed_leaf_skip;
+    };
+    let Ok(resolved_contents) = inspect_page_contents_resolved(input, &resolved) else {
+        return compressed_leaf_skip;
+    };
+
+    let contents = page_contents_inspection_from_resolved(&resolved_contents);
+    let targets = inspect_page_content_targets_with_lookup(input, lookup, &contents);
+    let extents = inspect_page_content_extents_with_lookup(input, lookup, &targets);
+    DocumentPageContentExtentResult::CompressedLeafInspected { targets, extents }
 }
 
 /// Assemble the document-ordered report from an enumerated leaf report, deriving

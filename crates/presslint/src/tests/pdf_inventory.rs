@@ -1,4 +1,8 @@
 mod multi_stream;
+// Compressed-leaf content inventory cases live in a sibling file, wired here (not
+// in `tests.rs`, which is out of this slice's write scope) via an explicit path.
+#[path = "pdf_inventory_compressed_leaf.rs"]
+mod pdf_inventory_compressed_leaf;
 #[path = "../../../presslint-pdf/src/tests/content_stream_extent/serde_harness.rs"]
 mod serde_harness;
 

@@ -327,7 +327,13 @@ pub fn decode_page_content<'input>(
     max_decoded_stream_bytes: usize,
 ) -> Result<(PageContentBytes<'input>, usize), InventoryPageSkip> {
     let extents = match &page.result {
-        DocumentPageContentExtentResult::Inspected { extents, .. } => extents,
+        // A compressed leaf whose `/Contents` was read from its resolved body and
+        // whose content objects resolved to source-valid extents inventories via
+        // those `extents` exactly like an `Inspected` page. The resolved-body
+        // provenance boundary lives in the pdf crate: `extents` carry only the
+        // referenced content objects' real source offsets, never a leaf-dict span.
+        DocumentPageContentExtentResult::Inspected { extents, .. }
+        | DocumentPageContentExtentResult::CompressedLeafInspected { extents, .. } => extents,
         DocumentPageContentExtentResult::ContentsFailed { error } => {
             return Err(InventoryPageSkip::ContentsFailed {
                 error: error.clone(),

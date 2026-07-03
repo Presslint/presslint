@@ -4,6 +4,65 @@ Older accumulated journal history lives in [JOURNAL-archive-2.md](JOURNAL-archiv
 
 ## Current State
 
+### T134 - Compressed-Leaf Content Inventory (Resolved-Body Provenance)
+
+- Turns T133's honest-but-empty compressed-leaf skips into REAL content inventory.
+  New `inspect_page_contents_resolved(input, resolved: &ResolvedObjectData) ->
+  Result<ResolvedPageContents, ResolvedPageContentsError>` reads a leaf `/Page`
+  object's top-level `/Contents` from its BODY-AWARE resolved data (Uncompressed OR
+  Compressed) through the existing resolved-aware `inspect_object_dictionary` (the
+  same precedent `page_boxes.rs` uses) — no new dictionary parser. It reports only
+  the content-stream object REFERENCES (`Vec<IndirectRef>`) plus the single-vs-array
+  value shape and a `skipped_non_reference_count`. It returns NO byte spans.
+- RESOLVED-BODY PROVENANCE BOUNDARY (the core abstraction, flagged by Codex as the
+  central trap): a compressed leaf's dict lives in decoded `/ObjStm` bytes with no
+  stable original-PDF source offset. For an `Uncompressed` leaf the dict entry
+  ranges address `input`; for a `Compressed` leaf they address the extracted member
+  body slice inside the decoded object-stream buffer. The `/Contents` value is
+  parsed against the MATCHING buffer, but the report exposes only position-
+  independent object numbers — a member-body offset is NEVER surfaced as a source
+  byte range. `page_contents_inspection_from_resolved` adapts the refs into the
+  shared `PageContentsInspection` shape for the existing target/extent inspectors,
+  filling every span field with a provenance-neutral zero sentinel; the target/
+  extent inspectors read only the object NUMBER, so the sentinel is inert and the
+  resulting `extents` carry ONLY source-valid offsets of the referenced content
+  objects (ordinary uncompressed objects).
+- `DocumentPageContentExtentResult` gains the additive `CompressedLeafInspected {
+  targets, extents }` variant. In `inspect_document_page_content_extents_resolved`
+  a `Compressed` leaf now routes: `resolve_object` (once, bounded by
+  `max_decoded_object_stream_bytes`) → `inspect_page_contents_resolved` →
+  `page_contents_inspection_from_resolved` → `inspect_page_content_targets_with_lookup`
+  → `inspect_page_content_extents_with_lookup` → `CompressedLeafInspected`. The
+  T133 `CompressedLeaf` skip is RETAINED only for the un-inspectable case (body
+  unresolvable, or missing / duplicate / malformed / non-reference `/Contents`). A
+  `/Contents` target that is itself compressed stays an honest located-skip inside
+  `extents` (existing machinery). `Uncompressed` leaves are byte-identical to T133.
+  `is_located` treats `CompressedLeafInspected` exactly like `Inspected`.
+- READ-ONLY: no write/edit path change. The write pipeline drives the OFFSET-based
+  `inspect_document_page_content_extents_with_lookup`, which never emits either
+  compressed-leaf variant; the shared `content_edit_pipeline` `let ... else` skip
+  keeps compressed leaves as `NoContentStream` (compressed-leaf CONVERSION needs a
+  separate resolved + ownership-safe edit design, out of scope).
+- Performance/copy budget: one `resolve_object` per compressed leaf (bounded by
+  `max_decoded_object_stream_bytes`, already threaded). The decoded `/ObjStm`
+  buffer is dropped after the `/Contents` refs are extracted — the report still
+  carries only offsets, refs, and small delegated enums; no `/ObjStm` buffer, PDF
+  bytes, or object bodies are retained. No per-operator allocation added.
+- Tests (SYNTHETIC fixtures only; real corpus never committed): resolved
+  `/Contents` reader unit tests (uncompressed + compressed dict; single ref +
+  array; array with non-reference skips; missing / duplicate / non-reference /
+  malformed `/Contents`; non-dictionary body); a compressed leaf with reachable
+  uncompressed content yields `CompressedLeafInspected` with a located source-valid
+  extent whose bytes round-trip; a compressed leaf whose `/Contents` target is
+  itself compressed stays a located-skip; PROVENANCE test — the surfaced references
+  carry the zero sentinel span while the extent offset is a real source offset > 0.
+- LIVE corpus before/after (LOCAL path only): the 104MB compressed-page-tree file
+  that T133 left with 36 `SkippedPage` gaps was NOT re-run in this working tree —
+  the corpus file is not present here — so the real before/after is left for the
+  operator to confirm where the corpus lives. The synthetic end-to-end tests in
+  `presslint` reproduce the transition exactly: a compressed leaf that was a zero-
+  colour `CompressedLeaf`/`SkippedPage` gap now inventories real DeviceRGB colour.
+
 ### T133 - Resolved-Object-Aware Content-Extents (Compressed Page-Tree Navigation)
 
 - Adds `inspect_document_page_content_extents_resolved(input, lookup,

@@ -2,6 +2,12 @@
 #[allow(clippy::duplicate_mod)]
 mod serde_harness;
 
+// The resolved `/Contents` inspector's own unit tests live in a sibling file; it
+// is wired here (rather than in `tests.rs`, which is out of this slice's write
+// scope) via an explicit path, mirroring the `serde_harness` include above.
+#[path = "page_contents_resolved.rs"]
+mod page_contents_resolved;
+
 use super::{
     classic_entry, classic_inspection, classic_subsection, indirect_ref, xref_stream_section,
     xref_stream_uncompressed,
@@ -11,12 +17,14 @@ use serde_harness::{from_serde_value, serde_value};
 
 use crate::{
     ClassicXrefEntryState, ClassicXrefTableInspection, ContentStreamDataExtentInspection,
-    DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
-    DocumentPageContentExtentsInspection, ObjectLookup, PageContentExtentInspection,
-    PageContentsInspectionRejection, PageTreeLeaf, PageTreeLeavesTruncation,
-    ResolvedObjectPosition, SkippedPageTreeLeafReason, XrefStreamEntry, XrefStreamEntryRecord,
-    XrefStreamSection, inspect_classic_xref_table, inspect_document_page_content_extents,
-    inspect_document_page_content_extents_with_lookup,
+    DocumentAccessBackend, DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
+    DocumentPageContentExtentsInspection, MAX_XREF_STREAM_SECTION_DECODED_BYTES, ObjectLookup,
+    ObjectLookupLocation, PageContentExtentInspection, PageContentsInspectionRejection,
+    PageTreeLeaf, PageTreeLeavesTruncation, ResolvedObjectPosition, SkippedPageContentTargetReason,
+    SkippedPageTreeLeafReason, XrefStreamEntry, XrefStreamEntryRecord, XrefStreamSection,
+    inspect_classic_xref_table, inspect_document_access, inspect_document_page_content_extents,
+    inspect_document_page_content_extents_resolved,
+    inspect_document_page_content_extents_with_lookup, resolve_object,
 };
 
 /// Mirror an in-use classic xref table into an uncompressed cross-reference
@@ -329,6 +337,252 @@ fn compressed_leaf_result_is_never_located() {
         },
     };
     assert!(!page.is_located());
+}
+
+// ---------------------------------------------------------------------------
+// Resolved bridge: compressed-leaf content inventory (T134)
+// ---------------------------------------------------------------------------
+
+fn xref_record(entry_type: u8, field2: usize, field3: u8) -> [u8; 4] {
+    let [hi, lo] = u16::try_from(field2)
+        .expect("test xref field fits u16")
+        .to_be_bytes();
+    [entry_type, hi, lo, field3]
+}
+
+/// Build a raw (uncompressed) `/ObjStm` object `5` carrying `members`.
+fn object_stream(members: &[(usize, &[u8])]) -> Vec<u8> {
+    let mut header = Vec::new();
+    let mut offset = 0usize;
+    for (object_number, body) in members {
+        header.extend_from_slice(format!("{object_number} {offset} ").as_bytes());
+        offset += body.len();
+    }
+    let first = header.len();
+    let mut stream_body = header;
+    for (_, body) in members {
+        stream_body.extend_from_slice(body);
+    }
+    let mut object = format!(
+        "5 0 obj\n<< /Type /ObjStm /N {} /First {first} /Length {} >>\nstream\n",
+        members.len(),
+        stream_body.len()
+    )
+    .into_bytes();
+    object.extend_from_slice(&stream_body);
+    object.extend_from_slice(b"\nendstream\nendobj\n");
+    object
+}
+
+fn content_object(number: u32, data: &[u8]) -> Vec<u8> {
+    let mut object = format!("{number} 0 obj\n<< /Length {} >>\nstream\n", data.len()).into_bytes();
+    object.extend_from_slice(data);
+    object.extend_from_slice(b"\nendstream\nendobj\n");
+    object
+}
+
+/// A cross-reference-stream PDF whose catalog (`1`), root `/Pages` (`2`), and both
+/// leaf `/Page` objects (`3`, `4`) are type-2 compressed members of `/ObjStm` `5`.
+/// Leaf `3`'s `/Contents 6 0 R` points at an UNCOMPRESSED content object; leaf
+/// `4`'s `/Contents 7 0 R` points at a COMPRESSED member (object `7`), so its
+/// content target is itself compressed and stays a located-skip.
+fn compressed_leaf_contents_document() -> Vec<u8> {
+    let catalog: &[u8] = b"<< /Type /Catalog /Pages 2 0 R >>";
+    let pages: &[u8] = b"<< /Type /Pages /Kids [ 3 0 R 4 0 R ] /Count 2 >>";
+    let leaf3: &[u8] = b"<< /Type /Page /Parent 2 0 R /Contents 6 0 R >>";
+    let leaf4: &[u8] = b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R >>";
+    // Object `7` is a dummy compressed member: it is never resolved (the target
+    // inspector only locates its xref entry, which is type-2 compressed).
+    let compressed_target: &[u8] = b"<< /Note /compressed-content-target >>";
+    let objstm = object_stream(&[
+        (1, catalog),
+        (2, pages),
+        (3, leaf3),
+        (4, leaf4),
+        (7, compressed_target),
+    ]);
+    let content6 = content_object(6, b"0 0 1 rg\n0 0 9 9 re\nf\n");
+
+    let mut source = b"%PDF-1.5\n".to_vec();
+    let objstm_offset = source.len();
+    source.extend_from_slice(&objstm);
+    let content6_offset = source.len();
+    source.extend_from_slice(&content6);
+    let xref_offset = source.len();
+    let size = 9;
+
+    let mut records = Vec::new();
+    records.extend_from_slice(&xref_record(0, 0, 0)); // 0 free
+    records.extend_from_slice(&xref_record(2, 5, 0)); // 1 catalog
+    records.extend_from_slice(&xref_record(2, 5, 1)); // 2 pages
+    records.extend_from_slice(&xref_record(2, 5, 2)); // 3 leaf3
+    records.extend_from_slice(&xref_record(2, 5, 3)); // 4 leaf4
+    records.extend_from_slice(&xref_record(1, objstm_offset, 0)); // 5 objstm
+    records.extend_from_slice(&xref_record(1, content6_offset, 0)); // 6 content
+    records.extend_from_slice(&xref_record(2, 5, 4)); // 7 compressed target
+    records.extend_from_slice(&xref_record(1, xref_offset, 0)); // 8 xref stream
+
+    source.extend_from_slice(
+        format!(
+            "8 0 obj\n<< /Type /XRef /Size {size} /W [ 1 2 1 ] /Index [ 0 {size} ] /Root 1 0 R /Length {} >>\nstream\n",
+            records.len()
+        )
+        .as_bytes(),
+    );
+    source.extend_from_slice(&records);
+    source.extend_from_slice(b"\nendstream\nendobj\n");
+    source.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+    source
+}
+
+fn lookup_from_backend(backend: &DocumentAccessBackend) -> ObjectLookup<'_> {
+    match backend {
+        DocumentAccessBackend::ClassicXref { xref_table, .. } => {
+            ObjectLookup::ClassicXref(xref_table)
+        }
+        DocumentAccessBackend::ClassicXrefChain { chain } => ObjectLookup::ClassicXrefChain(chain),
+        DocumentAccessBackend::XrefStreamSection { section } => {
+            ObjectLookup::XrefStreamSection(section)
+        }
+        DocumentAccessBackend::XrefStreamChain { chain } => ObjectLookup::XrefStreamChain(chain),
+    }
+}
+
+/// Drive the resolved bridge exactly as `build_pdf_inventory` does.
+fn resolved_report(source: &[u8]) -> DocumentPageContentExtentsInspection {
+    let access = inspect_document_access(source).expect("spine should resolve");
+    let lookup = lookup_from_backend(&access.backend);
+    let resolved_root = resolve_object(
+        source,
+        lookup,
+        access.page_tree_root.reference,
+        MAX_XREF_STREAM_SECTION_DECODED_BYTES,
+    )
+    .expect("page-tree root should resolve");
+    inspect_document_page_content_extents_resolved(
+        source,
+        lookup,
+        &resolved_root,
+        MAX_XREF_STREAM_SECTION_DECODED_BYTES,
+    )
+    .expect("resolved bridge should navigate")
+}
+
+#[test]
+fn compressed_leaf_with_uncompressed_contents_is_inspected_with_source_valid_extents() {
+    let source = compressed_leaf_contents_document();
+    let report = resolved_report(&source);
+
+    assert_eq!(report.page_count(), 2);
+    // Leaf `3` reaches an uncompressed content object and is fully located.
+    assert!(report.pages[0].is_located());
+    assert_eq!(report.located_page_count(), 1);
+
+    assert!(matches!(
+        report.pages[0].result,
+        DocumentPageContentExtentResult::CompressedLeafInspected { .. }
+    ));
+    if let DocumentPageContentExtentResult::CompressedLeafInspected { targets, extents } =
+        &report.pages[0].result
+    {
+        assert_eq!(targets.entries.len(), 1);
+        assert_eq!(extents.located_count(), 1);
+
+        // The single located extent addresses the REAL source bytes of object `6`,
+        // and its content stream data round-trips to the fixture bytes.
+        assert!(matches!(
+            &extents.entries[0],
+            PageContentExtentInspection::Located { .. }
+        ));
+        if let PageContentExtentInspection::Located { extent, .. } = &extents.entries[0] {
+            assert_eq!(
+                &source
+                    [extent.stream_data_start_byte_offset()..extent.stream_data_end_byte_offset()],
+                b"0 0 1 rg\n0 0 9 9 re\nf\n"
+            );
+        }
+    }
+}
+
+#[test]
+fn compressed_leaf_with_compressed_content_target_stays_a_located_skip() {
+    let source = compressed_leaf_contents_document();
+    let report = resolved_report(&source);
+
+    // Leaf `4`'s `/Contents` target (object `7`) is itself compressed, so the leaf
+    // is still CompressedLeafInspected but the target is an honest located-skip; the
+    // page is therefore NOT fully located.
+    assert!(!report.pages[1].is_located());
+    assert!(matches!(
+        report.pages[1].result,
+        DocumentPageContentExtentResult::CompressedLeafInspected { .. }
+    ));
+    if let DocumentPageContentExtentResult::CompressedLeafInspected { extents, .. } =
+        &report.pages[1].result
+    {
+        assert_eq!(extents.entries.len(), 1);
+        assert!(matches!(
+            &extents.entries[0],
+            PageContentExtentInspection::Skipped {
+                reason: SkippedPageContentTargetReason::UnresolvedLookupLocation {
+                    location: ObjectLookupLocation::XrefStreamCompressed { .. },
+                },
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn compressed_leaf_inspected_never_surfaces_the_leaf_dict_span_as_a_source_offset() {
+    // PROVENANCE: the compressed leaf's dict lives in decoded `/ObjStm` bytes at a
+    // member-body offset (its `<< ... >>` starts well past 0 inside the decoded
+    // buffer). The reported references must NOT carry that span as a source offset;
+    // the resolved path fills them with the zero sentinel while the extent offsets
+    // remain source-valid.
+    let source = compressed_leaf_contents_document();
+    let report = resolved_report(&source);
+
+    assert!(matches!(
+        report.pages[0].result,
+        DocumentPageContentExtentResult::CompressedLeafInspected { .. }
+    ));
+    let DocumentPageContentExtentResult::CompressedLeafInspected { targets, extents } =
+        &report.pages[0].result
+    else {
+        return;
+    };
+
+    for target in &targets.entries {
+        let reference = match target {
+            crate::PageContentTargetInspection::Resolved {
+                content_reference, ..
+            }
+            | crate::PageContentTargetInspection::Skipped {
+                content_reference, ..
+            } => content_reference,
+        };
+        // Object number is the real, position-independent reference (object 6)...
+        assert_eq!(reference.reference.object_number, 6);
+        // ...but the reference byte range is the provenance-neutral zero sentinel,
+        // never the member-body span of the leaf dict.
+        assert_eq!(reference.reference_range.start, 0);
+        assert_eq!(reference.reference_range.end, 0);
+    }
+
+    // The located extent's offset, by contrast, IS a real source offset (> 0) into
+    // the original PDF, proving only the content object contributes source extents.
+    assert!(matches!(
+        &extents.entries[0],
+        PageContentExtentInspection::Located { .. }
+    ));
+    if let PageContentExtentInspection::Located {
+        object_byte_offset, ..
+    } = &extents.entries[0]
+    {
+        assert!(*object_byte_offset > 0);
+        assert!(*object_byte_offset < source.len());
+    }
 }
 
 #[test]

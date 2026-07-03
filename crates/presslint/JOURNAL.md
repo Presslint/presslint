@@ -1,5 +1,36 @@
 # presslint Journal
 
+## T134 - Compressed-Leaf Content Inventory Wiring
+
+- `decode_page_content` now handles the additive
+  `DocumentPageContentExtentResult::CompressedLeafInspected { extents, .. }` variant
+  by inventorying via its `extents` exactly like an `Inspected` page (merged into
+  the same match arm). So `build_pdf_inventory`, and therefore `audit_color_usage`
+  and `query_pdf_inventory`, now report REAL colour observations for a compressed
+  leaf `/Page` whose `/Contents` was read from its resolved `/ObjStm` body and whose
+  referenced content-stream object is an ordinary uncompressed object. The resolved-
+  body provenance boundary is enforced entirely in `presslint-pdf`; this crate just
+  consumes the source-valid `extents`.
+- Honest compressed-content-target skip: when a reached compressed leaf's
+  `/Contents` target is ITSELF compressed, the resolved `extents` carry a single
+  located-skip, so `decode_page_content` surfaces
+  `InventoryPageSkip::TargetSkipped` → `PdfInventoryPageResult::Skipped` → an
+  `Incomplete` audit with a coverage gap and zero colour — reached but honestly not
+  inventoried, never fabricated. The pre-existing `PdfInventorySkip::CompressedLeaf`
+  path is retained for leaves whose body/`/Contents` is un-inspectable.
+- READ-ONLY: no writer/edit change. The colour converter and content-edit pipeline
+  still drive the offset-based extents bridge and never see the compressed-leaf
+  variants; compressed-leaf CONVERSION is a separate, later, resolved + ownership-
+  safe slice.
+- Tests (SYNTHETIC only) live in a new sibling module
+  `tests/pdf_inventory_compressed_leaf.rs` (keeps `tests/pdf_inventory.rs` under the
+  1000-line gate): two compressed leaves referencing uncompressed RGB content now
+  produce `Inventoried` pages and real `audit_color_usage` RGB findings with zero
+  `SkippedPage` gaps; a compressed leaf whose `/Contents` target is itself compressed
+  stays a `TargetSkipped` skip with an `Incomplete`/no-colour audit. The 104MB real
+  corpus was not re-run here (not present in this tree); the operator should confirm
+  the 36-`SkippedPage`-gaps → real-colour before/after where the corpus lives.
+
 ## T133 - Compressed Page-Tree Navigation In The Inventory Bridge
 
 - `build_pdf_inventory` now re-resolves the page-tree root to body-aware

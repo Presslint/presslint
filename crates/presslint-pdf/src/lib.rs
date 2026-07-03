@@ -43,6 +43,7 @@ mod page_boxes;
 mod page_content_extents;
 mod page_content_targets;
 mod page_contents;
+mod page_contents_resolved;
 mod page_resource_inheritance;
 mod page_tree_kid_targets;
 mod page_tree_kids;
@@ -190,6 +191,10 @@ pub use page_contents::{
     PageContentReference, PageContentsInspection, PageContentsInspectionError,
     PageContentsInspectionRejection, PageContentsValueShape, SkippedPageContentEntry,
     SkippedPageContentEntryKind, inspect_page_contents,
+};
+pub use page_contents_resolved::{
+    ResolvedPageContents, ResolvedPageContentsError, inspect_page_contents_resolved,
+    page_contents_inspection_from_resolved,
 };
 pub use page_tree_kid_targets::{
     PageTreeKidTargetInspection, PageTreeKidTargetsInspection, PageTreeKidTargetsInspectionError,
