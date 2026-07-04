@@ -3,6 +3,7 @@ use presslint_types::{
     ByteRange, ColorSpace, ColorUsage, ContentScope, EditCapability, ObjectKind, PageIndex, PdfName,
 };
 
+mod bit_identity;
 mod combined;
 mod extgstate;
 mod json;

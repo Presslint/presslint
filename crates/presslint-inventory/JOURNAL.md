@@ -1,5 +1,19 @@
 # presslint-inventory Journal
 
+## T143 - Golden Bit-Identity Lock for Combined Inventory (Phase 0a-3)
+
+- Added a tests-only `bit_identity` corpus that pins combined inventory entry
+  counts, object kinds, and every 32-byte entry digest for representative
+  vector, text, image, form, resource-colour, form-scope, many-no-op, shared-Do,
+  and malformed-tail streams.
+- Extracted a reusable streaming-vs-materialized assertion helper that compares
+  `build_inventory` with `walk_graphics_state` plus
+  `inventory_from_graphics_events`, including identical `GraphicsWalkError`
+  propagation for a malformed record after the last entry-producing operator.
+- The golden digest values are the durable guard for upcoming shared-walker
+  refactors: differential equality alone would not catch a uniform regression
+  that moves both paths together.
+
 ## T142 - Streaming Path Consumes `PaintProgram` (Phase 0a-2)
 
 - `collect_entries_streaming` is rerouted to consume the replayable
