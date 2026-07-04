@@ -18,8 +18,8 @@ fn gs_operator_emits_set_ext_g_state_event() -> Result<(), String> {
     assert_eq!(events[0].operator_range, ByteRange { start: 5, end: 7 });
     // `gs` only surfaces the invocation; the snapshot is left at the page default.
     assert_eq!(
-        events[0].state,
-        crate::GraphicsStateSnapshot::page_default()
+        events[0].state.as_ref(),
+        &crate::GraphicsStateSnapshot::page_default()
     );
     Ok(())
 }

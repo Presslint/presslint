@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use presslint_syntax::OperatorRecord;
 use presslint_types::{ByteRange, ColorObservation, ColorSpace, ColorUsage, PdfName};
 use serde::{Deserialize, Serialize};
@@ -76,7 +78,10 @@ impl GraphicsColor {
 }
 
 /// Graphics-state slots tracked by the initial content walker.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Whole snapshots are not serialized here; the walker shares them through
+/// [`Rc`](std::rc::Rc) and emits references from each paint op.
+#[derive(Debug, Clone, PartialEq)]
 pub struct GraphicsStateSnapshot {
     /// Current transformation matrix in PDF `[a b c d e f]` layout.
     pub ctm: [f64; 6],
@@ -308,7 +313,10 @@ pub enum PaintOpKind {
 }
 
 /// Ordered graphics-state event tied to source byte provenance.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// `state` is shared so emitting an event is a refcount bump rather than a deep
+/// snapshot copy. `PaintOpKind` keeps serde on its own.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PaintOp {
     /// Zero-based operator-record index.
     pub index: usize,
@@ -318,8 +326,12 @@ pub struct PaintOp {
     pub record_range: ByteRange,
     /// Semantic event for this operator.
     pub kind: PaintOpKind,
-    /// Graphics-state snapshot after the operator was applied.
-    pub state: GraphicsStateSnapshot,
+    /// Shared graphics-state snapshot after the operator was applied.
+    ///
+    /// Consecutive no-mutation events share the same `Rc` (a refcount bump, not
+    /// a deep copy); a copy-on-write happens only when an operator mutates a
+    /// snapshot that is still shared with a prior event or the save stack.
+    pub state: Rc<GraphicsStateSnapshot>,
 }
 
 /// Structured graphics-state walker failure.
@@ -387,8 +399,8 @@ pub enum GraphicsWalkErrorKind {
 /// behaviour byte-for-byte.
 #[derive(Debug, Clone)]
 pub struct GraphicsStateWalker<'a> {
-    state: GraphicsStateSnapshot,
-    stack: Vec<GraphicsStateSnapshot>,
+    state: Rc<GraphicsStateSnapshot>,
+    stack: Vec<Rc<GraphicsStateSnapshot>>,
     color_space_env: ColorSpaceEnv<'a>,
 }
 
@@ -405,16 +417,27 @@ impl<'a> GraphicsStateWalker<'a> {
     #[must_use]
     pub fn with_color_space_env(color_space_env: ColorSpaceEnv<'a>) -> Self {
         Self {
-            state: GraphicsStateSnapshot::page_default(),
+            state: Rc::new(GraphicsStateSnapshot::page_default()),
             stack: Vec::new(),
             color_space_env,
         }
     }
 
     /// Return the current graphics-state snapshot.
+    ///
+    /// The state is interned behind an [`Rc`], so this derefs to the shared
+    /// snapshot.
     #[must_use]
-    pub const fn state(&self) -> &GraphicsStateSnapshot {
-        &self.state
+    pub fn state(&self) -> &GraphicsStateSnapshot {
+        self.state.as_ref()
+    }
+
+    /// Borrow the current graphics state for mutation, copying-on-write.
+    ///
+    /// [`Rc::make_mut`] clones only when the snapshot is still shared with a
+    /// prior emitted event or the save stack.
+    fn state_mut(&mut self) -> &mut GraphicsStateSnapshot {
+        Rc::make_mut(&mut self.state)
     }
 
     /// Apply one operator record and emit its post-operator event.
@@ -438,7 +461,7 @@ impl<'a> GraphicsStateWalker<'a> {
             operator_range: record.operator.range,
             record_range: record.range,
             kind,
-            state: self.state.clone(),
+            state: Rc::clone(&self.state),
         })
     }
 
@@ -507,7 +530,7 @@ impl<'a> GraphicsStateWalker<'a> {
         match operator {
             b"q" => {
                 expect_operands(operator, record, 0)?;
-                self.stack.push(self.state.clone());
+                self.stack.push(Rc::clone(&self.state));
                 Ok(PaintOpKind::Save)
             }
             b"Q" => {
@@ -523,7 +546,8 @@ impl<'a> GraphicsStateWalker<'a> {
             }
             b"cm" => {
                 let matrix = numeric_operands(source, operator, record, 6)?;
-                self.state.ctm = concat_matrix(matrix, self.state.ctm);
+                let ctm = concat_matrix(matrix, self.state.ctm);
+                self.state_mut().ctm = ctm;
                 Ok(PaintOpKind::ConcatMatrix { matrix })
             }
             b"Tr" => self.set_text_rendering_mode(source, operator, record),
@@ -584,7 +608,7 @@ impl<'a> GraphicsStateWalker<'a> {
         count: usize,
     ) -> Result<PaintOpKind, GraphicsWalkError> {
         let color = sourced_device_color(source, operator, record, space, count)?;
-        self.state.stroking_color = color.clone();
+        self.state_mut().stroking_color = color.clone();
         Ok(PaintOpKind::SetStrokingColor { color })
     }
 
@@ -597,7 +621,7 @@ impl<'a> GraphicsStateWalker<'a> {
         count: usize,
     ) -> Result<PaintOpKind, GraphicsWalkError> {
         let color = sourced_device_color(source, operator, record, space, count)?;
-        self.state.nonstroking_color = color.clone();
+        self.state_mut().nonstroking_color = color.clone();
         Ok(PaintOpKind::SetNonstrokingColor { color })
     }
 
@@ -659,7 +683,7 @@ impl<'a> GraphicsStateWalker<'a> {
         )
     }
 
-    const fn side_color(&self, side: ColorSide) -> &GraphicsColor {
+    fn side_color(&self, side: ColorSide) -> &GraphicsColor {
         match side {
             ColorSide::Stroking => &self.state.stroking_color,
             ColorSide::Nonstroking => &self.state.nonstroking_color,
@@ -669,11 +693,11 @@ impl<'a> GraphicsStateWalker<'a> {
     fn apply_color(&mut self, side: ColorSide, color: GraphicsColor) -> PaintOpKind {
         match side {
             ColorSide::Stroking => {
-                self.state.stroking_color = color.clone();
+                self.state_mut().stroking_color = color.clone();
                 PaintOpKind::SetStrokingColor { color }
             }
             ColorSide::Nonstroking => {
-                self.state.nonstroking_color = color.clone();
+                self.state_mut().nonstroking_color = color.clone();
                 PaintOpKind::SetNonstrokingColor { color }
             }
         }
@@ -687,7 +711,7 @@ impl<'a> GraphicsStateWalker<'a> {
     ) -> Result<PaintOpKind, GraphicsWalkError> {
         let value = integer_operand(source, operator, record)?;
         let mode = TextRenderingMode::from_pdf_value(value);
-        self.state.text_rendering_mode = mode;
+        self.state_mut().text_rendering_mode = mode;
         Ok(PaintOpKind::SetTextRenderingMode { mode })
     }
 

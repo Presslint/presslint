@@ -1,5 +1,19 @@
 # presslint-paint Journal
 
+## T144 - Intern the per-event graphics state via `Rc` (Phase 0a-5)
+
+- Replaced the per-event `GraphicsStateSnapshot` clone with shared
+  `Rc<GraphicsStateSnapshot>` state on the walker, save stack, and `PaintOp`.
+  Emitting an op now clones the `Rc`; state-changing operators mutate through
+  the private `state_mut()` copy-on-write helper.
+- `q` saves the current `Rc` and `Q` restores the popped `Rc`, preserving
+  save/restore identity while keeping operator semantics and emit order
+  unchanged.
+- Dropped serde derives from `PaintOp` and `GraphicsStateSnapshot`; serde remains
+  on the event-kind and colour payload types that are still serialized.
+- Added `Rc::ptr_eq` unit coverage for no-state-change sharing and for
+  `q cm Q n` save/restore identity. No new dependency; `Rc` comes from `std`.
+
 ## Phase 0a-4 - Rename to paint vocabulary (`PaintOp`/`PaintOpKind`)
 
 - Canonical rename, FULL migration with NO compatibility aliases: `GraphicsStateEvent` ->

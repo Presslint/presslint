@@ -180,8 +180,8 @@ fn unsupported_operator_emits_noop_event() -> Result<(), String> {
 
     assert_eq!(events[0].kind, PaintOpKind::NoOp);
     assert_eq!(
-        events[0].state,
-        super::GraphicsStateSnapshot::page_default()
+        events[0].state.as_ref(),
+        &super::GraphicsStateSnapshot::page_default()
     );
     Ok(())
 }
@@ -198,8 +198,8 @@ fn do_operator_emits_xobject_invocation_event() -> Result<(), String> {
     );
     assert_eq!(events[0].record_range, ByteRange { start: 0, end: 7 });
     assert_eq!(
-        events[0].state,
-        super::GraphicsStateSnapshot::page_default()
+        events[0].state.as_ref(),
+        &super::GraphicsStateSnapshot::page_default()
     );
     Ok(())
 }

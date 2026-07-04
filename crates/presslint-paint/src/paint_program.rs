@@ -13,9 +13,11 @@
 //! current first-malformed-record short-circuit.
 //!
 //! This is a thin driver over the SAME `walker.step`; it allocates nothing per op
-//! beyond what the walker already does (the per-event `state.clone()` hotspot is
-//! unchanged). Replay re-runs the walk from scratch — callers replay only when they
-//! need a fresh pass — so extra retained memory is O(1).
+//! beyond what the walker already does. Since the walker interns its graphics
+//! state behind an `Rc`, emitting each op is a refcount bump rather than a deep
+//! snapshot copy, and a copy-on-write happens only when an operator actually
+//! mutates a shared snapshot. Replay re-runs the walk from scratch; callers
+//! replay only when they need a fresh pass, so extra retained memory is O(1).
 
 use presslint_syntax::OperatorRecord;
 

@@ -1,5 +1,12 @@
 # presslint-inventory Journal
 
+## T144 - Paint-op state is shared via `Rc` (Phase 0a-5)
+
+- Updated inventory tests that assert the default graphics-state snapshot to
+  compare `PaintOp.state.as_ref()` with `GraphicsStateSnapshot::page_default()`.
+  Production inventory code continues to deref-coerce the shared paint-op state
+  unchanged.
+
 ## T143 - Golden Bit-Identity Lock for Combined Inventory (Phase 0a-3)
 
 - Added a tests-only `bit_identity` corpus that pins combined inventory entry
