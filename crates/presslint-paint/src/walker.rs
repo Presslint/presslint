@@ -244,7 +244,7 @@ impl PathPaintKind {
 /// Semantic event emitted for one assembled operator record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum GraphicsStateEventKind {
+pub enum PaintOpKind {
     /// `q` saved the current graphics state.
     Save,
     /// `Q` restored the most recently saved graphics state.
@@ -309,7 +309,7 @@ pub enum GraphicsStateEventKind {
 
 /// Ordered graphics-state event tied to source byte provenance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GraphicsStateEvent {
+pub struct PaintOp {
     /// Zero-based operator-record index.
     pub index: usize,
     /// Source range for the operator token.
@@ -317,7 +317,7 @@ pub struct GraphicsStateEvent {
     /// Source range for operands plus operator.
     pub record_range: ByteRange,
     /// Semantic event for this operator.
-    pub kind: GraphicsStateEventKind,
+    pub kind: PaintOpKind,
     /// Graphics-state snapshot after the operator was applied.
     pub state: GraphicsStateSnapshot,
 }
@@ -429,11 +429,11 @@ impl<'a> GraphicsStateWalker<'a> {
         source: &[u8],
         index: usize,
         record: &OperatorRecord,
-    ) -> Result<GraphicsStateEvent, GraphicsWalkError> {
+    ) -> Result<PaintOp, GraphicsWalkError> {
         checked_source(source, record.range, record.range)?;
         let operator = checked_source(source, record.operator.range, record.range)?;
         let kind = self.event_kind(source, operator, record)?;
-        Ok(GraphicsStateEvent {
+        Ok(PaintOp {
             index,
             operator_range: record.operator.range,
             record_range: record.range,
@@ -453,7 +453,7 @@ impl<'a> GraphicsStateWalker<'a> {
         source: &[u8],
         operator: &[u8],
         record: &OperatorRecord,
-    ) -> Option<Result<GraphicsStateEventKind, GraphicsWalkError>> {
+    ) -> Option<Result<PaintOpKind, GraphicsWalkError>> {
         Some(match operator {
             b"G" => {
                 self.set_stroking_device_color(source, operator, record, ColorSpace::DeviceGray, 1)
@@ -500,7 +500,7 @@ impl<'a> GraphicsStateWalker<'a> {
         source: &[u8],
         operator: &[u8],
         record: &OperatorRecord,
-    ) -> Result<GraphicsStateEventKind, GraphicsWalkError> {
+    ) -> Result<PaintOpKind, GraphicsWalkError> {
         if let Some(result) = self.color_event(source, operator, record) {
             return result;
         }
@@ -508,7 +508,7 @@ impl<'a> GraphicsStateWalker<'a> {
             b"q" => {
                 expect_operands(operator, record, 0)?;
                 self.stack.push(self.state.clone());
-                Ok(GraphicsStateEventKind::Save)
+                Ok(PaintOpKind::Save)
             }
             b"Q" => {
                 expect_operands(operator, record, 0)?;
@@ -519,12 +519,12 @@ impl<'a> GraphicsStateWalker<'a> {
                     ));
                 };
                 self.state = previous;
-                Ok(GraphicsStateEventKind::Restore)
+                Ok(PaintOpKind::Restore)
             }
             b"cm" => {
                 let matrix = numeric_operands(source, operator, record, 6)?;
                 self.state.ctm = concat_matrix(matrix, self.state.ctm);
-                Ok(GraphicsStateEventKind::ConcatMatrix { matrix })
+                Ok(PaintOpKind::ConcatMatrix { matrix })
             }
             b"Tr" => self.set_text_rendering_mode(source, operator, record),
             b"S" => Self::path_paint(operator, record, PathPaintKind::Stroke),
@@ -565,13 +565,13 @@ impl<'a> GraphicsStateWalker<'a> {
                 3,
                 self.state.text_rendering_mode,
             ),
-            b"Do" => Ok(GraphicsStateEventKind::XObjectInvoke {
+            b"Do" => Ok(PaintOpKind::XObjectInvoke {
                 name: name_operand(source, operator, record)?,
             }),
-            b"gs" => Ok(GraphicsStateEventKind::SetExtGState {
+            b"gs" => Ok(PaintOpKind::SetExtGState {
                 name: name_operand(source, operator, record)?,
             }),
-            _ => Ok(GraphicsStateEventKind::NoOp),
+            _ => Ok(PaintOpKind::NoOp),
         }
     }
 
@@ -582,10 +582,10 @@ impl<'a> GraphicsStateWalker<'a> {
         record: &OperatorRecord,
         space: ColorSpace,
         count: usize,
-    ) -> Result<GraphicsStateEventKind, GraphicsWalkError> {
+    ) -> Result<PaintOpKind, GraphicsWalkError> {
         let color = sourced_device_color(source, operator, record, space, count)?;
         self.state.stroking_color = color.clone();
-        Ok(GraphicsStateEventKind::SetStrokingColor { color })
+        Ok(PaintOpKind::SetStrokingColor { color })
     }
 
     fn set_nonstroking_device_color(
@@ -595,10 +595,10 @@ impl<'a> GraphicsStateWalker<'a> {
         record: &OperatorRecord,
         space: ColorSpace,
         count: usize,
-    ) -> Result<GraphicsStateEventKind, GraphicsWalkError> {
+    ) -> Result<PaintOpKind, GraphicsWalkError> {
         let color = sourced_device_color(source, operator, record, space, count)?;
         self.state.nonstroking_color = color.clone();
-        Ok(GraphicsStateEventKind::SetNonstrokingColor { color })
+        Ok(PaintOpKind::SetNonstrokingColor { color })
     }
 
     /// Handle `cs`/`CS`: select the current colour space by resource name and
@@ -615,7 +615,7 @@ impl<'a> GraphicsStateWalker<'a> {
         operator: &[u8],
         record: &OperatorRecord,
         side: ColorSide,
-    ) -> Result<GraphicsStateEventKind, GraphicsWalkError> {
+    ) -> Result<PaintOpKind, GraphicsWalkError> {
         let name = name_operand(source, operator, record)?;
         let color = self.selected_color(&name, record.range);
         Ok(self.apply_color(side, color))
@@ -633,7 +633,7 @@ impl<'a> GraphicsStateWalker<'a> {
         operator: &[u8],
         record: &OperatorRecord,
         side: ColorSide,
-    ) -> Result<GraphicsStateEventKind, GraphicsWalkError> {
+    ) -> Result<PaintOpKind, GraphicsWalkError> {
         let (components, pattern_name) = color_operands(source, operator, record)?;
         let current = self.side_color(side);
         let mut color = current.clone();
@@ -666,15 +666,15 @@ impl<'a> GraphicsStateWalker<'a> {
         }
     }
 
-    fn apply_color(&mut self, side: ColorSide, color: GraphicsColor) -> GraphicsStateEventKind {
+    fn apply_color(&mut self, side: ColorSide, color: GraphicsColor) -> PaintOpKind {
         match side {
             ColorSide::Stroking => {
                 self.state.stroking_color = color.clone();
-                GraphicsStateEventKind::SetStrokingColor { color }
+                PaintOpKind::SetStrokingColor { color }
             }
             ColorSide::Nonstroking => {
                 self.state.nonstroking_color = color.clone();
-                GraphicsStateEventKind::SetNonstrokingColor { color }
+                PaintOpKind::SetNonstrokingColor { color }
             }
         }
     }
@@ -684,20 +684,20 @@ impl<'a> GraphicsStateWalker<'a> {
         source: &[u8],
         operator: &[u8],
         record: &OperatorRecord,
-    ) -> Result<GraphicsStateEventKind, GraphicsWalkError> {
+    ) -> Result<PaintOpKind, GraphicsWalkError> {
         let value = integer_operand(source, operator, record)?;
         let mode = TextRenderingMode::from_pdf_value(value);
         self.state.text_rendering_mode = mode;
-        Ok(GraphicsStateEventKind::SetTextRenderingMode { mode })
+        Ok(PaintOpKind::SetTextRenderingMode { mode })
     }
 
     fn path_paint(
         operator: &[u8],
         record: &OperatorRecord,
         paint: PathPaintKind,
-    ) -> Result<GraphicsStateEventKind, GraphicsWalkError> {
+    ) -> Result<PaintOpKind, GraphicsWalkError> {
         expect_operands(operator, record, 0)?;
-        Ok(GraphicsStateEventKind::PathPaint { paint })
+        Ok(PaintOpKind::PathPaint { paint })
     }
 
     fn text_show(
@@ -706,9 +706,9 @@ impl<'a> GraphicsStateWalker<'a> {
         show_operator: TextShowOperator,
         expected_operands: usize,
         rendering_mode: TextRenderingMode,
-    ) -> Result<GraphicsStateEventKind, GraphicsWalkError> {
+    ) -> Result<PaintOpKind, GraphicsWalkError> {
         expect_operands(operator, record, expected_operands)?;
-        Ok(GraphicsStateEventKind::TextShow {
+        Ok(PaintOpKind::TextShow {
             operator: show_operator,
             rendering_mode,
         })
@@ -780,7 +780,7 @@ fn resource_initial_color(
 pub fn walk_graphics_state(
     source: &[u8],
     records: &[OperatorRecord],
-) -> Result<Vec<GraphicsStateEvent>, GraphicsWalkError> {
+) -> Result<Vec<PaintOp>, GraphicsWalkError> {
     let mut walker = GraphicsStateWalker::new();
     records
         .iter()

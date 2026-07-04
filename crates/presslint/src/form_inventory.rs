@@ -18,8 +18,8 @@
 use std::collections::BTreeSet;
 
 use presslint_inventory::{
-    ColorSpaceEnv, ColorSpaceResource, GraphicsStateEventKind, GraphicsWalkError, Inventory,
-    InventoryEntry, build_inventory_with_color_space_env, walk_graphics_state,
+    ColorSpaceEnv, ColorSpaceResource, GraphicsWalkError, Inventory, InventoryEntry, PaintOpKind,
+    build_inventory_with_color_space_env, walk_graphics_state,
 };
 use presslint_pdf::{
     IndirectRef, ObjectLookup, PageXObjectResourceTarget, SkippedPageXObjectResource,
@@ -538,7 +538,7 @@ fn form_invocation_names(
     Ok(events
         .into_iter()
         .filter_map(|event| match event.kind {
-            GraphicsStateEventKind::XObjectInvoke { name }
+            PaintOpKind::XObjectInvoke { name }
                 if form_names.contains(&name) && !image_names.contains(&name) =>
             {
                 Some(name)

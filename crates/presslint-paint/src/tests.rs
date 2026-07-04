@@ -7,9 +7,7 @@
 
 use presslint_syntax::{OperatorRecord, assemble_operators, tokenize};
 
-use crate::{
-    ColorSpaceEnv, GraphicsStateEvent, GraphicsWalkError, PaintProgram, walk_graphics_state,
-};
+use crate::{ColorSpaceEnv, GraphicsWalkError, PaintOp, PaintProgram, walk_graphics_state};
 
 /// Tokenize + assemble a content stream into owned operator records for testing.
 fn assemble(input: &[u8]) -> Result<Vec<OperatorRecord>, String> {
@@ -20,7 +18,7 @@ fn assemble(input: &[u8]) -> Result<Vec<OperatorRecord>, String> {
 
 /// Collect the program's ops as raw per-record results (no short-circuit), the
 /// way a caller that wants every yielded item would.
-fn raw_ops(program: PaintProgram<'_>) -> Vec<Result<GraphicsStateEvent, GraphicsWalkError>> {
+fn raw_ops(program: PaintProgram<'_>) -> Vec<Result<PaintOp, GraphicsWalkError>> {
     program.into_iter().collect()
 }
 

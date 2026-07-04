@@ -2,13 +2,13 @@ use presslint_types::{
     ByteRange, ColorObservation, ColorSpace, ColorUsage, ContentScope, PageIndex, PdfName,
 };
 
-use presslint_paint::{GraphicsStateEvent, PathPaintKind, TextRenderingMode, TextShowOperator};
+use presslint_paint::{PaintOp, PathPaintKind, TextRenderingMode, TextShowOperator};
 
 pub fn vector_object_digest(
     page: PageIndex,
     sequence: u32,
     scope: &ContentScope,
-    event: &GraphicsStateEvent,
+    event: &PaintOp,
     paint: PathPaintKind,
     colors: &[ColorObservation],
 ) -> [u8; 32] {
@@ -31,7 +31,7 @@ pub fn text_object_digest(
     page: PageIndex,
     sequence: u32,
     scope: &ContentScope,
-    event: &GraphicsStateEvent,
+    event: &PaintOp,
     operator: TextShowOperator,
     rendering_mode: TextRenderingMode,
     colors: &[ColorObservation],
@@ -56,7 +56,7 @@ pub fn image_object_digest(
     page: PageIndex,
     sequence: u32,
     scope: &ContentScope,
-    event: &GraphicsStateEvent,
+    event: &PaintOp,
     name: &PdfName,
     colors: &[ColorObservation],
 ) -> [u8; 32] {
@@ -79,7 +79,7 @@ pub fn form_object_digest(
     page: PageIndex,
     sequence: u32,
     scope: &ContentScope,
-    event: &GraphicsStateEvent,
+    event: &PaintOp,
     name: &PdfName,
 ) -> [u8; 32] {
     let mut digest = StableDigest::new();

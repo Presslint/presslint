@@ -7,7 +7,7 @@
 //! FRESH [`GraphicsStateWalker`] and re-walks `records` from index `0`.
 //!
 //! [`PaintOps`] is the iterator it hands out. It yields one
-//! `Result<GraphicsStateEvent, GraphicsWalkError>` per record, driving the walker's
+//! `Result<PaintOp, GraphicsWalkError>` per record, driving the walker's
 //! `step` exactly as the earlier inline inventory loop did. On the first `Err` it
 //! FUSES: it yields that `Err` once, then `None` forever, faithfully modelling the
 //! current first-malformed-record short-circuit.
@@ -20,14 +20,7 @@
 use presslint_syntax::OperatorRecord;
 
 use crate::color_space_env::ColorSpaceEnv;
-use crate::walker::{GraphicsStateEvent, GraphicsStateWalker, GraphicsWalkError};
-
-/// A single paint op yielded by [`PaintOps`].
-///
-/// Vocabulary seed for the later paint rename: today it is exactly the walker's
-/// [`GraphicsStateEvent`], aliased so consumers can start speaking "paint op"
-/// without any type restructuring (the canonical rename is a later slice).
-pub type PaintOp = GraphicsStateEvent;
+use crate::walker::{GraphicsStateWalker, GraphicsWalkError, PaintOp};
 
 /// Cheap, replayable descriptor of a paint program.
 ///
@@ -87,7 +80,7 @@ impl<'a> PaintProgram<'a> {
 }
 
 impl<'a> IntoIterator for PaintProgram<'a> {
-    type Item = Result<GraphicsStateEvent, GraphicsWalkError>;
+    type Item = Result<PaintOp, GraphicsWalkError>;
     type IntoIter = PaintOps<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -96,7 +89,7 @@ impl<'a> IntoIterator for PaintProgram<'a> {
 }
 
 impl<'a> IntoIterator for &PaintProgram<'a> {
-    type Item = Result<GraphicsStateEvent, GraphicsWalkError>;
+    type Item = Result<PaintOp, GraphicsWalkError>;
     type IntoIter = PaintOps<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -119,7 +112,7 @@ pub struct PaintOps<'a> {
 }
 
 impl Iterator for PaintOps<'_> {
-    type Item = Result<GraphicsStateEvent, GraphicsWalkError>;
+    type Item = Result<PaintOp, GraphicsWalkError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {

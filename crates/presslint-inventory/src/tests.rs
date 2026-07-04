@@ -12,13 +12,13 @@ mod serde_shape;
 mod xobject;
 
 use super::{
-    GraphicsStateEventKind, GraphicsStateWalker, GraphicsWalkError, GraphicsWalkErrorKind,
-    Inventory, PathPaintKind, TextRenderingMode, TextShowOperator, build_form_inventory,
+    GraphicsStateWalker, GraphicsWalkError, GraphicsWalkErrorKind, Inventory, PaintOpKind,
+    PathPaintKind, TextRenderingMode, TextShowOperator, build_form_inventory,
     build_image_inventory, build_inventory, build_text_inventory, build_vector_inventory,
     walk_graphics_state,
 };
 
-fn walk(input: &[u8]) -> Result<Vec<super::GraphicsStateEvent>, GraphicsWalkError> {
+fn walk(input: &[u8]) -> Result<Vec<super::PaintOp>, GraphicsWalkError> {
     let tokens = tokenize(input).map_err(|error| {
         GraphicsWalkError::new(GraphicsWalkErrorKind::InvalidSourceRange, error.range)
     })?;
@@ -114,7 +114,7 @@ fn save_restore_returns_to_saved_colour_state() -> Result<(), String> {
     );
     assert_eq!(
         final_event.kind,
-        GraphicsStateEventKind::PathPaint {
+        PaintOpKind::PathPaint {
             paint: PathPaintKind::Stroke,
         }
     );
@@ -154,7 +154,7 @@ fn path_paint_event_carries_post_operator_snapshot_and_provenance() -> Result<()
 
     assert_eq!(
         event.kind,
-        GraphicsStateEventKind::PathPaint {
+        PaintOpKind::PathPaint {
             paint: PathPaintKind::FillEvenOdd,
         }
     );
@@ -178,7 +178,7 @@ fn path_paint_event_carries_post_operator_snapshot_and_provenance() -> Result<()
 fn unsupported_operator_emits_noop_event() -> Result<(), String> {
     let events = walk(b"10 20 m").map_err(|error| format!("{error:?}"))?;
 
-    assert_eq!(events[0].kind, GraphicsStateEventKind::NoOp);
+    assert_eq!(events[0].kind, PaintOpKind::NoOp);
     assert_eq!(
         events[0].state,
         super::GraphicsStateSnapshot::page_default()
@@ -192,7 +192,7 @@ fn do_operator_emits_xobject_invocation_event() -> Result<(), String> {
 
     assert_eq!(
         events[0].kind,
-        GraphicsStateEventKind::XObjectInvoke {
+        PaintOpKind::XObjectInvoke {
             name: PdfName(b"Im1".to_vec()),
         }
     );
@@ -478,13 +478,13 @@ fn unsupported_text_rendering_mode_is_conservative() -> Result<(), String> {
     let events = walk(b"4 Tr (ClipFill) Tj").map_err(|error| format!("{error:?}"))?;
     assert_eq!(
         events[0].kind,
-        GraphicsStateEventKind::SetTextRenderingMode {
+        PaintOpKind::SetTextRenderingMode {
             mode: TextRenderingMode::Unsupported { value: 4 },
         }
     );
     assert_eq!(
         events[1].kind,
-        GraphicsStateEventKind::TextShow {
+        PaintOpKind::TextShow {
             operator: TextShowOperator::ShowText,
             rendering_mode: TextRenderingMode::Unsupported { value: 4 },
         }

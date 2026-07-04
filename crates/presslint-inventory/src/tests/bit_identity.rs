@@ -11,9 +11,9 @@ use presslint_syntax::{assemble_operators, tokenize};
 use presslint_types::{ByteRange, ColorSpace, ContentScope, ObjectKind, PageIndex, PdfName};
 
 use crate::{
-    ColorSpaceEnv, ColorSpaceResource, GraphicsStateEvent, GraphicsStateWalker, GraphicsWalkError,
-    GraphicsWalkErrorKind, Inventory, build_inventory, build_inventory_with_color_space_env,
-    inventory_from_graphics_events,
+    ColorSpaceEnv, ColorSpaceResource, GraphicsStateWalker, GraphicsWalkError,
+    GraphicsWalkErrorKind, Inventory, PaintOp, build_inventory,
+    build_inventory_with_color_space_env, inventory_from_graphics_events,
 };
 
 const PAGE: PageIndex = PageIndex(2);
@@ -181,7 +181,7 @@ fn assert_streaming_equals_materialized_with_env(
 
 fn compare_streaming_and_materialized(
     streamed: Result<Inventory, GraphicsWalkError>,
-    events: Result<Vec<GraphicsStateEvent>, GraphicsWalkError>,
+    events: Result<Vec<PaintOp>, GraphicsWalkError>,
     page: PageIndex,
     scope: &ContentScope,
     images: &[PdfName],
@@ -245,7 +245,7 @@ fn walk_graphics_state_with_env(
     input: &[u8],
     records: &[presslint_syntax::OperatorRecord],
     color_space_env: ColorSpaceEnv<'_>,
-) -> Result<Vec<GraphicsStateEvent>, GraphicsWalkError> {
+) -> Result<Vec<PaintOp>, GraphicsWalkError> {
     let mut walker = GraphicsStateWalker::with_color_space_env(color_space_env);
     records
         .iter()

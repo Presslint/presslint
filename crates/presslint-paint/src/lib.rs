@@ -18,9 +18,9 @@ mod walker;
 mod tests;
 
 pub use color_space_env::{ColorSpaceEnv, ColorSpaceResource};
-pub use paint_program::{PaintOp, PaintOps, PaintProgram};
+pub use paint_program::{PaintOps, PaintProgram};
 pub use walker::{
-    GraphicsColor, GraphicsStateEvent, GraphicsStateEventKind, GraphicsStateSnapshot,
-    GraphicsStateWalker, GraphicsWalkError, GraphicsWalkErrorKind, PathPaintKind,
-    TextRenderingMode, TextShowOperator, walk_graphics_state,
+    GraphicsColor, GraphicsStateSnapshot, GraphicsStateWalker, GraphicsWalkError,
+    GraphicsWalkErrorKind, PaintOp, PaintOpKind, PathPaintKind, TextRenderingMode,
+    TextShowOperator, walk_graphics_state,
 };

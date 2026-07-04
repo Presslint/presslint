@@ -1,5 +1,19 @@
 # presslint-paint Journal
 
+## Phase 0a-4 - Rename to paint vocabulary (`PaintOp`/`PaintOpKind`)
+
+- Canonical rename, FULL migration with NO compatibility aliases: `GraphicsStateEvent` ->
+  `PaintOp` and `GraphicsStateEventKind` -> `PaintOpKind`, defined in `walker.rs` and
+  re-exported from the crate root; the transient `pub type PaintOp = GraphicsStateEvent;`
+  alias from 0a-2 was removed. Scope was limited to the two "emitted op" nouns; the
+  state/mechanism vocabulary (`GraphicsStateWalker`, `GraphicsStateSnapshot`, `GraphicsColor`,
+  `GraphicsWalkError`/`Kind`, `walk_graphics_state`, `PathPaintKind`, `TextRenderingMode`,
+  `TextShowOperator`) is intentionally left as-is — layered vocabulary, not a half-rename.
+- PURE identifier rename, ZERO behaviour change: the T143 `bit_identity` golden-lock (which pins
+  entry `id.digest` sequences) passed UNCHANGED, proving inventory output stays byte-identical.
+  Build/tests/clippy clean across the workspace; no old-name references remain in source/API.
+  Done directly by the supervisor (not via the loop); Codex sanity-checked the approach as sound.
+
 ## T142 - Replayable `PaintProgram` Iterator (Phase 0a-2)
 
 - New `paint_program.rs` introduces the paint program as a REPLAYABLE stream.

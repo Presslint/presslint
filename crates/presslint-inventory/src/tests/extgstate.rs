@@ -1,7 +1,7 @@
 use presslint_types::{ByteRange, ColorSpace, PdfName};
 
 use super::{json, walk};
-use crate::{GraphicsStateEventKind, GraphicsWalkErrorKind, PathPaintKind};
+use crate::{GraphicsWalkErrorKind, PaintOpKind, PathPaintKind};
 
 #[test]
 fn gs_operator_emits_set_ext_g_state_event() -> Result<(), String> {
@@ -9,7 +9,7 @@ fn gs_operator_emits_set_ext_g_state_event() -> Result<(), String> {
 
     assert_eq!(
         events[0].kind,
-        GraphicsStateEventKind::SetExtGState {
+        PaintOpKind::SetExtGState {
             name: PdfName(b"GS1".to_vec()),
         }
     );
@@ -30,7 +30,7 @@ fn set_ext_g_state_serializes_with_snake_case_kind_tag() -> Result<(), json::Jso
 
     // Pin whatever the `rename_all = "snake_case"` attribute actually emits for
     // the variant tag, rather than hand-asserting the string elsewhere.
-    let kind = GraphicsStateEventKind::SetExtGState {
+    let kind = PaintOpKind::SetExtGState {
         name: PdfName(b"GS1".to_vec()),
     };
     let encoded = kind.serialize(json::JsonSerializer)?;
@@ -96,7 +96,7 @@ fn gs_invocation_across_save_restore_does_not_corrupt_state() -> Result<(), Stri
     // Event order: `rg`(0) `q`(1) `gs`(2) `Q`(3) `f`(4).
     assert_eq!(
         events[2].kind,
-        GraphicsStateEventKind::SetExtGState {
+        PaintOpKind::SetExtGState {
             name: PdfName(b"GS1".to_vec()),
         }
     );
@@ -104,7 +104,7 @@ fn gs_invocation_across_save_restore_does_not_corrupt_state() -> Result<(), Stri
     let final_event = events.last().ok_or("missing final event")?;
     assert_eq!(
         final_event.kind,
-        GraphicsStateEventKind::PathPaint {
+        PaintOpKind::PathPaint {
             paint: PathPaintKind::FillNonzero,
         }
     );

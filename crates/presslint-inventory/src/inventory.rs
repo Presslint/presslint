@@ -9,8 +9,8 @@ use crate::digest::{
     form_object_digest, image_object_digest, text_object_digest, usize_to_u32, vector_object_digest,
 };
 use presslint_paint::{
-    ColorSpaceEnv, GraphicsStateEvent, GraphicsStateEventKind, GraphicsStateSnapshot,
-    GraphicsWalkError, PaintProgram, PathPaintKind, TextRenderingMode,
+    ColorSpaceEnv, GraphicsStateSnapshot, GraphicsWalkError, PaintOp, PaintOpKind, PaintProgram,
+    PathPaintKind, TextRenderingMode,
 };
 
 /// One queryable page object discovered by the inventory pass.
@@ -229,7 +229,7 @@ pub fn build_inventory_with_color_space_env(
 pub fn vector_inventory_from_graphics_events(
     page: PageIndex,
     scope: &ContentScope,
-    events: &[GraphicsStateEvent],
+    events: &[PaintOp],
 ) -> Inventory {
     collect_entries(events, |event, sequence| {
         vector_entry(page, scope, event, sequence)
@@ -245,7 +245,7 @@ pub fn vector_inventory_from_graphics_events(
 pub fn text_inventory_from_graphics_events(
     page: PageIndex,
     scope: &ContentScope,
-    events: &[GraphicsStateEvent],
+    events: &[PaintOp],
 ) -> Inventory {
     collect_entries(events, |event, sequence| {
         text_entry(page, scope, event, sequence)
@@ -261,7 +261,7 @@ pub fn text_inventory_from_graphics_events(
 pub fn image_inventory_from_graphics_events(
     page: PageIndex,
     scope: &ContentScope,
-    events: &[GraphicsStateEvent],
+    events: &[PaintOp],
     image_xobject_names: &[PdfName],
 ) -> Inventory {
     collect_entries(events, |event, sequence| {
@@ -278,7 +278,7 @@ pub fn image_inventory_from_graphics_events(
 pub fn form_inventory_from_graphics_events(
     page: PageIndex,
     scope: &ContentScope,
-    events: &[GraphicsStateEvent],
+    events: &[PaintOp],
     form_xobject_names: &[PdfName],
 ) -> Inventory {
     collect_entries(events, |event, sequence| {
@@ -312,7 +312,7 @@ pub fn form_inventory_from_graphics_events(
 pub fn inventory_from_graphics_events(
     page: PageIndex,
     scope: &ContentScope,
-    events: &[GraphicsStateEvent],
+    events: &[PaintOp],
     image_xobject_names: &[PdfName],
     form_xobject_names: &[PdfName],
 ) -> Inventory {
@@ -331,8 +331,8 @@ pub fn inventory_from_graphics_events(
 /// each emitted entry. `classify` returns `None` for events that emit nothing,
 /// which leaves the counter unchanged.
 fn collect_entries(
-    events: &[GraphicsStateEvent],
-    mut classify: impl FnMut(&GraphicsStateEvent, u32) -> Option<InventoryEntry>,
+    events: &[PaintOp],
+    mut classify: impl FnMut(&PaintOp, u32) -> Option<InventoryEntry>,
 ) -> Inventory {
     let mut entries = Vec::new();
     for event in events {
@@ -346,7 +346,7 @@ fn collect_entries(
 
 /// Consume a replayable [`PaintProgram`] over the `source + records` path,
 /// classifying each op as it streams past instead of first materializing the
-/// whole `Vec<GraphicsStateEvent>`.
+/// whole `Vec<PaintOp>`.
 ///
 /// This mirrors [`collect_entries`] exactly: iterating the program walks every
 /// record in order via `GraphicsStateWalker::step` (so save/restore, snapshot
@@ -362,7 +362,7 @@ fn collect_entries_streaming(
     source: &[u8],
     records: &[OperatorRecord],
     color_space_env: ColorSpaceEnv<'_>,
-    mut classify: impl FnMut(&GraphicsStateEvent, u32) -> Option<InventoryEntry>,
+    mut classify: impl FnMut(&PaintOp, u32) -> Option<InventoryEntry>,
 ) -> Result<Inventory, GraphicsWalkError> {
     let mut entries = Vec::new();
     for op in PaintProgram::new(source, records, color_space_env) {
@@ -378,10 +378,10 @@ fn collect_entries_streaming(
 fn vector_entry(
     page: PageIndex,
     scope: &ContentScope,
-    event: &GraphicsStateEvent,
+    event: &PaintOp,
     sequence: u32,
 ) -> Option<InventoryEntry> {
-    let GraphicsStateEventKind::PathPaint { paint } = &event.kind else {
+    let PaintOpKind::PathPaint { paint } = &event.kind else {
         return None;
     };
     let paint = *paint;
@@ -405,10 +405,10 @@ fn vector_entry(
 fn text_entry(
     page: PageIndex,
     scope: &ContentScope,
-    event: &GraphicsStateEvent,
+    event: &PaintOp,
     sequence: u32,
 ) -> Option<InventoryEntry> {
-    let GraphicsStateEventKind::TextShow {
+    let PaintOpKind::TextShow {
         operator,
         rendering_mode,
     } = &event.kind
@@ -442,8 +442,8 @@ fn text_entry(
 
 /// Return the invoked `XObject` name when `event` is a `Do` for a name the
 /// caller declared in `names`; otherwise `None`.
-fn matched_xobject<'a>(event: &'a GraphicsStateEvent, names: &[PdfName]) -> Option<&'a PdfName> {
-    let GraphicsStateEventKind::XObjectInvoke { name } = &event.kind else {
+fn matched_xobject<'a>(event: &'a PaintOp, names: &[PdfName]) -> Option<&'a PdfName> {
+    let PaintOpKind::XObjectInvoke { name } = &event.kind else {
         return None;
     };
     names.contains(name).then_some(name)
@@ -452,7 +452,7 @@ fn matched_xobject<'a>(event: &'a GraphicsStateEvent, names: &[PdfName]) -> Opti
 fn image_entry(
     page: PageIndex,
     scope: &ContentScope,
-    event: &GraphicsStateEvent,
+    event: &PaintOp,
     image_xobject_names: &[PdfName],
     sequence: u32,
 ) -> Option<InventoryEntry> {
@@ -474,7 +474,7 @@ fn image_entry(
 fn form_entry(
     page: PageIndex,
     scope: &ContentScope,
-    event: &GraphicsStateEvent,
+    event: &PaintOp,
     form_xobject_names: &[PdfName],
     sequence: u32,
 ) -> Option<InventoryEntry> {
@@ -496,7 +496,7 @@ fn form_entry(
 fn inventory_entry(
     page: PageIndex,
     scope: &ContentScope,
-    event: &GraphicsStateEvent,
+    event: &PaintOp,
     sequence: u32,
     kind: ObjectKind,
     colors: Vec<ColorObservation>,
