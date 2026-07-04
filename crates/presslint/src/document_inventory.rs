@@ -288,7 +288,7 @@ pub fn build_classic_pdf_inventory(
         });
         let form_targets =
             resources.map_or(&[][..], |resources| resources.form_xobjects.as_slice());
-        let page_color_spaces = color_space_page.map_or_else(Vec::new, color_space_env_resources);
+        let page_color_spaces = color_space_page.map_or_else(Vec::new, page_color_space_env);
         let result = match build_page_inventory_with_forms(
             input,
             lookup,
@@ -358,7 +358,7 @@ pub fn split_color_space_report(
     }
 }
 
-/// Map a page's classified `presslint-pdf` colour-space resources into the
+/// Map a slice of classified `presslint-pdf` colour-space resources into the
 /// inventory-native [`ColorSpaceResource`] model consumed by the walker.
 ///
 /// This is the crate-layering seam: `presslint-pdf` resolves the resource
@@ -366,11 +366,25 @@ pub fn split_color_space_report(
 /// maps those facts into the inventory colour model so `presslint-inventory`
 /// keeps no dependency on the structural PDF layer. The alternate space is a
 /// recorded fact only and is deliberately NOT substituted as the painted source.
+///
+/// The slice comes from either a page report (`&page.color_spaces`) or the new
+/// per-form report (`&form.color_spaces`); the two scopes never merge because a
+/// form paints against its own `/Resources` only.
 #[must_use]
 pub fn color_space_env_resources(
-    page: &PageColorSpaceResourcesInspection,
+    color_spaces: &[ClassifiedColorSpaceResource],
 ) -> Vec<ColorSpaceResource> {
-    page.color_spaces.iter().map(color_space_resource).collect()
+    color_spaces.iter().map(color_space_resource).collect()
+}
+
+/// Map one page report's classified colour spaces into the walker env model.
+///
+/// A thin per-page adapter over the generalised [`color_space_env_resources`]
+/// so the page bridges keep a one-line `map_or_else` call site; the form bridge
+/// calls [`color_space_env_resources`] directly on the form report's slice.
+#[must_use]
+pub fn page_color_space_env(page: &PageColorSpaceResourcesInspection) -> Vec<ColorSpaceResource> {
+    color_space_env_resources(&page.color_spaces)
 }
 
 fn color_space_resource(resource: &ClassifiedColorSpaceResource) -> ColorSpaceResource {

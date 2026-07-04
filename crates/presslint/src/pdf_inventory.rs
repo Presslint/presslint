@@ -17,8 +17,7 @@ use presslint_types::PageIndex;
 use serde::{Deserialize, Serialize};
 
 use crate::document_inventory::{
-    InventoryPageSkip, color_space_env_resources, inventory_names, page_index,
-    split_color_space_report,
+    InventoryPageSkip, inventory_names, page_color_space_env, page_index, split_color_space_report,
 };
 use crate::form_inventory::{
     FormExpandedInventory, FormWalkContext, SkippedFormInventory, build_page_inventory_with_forms,
@@ -289,7 +288,7 @@ pub fn build_pdf_inventory(
         let form_xobject_names =
             resources.map_or_else(Vec::new, |r| inventory_names(&r.form_xobject_names));
         let form_targets = resources.map_or(&[][..], |r| r.form_xobjects.as_slice());
-        let page_color_spaces = color_space_page.map_or_else(Vec::new, color_space_env_resources);
+        let page_color_spaces = color_space_page.map_or_else(Vec::new, page_color_space_env);
         let result = match build_page_inventory_with_forms(
             input,
             lookup,

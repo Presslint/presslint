@@ -28,6 +28,7 @@ mod dictionary_entries;
 mod dictionary_extent;
 mod document_access;
 mod document_page_content_extents;
+mod form_color_space_resources;
 mod form_xobject_resources;
 mod image_xobject;
 mod indirect_reference;
@@ -124,6 +125,9 @@ pub use document_page_content_extents::{
     DocumentPageContentExtentsInspection, DocumentPageContentExtentsInspectionError,
     inspect_document_page_content_extents, inspect_document_page_content_extents_resolved,
     inspect_document_page_content_extents_with_lookup,
+};
+pub use form_color_space_resources::{
+    FormColorSpaceResourcesInspection, inspect_form_color_space_resources,
 };
 pub use form_xobject_resources::{FormXObjectResourcesInspection, inspect_form_xobject_resources};
 pub use image_xobject::{

@@ -1,5 +1,52 @@
 # presslint Journal
 
+## T138 - Form-Scope Resource Colour-Space Tracking Wiring (F4-6 slice 1b)
+
+- `FormExpansion::expand` now inspects each target form's OWN
+  `/Resources /ColorSpace` via `inspect_form_color_space_resources`, builds a
+  LOCAL `Vec<ColorSpaceResource>` from it, and walks that form's content through
+  `build_inventory_with_color_space_env(ColorSpaceEnv::new(&form_color_spaces))`
+  instead of the no-env `build_inventory`. So a form's `cs`/`scn` resolve against
+  the FORM's own colour spaces, reporting the real
+  `IccBased`/`Separation`/`DeviceN` family. The env borrows into a per-form local
+  vector that lives only for that synchronous form inventory and is dropped when
+  `expand` returns — no env is merged across the page/form/nested-form boundary.
+- No page inheritance: the env is built ONLY from the form's own report, never
+  the invoking page's colour spaces. A nested form invoked inside a form is
+  inspected for ITS OWN `/Resources /ColorSpace` in the same recursive `expand`
+  step and gets its own local env; a nested form with no `/ColorSpace` does NOT
+  see the invoking form's spaces (ISO 32000-1 §7.8.3 + §8.10.2 Table 95).
+- The umbrella mapper `color_space_env_resources` is generalised to take
+  `&[ClassifiedColorSpaceResource]` (from a page report OR the new form report);
+  the two page bridges keep a one-line call site through the thin per-page
+  adapter `page_color_space_env` (`&page.color_spaces`), and the form bridge
+  calls `color_space_env_resources(&form_report.color_spaces)` directly.
+- READ-ONLY / no-audit-plumbing scope: the write/convert path is untouched and
+  the converter's up-front selector rejection is preserved. NO new
+  `SkippedFormInventoryReason` colour-space variant and NO `ColorAudit`
+  coverage-gap plumbing for form colour-space skips this slice (deferred to avoid
+  the enum ripple); the form colour-space skip buckets live only in the
+  `presslint-pdf` report for tests.
+- Copy budget: one `/Resources /ColorSpace` inspection per expanded form (bounded
+  by the existing `FormWalkContext` depth + budget + cycle detection), reusing the
+  same lookup/inheritance machinery. The per-form env is a borrow into a local
+  vector, not a per-operator clone; the decoded object bytes are not retained.
+- BEFORE/AFTER (verified on a synthetic local demo only). A common real-world
+  shape is a page whose only marking is `/Fm Do` while the painted colour spaces
+  are declared in the FORM's OWN `/Resources /ColorSpace`; under page-scope 1a
+  those form `cs`/`scn` operators surface as unresolved
+  `ColorSpace::Resource(/CS0)`/`Resource(/CS1)` gaps. After this slice those
+  form-declared spaces RESOLVE. Reproduced end-to-end through the real CLI on a
+  synthetic local-only demo (a page that only does `/Fm Do`, whose form's OWN
+  `/ColorSpace` declares `/CS0 [ /ICCBased … /N 4 ]` and `/CS1 [ /Separation
+  /Spot1 /DeviceCMYK … ]` and whose content does `/CS0 cs … scn /CS1 cs … scn`):
+  `presslint audit --json` reports `icc_based`:1 + `separation`:1 (spot `Spot1`),
+  zero `resource` observations, zero coverage gaps — where the pre-1b form walk
+  produced two unresolved `Resource(/CS…)` observations. Device-only and
+  page-only-colour PDFs are byte-identical in inventory + audit (regression tests
+  `page_without_form_invocations_is_unchanged`,
+  `device_operators_are_unchanged_by_a_populated_environment`).
+
 ## T137 - Page Resource Colour-Space Tracking Wiring (F4-6 slice 1a)
 
 - Both inventory bridges (`build_classic_pdf_inventory`, `build_pdf_inventory`) now

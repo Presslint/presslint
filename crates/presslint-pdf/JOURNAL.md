@@ -4,6 +4,46 @@ Older accumulated journal history lives in [JOURNAL-archive-2.md](JOURNAL-archiv
 
 ## Current State
 
+### T138 - Form-Scope Resource Colour-Space Inspector (F4-6 slice 1b)
+
+- New read-only inspector `inspect_form_color_space_resources(input, lookup,
+  object_byte_offset) -> FormColorSpaceResourcesInspection { object_byte_offset,
+  color_spaces, skipped }` classifies ONE form stream object's OWN
+  `/Resources /ColorSpace` into the same `ClassifiedColorSpaceResource` /
+  `SkippedColorSpaceResource` model as the page pass. It mirrors
+  `inspect_form_xobject_resources` (single object,
+  `ResourceContext::from_dictionary(..., None)`, never a hard error).
+- NO PAGE INHERITANCE (ISO 32000-1 §7.8.3 + §8.10.2 Table 95): a form paints
+  against its OWN `/Resources` only. A form that omits `/ColorSpace` (or omits
+  `/Resources`) gets an EMPTY colour-space environment — the honest
+  prepress-audit behaviour, so its `cs CS0` stays an unresolved `Resource(CS0)`
+  downstream. The obsolete PDF 1.1 page→form resource fallback is deliberately
+  NOT implemented.
+- REUSE, no classifier fork: the per-entry classifier
+  `classify_color_space_entry` (name / array / indirect definition → family,
+  shallow `/ICCBased /N`, `/Alternate`, spot names) and the whole
+  `ClassifiedColorSpaceResource` / `SkippedColorSpaceResource` taxonomy are reused
+  verbatim from `page_color_space_classify.rs` — the form inspector calls the same
+  `pub` classifier and never reimplements it. The effective-`/ColorSpace` loop
+  (resolve `/Resources`, `unique_entry(b"/ColorSpace")`,
+  `inspect_dictionary_entries`, per-name dedup, sort) mirrors the page inspector's
+  `inspect_effective_color_spaces` but lives self-contained in
+  `form_color_space_resources.rs`, taking a `None`-inherited `ResourceContext`
+  (the page files are left untouched, so the page-scope walk is byte-identical).
+- Copy budget: one `/Resources /ColorSpace` inspection per expanded form (bounded
+  by the caller's existing `FormWalkContext` budget), reusing the same
+  lookup/inheritance machinery. The report retains only the classified family
+  model + small skip records — no decoded object bytes, dictionaries, or stream
+  bodies are held (a `report_retains_no_source_bytes` test pins this). No new
+  per-operator allocation.
+- Concepts cross-checked (never copied, no GPL/AGPL read): Apache PDFBox
+  `PDFormXObject.getResources()` (may be null when a form omits `/Resources`),
+  pdf.js swapping to the form stream's own resources while preserving graphics
+  state, pikepdf resolving `/Do` + colour through the form's own `/Resources`;
+  ISO 32000-1 §7.8.3 (other content streams carry their own `/Resources`),
+  §8.10.1/§8.10.2 Table 95 (form XObject resource dictionary is self-contained,
+  not promoted to the outer stream).
+
 ### T137 - Page Resource Colour-Space Classification (F4-6 slice 1a)
 
 - New read-only inspector `inspect_document_page_color_space_resources[_with_lookup]`

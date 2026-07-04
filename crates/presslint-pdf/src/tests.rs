@@ -14,6 +14,7 @@ mod document_access;
 mod document_access_classic_chain;
 mod document_access_object_streams;
 mod document_page_content_extents;
+mod form_color_space_resources;
 mod form_xobject_resources;
 mod image_xobject;
 mod indirect_reference;

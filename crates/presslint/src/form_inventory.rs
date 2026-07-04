@@ -1,12 +1,13 @@
 //! Bounded recursive Form `XObject` content expansion for the PDF inventory bridge.
 //!
-//! A page-level Form `XObject` invocation (`/Fm Do`) is inventoried by
-//! [`presslint_inventory::build_inventory`] only as a `FormXObject` invocation
-//! entry; the colors, text, and vectors painted INSIDE the form stay invisible.
-//! This module walks a form's OWN decoded content stream, classifies the form's
-//! own `/Resources /XObject`, re-invokes `build_inventory` on the decoded form
-//! bytes in [`ContentScope::FormXObject`] with the ORIGINAL invoking page index,
-//! and merges nested entries immediately after the form invocation entry.
+//! A page-level Form `XObject` invocation (`/Fm Do`) is inventoried by the
+//! page-content walker only as a `FormXObject` invocation entry; the colors,
+//! text, and vectors painted INSIDE the form stay invisible. This module walks a
+//! form's OWN decoded content stream, classifies the form's own resource names,
+//! resolves the form's own colour-space environment, re-invokes
+//! [`presslint_inventory::build_inventory_with_color_space_env`] in
+//! [`ContentScope::FormXObject`] with the ORIGINAL invoking page index, and
+//! merges nested entries immediately after the form invocation entry.
 //!
 //! The walk is bounded by [`FormWalkContext`]: the default limit is 8 form-stream
 //! descents from the page plus a per-page total expansion budget, with
@@ -18,18 +19,20 @@ use std::collections::BTreeSet;
 
 use presslint_inventory::{
     ColorSpaceEnv, ColorSpaceResource, GraphicsStateEventKind, GraphicsWalkError, Inventory,
-    InventoryEntry, build_inventory, build_inventory_with_color_space_env, walk_graphics_state,
+    InventoryEntry, build_inventory_with_color_space_env, walk_graphics_state,
 };
 use presslint_pdf::{
     IndirectRef, ObjectLookup, PageXObjectResourceTarget, SkippedPageXObjectResource,
     SkippedPageXObjectResourceReason, inspect_content_stream_data_extent_with_lookup,
-    inspect_form_xobject_resources,
+    inspect_form_color_space_resources, inspect_form_xobject_resources,
 };
 use presslint_syntax::{assemble_operators, tokenize};
 use presslint_types::{ContentScope, ObjectKind, PageIndex, PdfName};
 use serde::{Deserialize, Serialize};
 
-use crate::document_inventory::{InventoryPageSkip, decode_page_content, inventory_names};
+use crate::document_inventory::{
+    InventoryPageSkip, color_space_env_resources, decode_page_content, inventory_names,
+};
 use crate::page_content::decode_content;
 use crate::pdf_inventory::PdfInventorySkip;
 
@@ -204,9 +207,9 @@ pub fn build_page_inventory_with_forms(
 
     // The PAGE content stream resolves `cs`/`scn` against the page colour-space
     // environment. Form XObject content (below) keeps its OWN resource
-    // environment and must NOT inherit the page one, so form walks use the
-    // device-only `build_inventory`; form-scope resource-colour tracking is
-    // slice 1b.
+    // environment and must NOT inherit the page one, so each form walk resolves
+    // `cs`/`scn` against a LOCAL env built from that form's own
+    // `/Resources /ColorSpace` (see `FormExpansion::expand`).
     let page_inventory = build_inventory_with_color_space_env(
         source,
         &assembled.records,
@@ -328,13 +331,28 @@ impl<'input> FormExpansion<'input> {
         let form_names = inventory_names(&form_resources.form_xobject_names);
         let scope = ContentScope::FormXObject { name: name.clone() };
 
-        let form_inventory = match build_inventory(
+        // The form paints against its OWN `/Resources /ColorSpace` only (ISO
+        // 32000-1 §7.8.3 + §8.10.2 Table 95): build a LOCAL colour-space env from
+        // the form's own classified spaces and resolve this form's `cs`/`scn`
+        // against it. No page-scope inheritance — a form with no `/ColorSpace`
+        // gets an empty env, so its `cs CS0` stays `Resource(CS0)`. The env
+        // borrows into `form_color_spaces`, which lives only for this walk and is
+        // dropped when `expand` returns; it is never merged across the
+        // page/form/nested-form boundary. Colour-space skips stay in the
+        // `presslint-pdf` report (no `SkippedFormInventory` plumbing this slice).
+        let form_color_spaces = color_space_env_resources(
+            &inspect_form_color_space_resources(self.input, self.lookup, target.object_byte_offset)
+                .color_spaces,
+        );
+
+        let form_inventory = match build_inventory_with_color_space_env(
             source,
             &records,
             self.page_index,
             &scope,
             &image_names,
             &form_names,
+            ColorSpaceEnv::new(&form_color_spaces),
         ) {
             Ok(inventory) => inventory,
             Err(error) => {
@@ -503,12 +521,13 @@ impl<'input> FormExpansion<'input> {
 }
 
 /// Collect, in content order, the resource names of form `Do` invocations that
-/// [`build_inventory`] classifies as form entries: an `XObject` invocation whose
-/// name is in `form_names` and not in `image_names` (image classification wins).
+/// [`presslint_inventory::build_inventory_with_color_space_env`] classifies as
+/// form entries: an `XObject` invocation whose name is in `form_names` and not
+/// in `image_names` (image classification wins).
 ///
 /// The returned names align one-to-one with the `FormXObject`-kind entries
-/// `build_inventory` emits over the same records, so callers can pair each form
-/// invocation entry with its invoking name.
+/// the inventory builder emits over the same records, so callers can pair each
+/// form invocation entry with its invoking name.
 fn form_invocation_names(
     source: &[u8],
     records: &[presslint_syntax::OperatorRecord],

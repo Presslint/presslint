@@ -470,6 +470,143 @@ fn repeated_non_cyclic_form_invocations_stop_at_total_budget() {
     );
 }
 
+/// A `/N 4` ICC-profile stream object (object 6) for `[ /ICCBased 6 0 R ]`.
+const ICC_N4: &[u8] = b"6 0 obj\n<< /N 4 /Length 1 >>\nstream\nx\nendstream\nendobj\n";
+/// A shallow tint-transform function stream (object 7) for `/Separation`.
+const TINT_FN: &[u8] =
+    b"7 0 obj\n<< /FunctionType 2 /Domain [ 0 1 ] /N 1 /Length 0 >>\nstream\n\nendstream\nendobj\n";
+
+#[test]
+fn form_scope_resource_color_spaces_resolve_to_icc_and_separation() {
+    // The page does nothing but invoke `/Fm`; the form declares its OWN
+    // `/ColorSpace` and paints an ICC fill then a Separation fill.
+    let form = stream_object(
+        4,
+        " /Type /XObject /Subtype /Form /BBox [ 0 0 100 100 ] /Resources << /ColorSpace << /CS0 [ /ICCBased 6 0 R ] /CS1 [ /Separation /PANTONE /DeviceCMYK 7 0 R ] >> >>",
+        b"/CS0 cs 0.1 0.2 0.3 0.4 scn 0 0 50 50 re f\n/CS1 cs 0.5 scn 0 0 50 50 re f",
+    );
+    let page_content = stream_object(5, "", b"q\n/Fm Do\nQ");
+    let source = classic_pdf(&[
+        CATALOG,
+        PAGES,
+        PAGE_WITH_FORM,
+        &form,
+        &page_content,
+        ICC_N4,
+        TINT_FN,
+    ]);
+
+    let report = build_pdf_inventory(&source, MAX).expect("inventory should build");
+
+    let form_scope = ContentScope::FormXObject {
+        name: PdfName(b"Fm".to_vec()),
+    };
+    // The form's `cs`/`scn` resolve against the FORM's own resources: the real
+    // `IccBased` and `Separation` families, not unresolved `Resource(/CS…)`.
+    let icc = report
+        .inventory
+        .entries
+        .iter()
+        .filter(|entry| entry.provenance.scope == form_scope)
+        .flat_map(|entry| entry.colors.iter())
+        .find(|color| color.space == ColorSpace::IccBased)
+        .expect("form ICC fill resolves to IccBased");
+    assert_eq!(icc.components, vec![0.1, 0.2, 0.3, 0.4]);
+
+    let separation = report
+        .inventory
+        .entries
+        .iter()
+        .filter(|entry| entry.provenance.scope == form_scope)
+        .flat_map(|entry| entry.colors.iter())
+        .find(|color| color.space == ColorSpace::Separation)
+        .expect("form Separation fill resolves to Separation");
+    assert_eq!(separation.spot_name, Some(PdfName(b"PANTONE".to_vec())));
+    // No colour observation stayed unresolved as a `Resource(name)`.
+    assert!(
+        report
+            .inventory
+            .entries
+            .iter()
+            .filter(|entry| entry.provenance.scope == form_scope)
+            .flat_map(|entry| entry.colors.iter())
+            .all(|color| !matches!(color.space, ColorSpace::Resource(_)))
+    );
+}
+
+#[test]
+fn form_without_color_space_does_not_inherit_page_color_space() {
+    // The PAGE declares `/CS0`, but the form omits `/ColorSpace` and uses
+    // `/CS0 cs`. Forms do not inherit page colour spaces (ISO 32000-1 §7.8.3 +
+    // §8.10.2 Table 95), so the form's `cs CS0` stays `Resource(CS0)`.
+    let page: &[u8] = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Fm 4 0 R >> /ColorSpace << /CS0 [ /ICCBased 6 0 R ] >> >> /Contents 5 0 R >>\nendobj\n";
+    let form = stream_object(
+        4,
+        " /Type /XObject /Subtype /Form /BBox [ 0 0 100 100 ]",
+        b"/CS0 cs 0.5 scn 0 0 50 50 re f",
+    );
+    let page_content = stream_object(5, "", b"q\n/Fm Do\nQ");
+    let source = classic_pdf(&[CATALOG, PAGES, page, &form, &page_content, ICC_N4]);
+
+    let report = build_pdf_inventory(&source, MAX).expect("inventory should build");
+
+    let form_scope = ContentScope::FormXObject {
+        name: PdfName(b"Fm".to_vec()),
+    };
+    let color = report
+        .inventory
+        .entries
+        .iter()
+        .filter(|entry| entry.provenance.scope == form_scope)
+        .flat_map(|entry| entry.colors.iter())
+        .next()
+        .expect("form paints one colour");
+    // Honest KEEP: the form's env is empty, so `/CS0` is unresolved, NOT the
+    // page's `IccBased`.
+    assert_eq!(color.space, ColorSpace::Resource(PdfName(b"CS0".to_vec())));
+    assert_ne!(color.space, ColorSpace::IccBased);
+}
+
+#[test]
+fn nested_form_resolves_its_own_color_space_independently() {
+    // Page invokes form `/A` (no colour), which invokes nested form `/B` whose
+    // OWN `/ColorSpace` declares `/CS0`. The nested form resolves it in the same
+    // recursive `expand` step, without seeing `/A`'s (absent) spaces.
+    let page = page_with_xobjects_object("/A 4 0 R", 6);
+    let form_a = form_xobject(4, "/B 5 0 R", b"/B Do");
+    let form_b = stream_object(
+        5,
+        " /Type /XObject /Subtype /Form /BBox [ 0 0 100 100 ] /Resources << /ColorSpace << /CS0 [ /ICCBased 7 0 R ] >> >>",
+        b"/CS0 cs 0.2 0.4 0.6 scn 0 0 50 50 re f",
+    );
+    let page_content = stream_object(6, "", b"/A Do");
+    let icc_n3 = b"7 0 obj\n<< /N 3 /Length 1 >>\nstream\nx\nendstream\nendobj\n";
+    let source = classic_pdf(&[
+        CATALOG,
+        PAGES,
+        &page,
+        &form_a,
+        &form_b,
+        &page_content,
+        icc_n3,
+    ]);
+
+    let report = build_pdf_inventory(&source, MAX).expect("inventory should build");
+
+    let nested_scope = ContentScope::FormXObject {
+        name: PdfName(b"B".to_vec()),
+    };
+    let color = report
+        .inventory
+        .entries
+        .iter()
+        .filter(|entry| entry.provenance.scope == nested_scope)
+        .flat_map(|entry| entry.colors.iter())
+        .find(|color| color.space == ColorSpace::IccBased)
+        .expect("nested form ICC fill resolves to IccBased");
+    assert_eq!(color.components, vec![0.2, 0.4, 0.6]);
+}
+
 #[test]
 fn nested_resource_classification_skips_surface_as_form_skips() {
     let page = page_with_xobjects_object("/A 4 0 R", 6);
