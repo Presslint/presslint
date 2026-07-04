@@ -5,13 +5,12 @@ use presslint_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::color_space_env::ColorSpaceEnv;
 use crate::digest::{
     form_object_digest, image_object_digest, text_object_digest, usize_to_u32, vector_object_digest,
 };
-use crate::walker::{
-    GraphicsStateEvent, GraphicsStateEventKind, GraphicsStateSnapshot, GraphicsStateWalker,
-    GraphicsWalkError, PathPaintKind, TextRenderingMode,
+use presslint_paint::{
+    ColorSpaceEnv, GraphicsStateEvent, GraphicsStateEventKind, GraphicsStateSnapshot,
+    GraphicsStateWalker, GraphicsWalkError, PathPaintKind, TextRenderingMode,
 };
 
 /// One queryable page object discovered by the inventory pass.
@@ -352,7 +351,7 @@ fn collect_entries(
 /// This mirrors [`collect_entries`] exactly: it walks every record in order via
 /// [`GraphicsStateWalker::step`] (so save/restore, snapshot propagation, and
 /// error detection on records after the last entry-producing operator match
-/// [`walk_graphics_state`](crate::walker::walk_graphics_state)), and assigns the
+/// [`walk_graphics_state`](presslint_paint::walk_graphics_state)), and assigns the
 /// same shared monotonic content-order `sequence` (`entries.len()` at emit time)
 /// to each emitted entry. The first malformed record short-circuits with the
 /// same `GraphicsWalkError` the materializing path would return. Output is

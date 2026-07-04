@@ -1,5 +1,19 @@
 # presslint-inventory Journal
 
+## T141 - Graphics-State Walker Moved to `presslint-paint` (Phase 0a-1)
+
+- The graphics-state walker and its two private helpers (`walker.rs`,
+  `color_space_env.rs`, `operands.rs`) were relocated verbatim into the new
+  `presslint-paint` spine crate. `presslint-inventory` now depends on
+  `presslint-paint` and re-exports the SAME public names via
+  `pub use presslint_paint::{…}`, so the crate's public surface is byte-identical
+  and every downstream consumer compiles unchanged.
+- `digest.rs` and `inventory.rs` stay in this crate; their `use crate::walker::…`
+  / `use crate::color_space_env::…` imports were repointed to `presslint_paint::…`.
+- Pure mechanical crate move: no behaviour change. Inventory output, digests,
+  serde shapes, and the colour audit are bit-identical (existing pinned fixtures
+  and the full suite pass unchanged, no test edited).
+
 ## T137 - Page Resource Colour-Space Tracking (F4-6 slice 1a)
 
 - The graphics-state colour slot is generalised from `GraphicsDeviceColor` to

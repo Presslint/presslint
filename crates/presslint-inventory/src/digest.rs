@@ -2,7 +2,7 @@ use presslint_types::{
     ByteRange, ColorObservation, ColorSpace, ColorUsage, ContentScope, PageIndex, PdfName,
 };
 
-use crate::walker::{GraphicsStateEvent, PathPaintKind, TextRenderingMode, TextShowOperator};
+use presslint_paint::{GraphicsStateEvent, PathPaintKind, TextRenderingMode, TextShowOperator};
 
 pub fn vector_object_digest(
     page: PageIndex,

@@ -325,6 +325,16 @@ name = "presslint-inventory"
 version = "0.0.1"
 dependencies = [
  "criterion",
+ "presslint-paint",
+ "presslint-syntax",
+ "presslint-types",
+ "serde",
+]
+
+[[package]]
+name = "presslint-paint"
+version = "0.0.1"
+dependencies = [
  "presslint-syntax",
  "presslint-types",
  "serde",

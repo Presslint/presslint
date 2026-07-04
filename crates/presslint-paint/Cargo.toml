@@ -1,24 +1,16 @@
 [package]
-name = "presslint-inventory"
+name = "presslint-paint"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Queryable PDF page-object inventory for presslint."
+description = "Graphics-state walker and paint-program spine for presslint."
 
 [dependencies]
 presslint-types.workspace = true
 presslint-syntax.workspace = true
-presslint-paint.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
-criterion.workspace = true
-
-[[bench]]
-name = "inventory"
-harness = false
 
 [lints]
 workspace = true

@@ -5,6 +5,7 @@ members = [
     "crates/presslint-types",
     "crates/presslint-pdf",
     "crates/presslint-syntax",
+    "crates/presslint-paint",
     "crates/presslint-inventory",
     "crates/presslint-selectors",
     "crates/presslint-actions",
@@ -30,6 +31,7 @@ presslint = { path = "crates/presslint", version = "0.0.1" }
 presslint-types = { path = "crates/presslint-types", version = "0.0.1" }
 presslint-pdf = { path = "crates/presslint-pdf", version = "0.0.1" }
 presslint-syntax = { path = "crates/presslint-syntax", version = "0.0.1" }
+presslint-paint = { path = "crates/presslint-paint", version = "0.0.1" }
 presslint-inventory = { path = "crates/presslint-inventory", version = "0.0.1" }
 presslint-selectors = { path = "crates/presslint-selectors", version = "0.0.1" }
 presslint-actions = { path = "crates/presslint-actions", version = "0.0.1" }
