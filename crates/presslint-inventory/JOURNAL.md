@@ -1,5 +1,23 @@
 # presslint-inventory Journal
 
+## T142 - Streaming Path Consumes `PaintProgram` (Phase 0a-2)
+
+- `collect_entries_streaming` is rerouted to consume the replayable
+  `presslint_paint::PaintProgram` instead of driving `GraphicsStateWalker::step`
+  directly: `for op in PaintProgram::new(source, records, env) { let event = op?; … }`.
+  The `?` short-circuit (the program fuses on the first malformed record) and the
+  `sequence = usize_to_u32(entries.len())`-at-emit rule reproduce the previous
+  behaviour exactly; the vector→text→image→form classify order is unchanged.
+- The now-unused `GraphicsStateWalker` import was dropped; `GraphicsStateEvent`,
+  `GraphicsStateSnapshot`, `GraphicsWalkError`, and the classify helpers remain. The
+  doc-comment's intra-doc walker-step link was demoted to a plain code span so docs
+  stay clean with the type out of scope.
+- Bit-identical output: inventory entries, digests, serde shapes, and the colour
+  audit are unchanged; the two streaming guard tests
+  (`streaming_build_inventory_equals_events_path_for_mixed_stream`,
+  `…_surfaces_walk_error_after_last_entry`) and the pinned fixtures pass unchanged,
+  no test edited.
+
 ## T141 - Graphics-State Walker Moved to `presslint-paint` (Phase 0a-1)
 
 - The graphics-state walker and its two private helpers (`walker.rs`,

@@ -10,7 +10,7 @@ use crate::digest::{
 };
 use presslint_paint::{
     ColorSpaceEnv, GraphicsStateEvent, GraphicsStateEventKind, GraphicsStateSnapshot,
-    GraphicsStateWalker, GraphicsWalkError, PathPaintKind, TextRenderingMode,
+    GraphicsWalkError, PaintProgram, PathPaintKind, TextRenderingMode,
 };
 
 /// One queryable page object discovered by the inventory pass.
@@ -344,29 +344,29 @@ fn collect_entries(
     Inventory { entries }
 }
 
-/// Drive the walker step-by-step on the `source + records` path, classifying
-/// each owned event as it streams past instead of first materializing the whole
-/// `Vec<GraphicsStateEvent>`.
+/// Consume a replayable [`PaintProgram`] over the `source + records` path,
+/// classifying each op as it streams past instead of first materializing the
+/// whole `Vec<GraphicsStateEvent>`.
 ///
-/// This mirrors [`collect_entries`] exactly: it walks every record in order via
-/// [`GraphicsStateWalker::step`] (so save/restore, snapshot propagation, and
-/// error detection on records after the last entry-producing operator match
-/// [`walk_graphics_state`](presslint_paint::walk_graphics_state)), and assigns the
-/// same shared monotonic content-order `sequence` (`entries.len()` at emit time)
-/// to each emitted entry. The first malformed record short-circuits with the
-/// same `GraphicsWalkError` the materializing path would return. Output is
-/// therefore bit-identical to feeding the full event slice to `collect_entries`,
-/// but peak retained event memory drops from O(records) to O(1).
+/// This mirrors [`collect_entries`] exactly: iterating the program walks every
+/// record in order via `GraphicsStateWalker::step` (so save/restore, snapshot
+/// propagation, and error detection on records after the last entry-producing
+/// operator match [`walk_graphics_state`](presslint_paint::walk_graphics_state)),
+/// and assigns the same shared monotonic content-order `sequence` (`entries.len()`
+/// at emit time) to each emitted entry. The program fuses on the first malformed
+/// record, so the `?` short-circuits with the same `GraphicsWalkError` the
+/// materializing path would return. Output is therefore bit-identical to feeding
+/// the full event slice to `collect_entries`, but peak retained event memory drops
+/// from O(records) to O(1).
 fn collect_entries_streaming(
     source: &[u8],
     records: &[OperatorRecord],
     color_space_env: ColorSpaceEnv<'_>,
     mut classify: impl FnMut(&GraphicsStateEvent, u32) -> Option<InventoryEntry>,
 ) -> Result<Inventory, GraphicsWalkError> {
-    let mut walker = GraphicsStateWalker::with_color_space_env(color_space_env);
     let mut entries = Vec::new();
-    for (index, record) in records.iter().enumerate() {
-        let event = walker.step(source, index, record)?;
+    for op in PaintProgram::new(source, records, color_space_env) {
+        let event = op?;
         let sequence = usize_to_u32(entries.len());
         if let Some(entry) = classify(&event, sequence) {
             entries.push(entry);

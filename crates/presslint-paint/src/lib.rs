@@ -11,9 +11,14 @@
 
 mod color_space_env;
 mod operands;
+mod paint_program;
 mod walker;
 
+#[cfg(test)]
+mod tests;
+
 pub use color_space_env::{ColorSpaceEnv, ColorSpaceResource};
+pub use paint_program::{PaintOp, PaintOps, PaintProgram};
 pub use walker::{
     GraphicsColor, GraphicsStateEvent, GraphicsStateEventKind, GraphicsStateSnapshot,
     GraphicsStateWalker, GraphicsWalkError, GraphicsWalkErrorKind, PathPaintKind,

@@ -1,5 +1,34 @@
 # presslint-paint Journal
 
+## T142 - Replayable `PaintProgram` Iterator (Phase 0a-2)
+
+- New `paint_program.rs` introduces the paint program as a REPLAYABLE stream.
+  `PaintProgram<'a>` is a cheap, `Copy` descriptor `{ source, records, env }`
+  holding only borrowed bytes/records and the `Copy` `ColorSpaceEnv`; it owns no
+  walk state and materializes no `Vec`. `PaintProgram::new(source, records, env)`
+  builds it; `ops()` (and `IntoIterator` for both the owned value and
+  `&PaintProgram`, plus an inherent `iter()` alias for the reference impl)
+  constructs a FRESH `GraphicsStateWalker::with_color_space_env(env)` and re-walks
+  `records` from index `0` every call, so the same program can be replayed.
+- `PaintOps<'a>` is the iterator: `Iterator<Item = Result<GraphicsStateEvent,
+  GraphicsWalkError>>` holding `{ walker, source, records, index, done }`. `next`
+  drives `walker.step(source, index, record)`, increments `index`, and FUSES on the
+  first `Err` — it yields that `Err` once, sets `done`, then returns `None` forever,
+  faithfully modelling the current first-malformed-record short-circuit.
+- An optional `pub type PaintOp = GraphicsStateEvent;` alias seeds paint vocabulary
+  WITHOUT any type restructuring (the canonical rename is a later slice). The yielded
+  item type stays `GraphicsStateEvent` this slice.
+- Thin driver over the SAME `walker.step`: allocates nothing per op beyond what the
+  walker already does (the per-event `state.clone()` hotspot is untouched). Replay
+  re-runs the walk from scratch by design; extra retained memory is O(1). No new
+  dependency; crate stays pure (`#![forbid(unsafe_code)]`).
+- New `tests.rs` proves replay (iterating one program twice/thrice yields identical
+  op vectors) and equality with `walk_graphics_state` (the short-circuiting
+  `collect::<Result<Vec<_>, _>>()` equals the materializing walk, including the fused
+  error case). `presslint-inventory` now consumes this program on its streaming path
+  with bit-identical output (its pinned fixtures and the two streaming guard tests
+  pass unchanged).
+
 ## T141 - Crate Created; Graphics-State Walker Moved In (Phase 0a-1)
 
 - New workspace crate `presslint-paint` (Apache-2.0, `#![forbid(unsafe_code)]`)
