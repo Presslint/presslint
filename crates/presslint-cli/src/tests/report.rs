@@ -146,6 +146,7 @@ fn synthetic_audit() -> ColorUsageAudit {
                 entries: Vec::new(),
             },
             xobject_resource_error: None,
+            color_space_resource_error: None,
             pages: vec![PdfInventoryPage {
                 page_index: PageIndex(0),
                 result: PdfInventoryPageResult::Inventoried {
@@ -154,6 +155,7 @@ fn synthetic_audit() -> ColorUsageAudit {
                 },
                 image_xobjects: Vec::new(),
                 xobject_resource_skipped: Vec::new(),
+                color_space_resource_skipped: Vec::new(),
             }],
         },
     }

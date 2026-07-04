@@ -85,6 +85,7 @@ fn inventoried_page_with_form_skipped(
         },
         image_xobjects: Vec::new(),
         xobject_resource_skipped: Vec::new(),
+        color_space_resource_skipped: Vec::new(),
     }
 }
 
@@ -96,6 +97,7 @@ fn skipped_page(page: u32) -> PdfInventoryPage {
         },
         image_xobjects: Vec::new(),
         xobject_resource_skipped: Vec::new(),
+        color_space_resource_skipped: Vec::new(),
     }
 }
 
@@ -104,6 +106,7 @@ fn synthetic_inventory(entries: Vec<InventoryEntry>, pages: Vec<PdfInventoryPage
         byte_len: 0,
         inventory: Inventory { entries },
         xobject_resource_error: None,
+        color_space_resource_error: None,
         pages,
     }
 }

@@ -93,6 +93,7 @@ fn inventoried_page_with_form_skipped(
         },
         image_xobjects: Vec::new(),
         xobject_resource_skipped: Vec::new(),
+        color_space_resource_skipped: Vec::new(),
     }
 }
 
@@ -104,6 +105,7 @@ fn skipped_page(page: u32) -> PdfInventoryPage {
         },
         image_xobjects: Vec::new(),
         xobject_resource_skipped: Vec::new(),
+        color_space_resource_skipped: Vec::new(),
     }
 }
 
@@ -112,6 +114,7 @@ fn synthetic_inventory(entries: Vec<InventoryEntry>, pages: Vec<PdfInventoryPage
         byte_len: 0,
         inventory: Inventory { entries },
         xobject_resource_error: None,
+        color_space_resource_error: None,
         pages,
     }
 }
@@ -361,7 +364,10 @@ fn skipped_page_and_unmodeled_space_make_audit_incomplete() {
             1,
             0,
             ObjectKind::Vector,
-            vec![observation(ColorUsage::Fill, ColorSpace::IccBased)],
+            // `Lab` is still an unmodeled space after resource colour-space
+            // tracking (only `IccBased`/`Separation`/`DeviceN` became modeled),
+            // so it still exercises the `UnmodeledColorSpace` gap path.
+            vec![observation(ColorUsage::Fill, ColorSpace::Lab)],
         )],
         vec![skipped_page(0), inventoried_page(1, 1)],
     );
@@ -381,7 +387,7 @@ fn skipped_page_and_unmodeled_space_make_audit_incomplete() {
     assert_eq!(unmodeled.entry_index, Some(0));
     assert_eq!(unmodeled.kind_of_object, Some(ObjectKind::Vector));
     assert_eq!(unmodeled.usage, Some(ColorUsage::Fill));
-    assert_eq!(unmodeled.color_space, Some(ColorSpace::IccBased));
+    assert_eq!(unmodeled.color_space, Some(ColorSpace::Lab));
 }
 
 #[test]

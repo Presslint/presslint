@@ -140,12 +140,21 @@ pub enum CoverageGapKind {
     FormExpansionSkipped,
     /// A page-scope `XObject` resource could not be classified.
     PageResourceSkipped,
+    /// A page-scope `/Resources /ColorSpace` resource could not be classified
+    /// (present but unresolvable: pattern/indexed/Lab/CalGray/CalRGB, an
+    /// unresolved reference, or a malformed operand).
+    ColorSpaceResourceSkipped,
     /// The document-level page `XObject` resource inspection could not begin.
     ResourceInspectionError,
+    /// The document-level `/Resources /ColorSpace` resource inspection could not
+    /// begin.
+    ColorSpaceResourceInspectionError,
     /// A marking object observed a color space this audit neither models nor
-    /// resolves (`IccBased`, `CalGray`, `CalRgb`, `Lab`, `Indexed`,
-    /// `Separation`, `DeviceN`, `Pattern`, `Resource(_)`, or non-image
-    /// `Unknown`).
+    /// resolves (`CalGray`, `CalRgb`, `Lab`, `Indexed`, `Pattern`,
+    /// `Resource(_)`, or non-image `Unknown`).
+    ///
+    /// Resource colours resolved to `IccBased`/`Separation`/`DeviceN` are NOT
+    /// gaps: they are honest observations of the real source family.
     UnmodeledColorSpace,
 }
 
@@ -283,6 +292,19 @@ fn scan_inventory(inventory: &PdfInventory) -> Scan {
                 ));
             }
         }
+        // Colour-space resource skips that describe a present-but-unresolvable
+        // space (pattern/indexed/Lab/CalGray/CalRGB, unresolved reference,
+        // malformed operand) hide colour and are honest coverage gaps. A page
+        // that simply declares no `/Resources` or no `/ColorSpace` dictionary
+        // has no colour to miss and is not a gap.
+        for skip in &page.color_space_resource_skipped {
+            if is_unclassified_color_space_skip(&skip.reason) {
+                coverage_gaps.push(page_gap(
+                    CoverageGapKind::ColorSpaceResourceSkipped,
+                    page.page_index,
+                ));
+            }
+        }
 
         let mut page_summary = SummaryAccumulator::default();
         match &page.result {
@@ -325,6 +347,17 @@ fn scan_inventory(inventory: &PdfInventory) -> Scan {
     if inventory.xobject_resource_error.is_some() {
         coverage_gaps.push(CoverageGap {
             kind: CoverageGapKind::ResourceInspectionError,
+            page: None,
+            object: None,
+            entry_index: None,
+            kind_of_object: None,
+            usage: None,
+            color_space: None,
+        });
+    }
+    if inventory.color_space_resource_error.is_some() {
+        coverage_gaps.push(CoverageGap {
+            kind: CoverageGapKind::ColorSpaceResourceInspectionError,
             page: None,
             object: None,
             entry_index: None,
@@ -410,7 +443,14 @@ fn classify_observation(
             kind: entry.kind,
             usage: observation.usage,
         }),
-        ColorSpace::DeviceCmyk | ColorSpace::DeviceGray => {}
+        // Modeled device process spaces, and resource colours resolved to their
+        // real source family (`IccBased`/`Separation`/`DeviceN`), are honest
+        // observations, not coverage gaps. Only still-unresolvable spaces remain.
+        ColorSpace::DeviceCmyk
+        | ColorSpace::DeviceGray
+        | ColorSpace::IccBased
+        | ColorSpace::Separation
+        | ColorSpace::DeviceN => {}
         _ => coverage_gaps.push(entry_gap(
             CoverageGapKind::UnmodeledColorSpace,
             entry_index,
@@ -451,6 +491,29 @@ const fn is_unclassified_resource_skip(
 ) -> bool {
     use presslint_pdf::SkippedPageXObjectResourceReason as Reason;
     !matches!(reason, Reason::MissingResources | Reason::MissingXObject)
+}
+
+/// Decide whether a colour-space resource skip hides colour (a genuine coverage
+/// gap) rather than merely recording the absence of any colour-space resources.
+///
+/// `MissingColorSpaceResources`/`MissingColorSpace` and the delegated
+/// `Resources` `MissingResources`/`MissingXObject` mean the page declares no
+/// resources to classify. Every other skip concerns a colour space that is
+/// present but could not be resolved or is deferred to a later slice, which does
+/// hide colour.
+const fn is_unclassified_color_space_skip(
+    reason: &presslint_pdf::SkippedColorSpaceResourceReason,
+) -> bool {
+    use presslint_pdf::SkippedColorSpaceResourceReason as Reason;
+    use presslint_pdf::SkippedPageXObjectResourceReason as ResourcesReason;
+    match reason {
+        Reason::MissingColorSpaceResources | Reason::MissingColorSpace => false,
+        Reason::Resources { resources_reason } => !matches!(
+            resources_reason,
+            ResourcesReason::MissingResources | ResourcesReason::MissingXObject
+        ),
+        _ => true,
+    }
 }
 
 /// Build a page-anchored coverage gap with no object detail.

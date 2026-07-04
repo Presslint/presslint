@@ -5,6 +5,7 @@ use presslint_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::color_space_env::ColorSpaceEnv;
 use crate::digest::{
     form_object_digest, image_object_digest, text_object_digest, usize_to_u32, vector_object_digest,
 };
@@ -66,9 +67,12 @@ pub fn build_vector_inventory(
     page: PageIndex,
     scope: &ContentScope,
 ) -> Result<Inventory, GraphicsWalkError> {
-    collect_entries_streaming(source, records, |event, sequence| {
-        vector_entry(page, scope, event, sequence)
-    })
+    collect_entries_streaming(
+        source,
+        records,
+        ColorSpaceEnv::empty(),
+        |event, sequence| vector_entry(page, scope, event, sequence),
+    )
 }
 
 /// Build text inventory entries from assembled content-stream operators.
@@ -86,9 +90,12 @@ pub fn build_text_inventory(
     page: PageIndex,
     scope: &ContentScope,
 ) -> Result<Inventory, GraphicsWalkError> {
-    collect_entries_streaming(source, records, |event, sequence| {
-        text_entry(page, scope, event, sequence)
-    })
+    collect_entries_streaming(
+        source,
+        records,
+        ColorSpaceEnv::empty(),
+        |event, sequence| text_entry(page, scope, event, sequence),
+    )
 }
 
 /// Build image inventory entries from assembled content-stream operators.
@@ -110,9 +117,12 @@ pub fn build_image_inventory(
     scope: &ContentScope,
     image_xobject_names: &[PdfName],
 ) -> Result<Inventory, GraphicsWalkError> {
-    collect_entries_streaming(source, records, |event, sequence| {
-        image_entry(page, scope, event, image_xobject_names, sequence)
-    })
+    collect_entries_streaming(
+        source,
+        records,
+        ColorSpaceEnv::empty(),
+        |event, sequence| image_entry(page, scope, event, image_xobject_names, sequence),
+    )
 }
 
 /// Build form `XObject` invocation inventory entries from assembled
@@ -135,9 +145,12 @@ pub fn build_form_inventory(
     scope: &ContentScope,
     form_xobject_names: &[PdfName],
 ) -> Result<Inventory, GraphicsWalkError> {
-    collect_entries_streaming(source, records, |event, sequence| {
-        form_entry(page, scope, event, form_xobject_names, sequence)
-    })
+    collect_entries_streaming(
+        source,
+        records,
+        ColorSpaceEnv::empty(),
+        |event, sequence| form_entry(page, scope, event, form_xobject_names, sequence),
+    )
 }
 
 /// Build a combined page-object inventory from assembled content-stream
@@ -165,7 +178,41 @@ pub fn build_inventory(
     image_xobject_names: &[PdfName],
     form_xobject_names: &[PdfName],
 ) -> Result<Inventory, GraphicsWalkError> {
-    collect_entries_streaming(source, records, |event, sequence| {
+    build_inventory_with_color_space_env(
+        source,
+        records,
+        page,
+        scope,
+        image_xobject_names,
+        form_xobject_names,
+        ColorSpaceEnv::empty(),
+    )
+}
+
+/// Build a combined page-object inventory, resolving `cs`/`scn` resource colours
+/// against a borrowed page colour-space environment.
+///
+/// This is [`build_inventory`] plus the one new abstraction: `cs`/`CS` +
+/// `sc`/`scn`/`SC`/`SCN` colours are resolved against `color_space_env` and
+/// emitted as honest [`ColorObservation`]s carrying the real source family and
+/// spot colorant. With [`ColorSpaceEnv::empty`] this is byte-identical to
+/// `build_inventory`, so device-only pages and form content (which must NOT
+/// inherit the page environment in this slice) reduce to the prior behaviour.
+///
+/// # Errors
+///
+/// Returns a structured graphics-state walker error for malformed records in the
+/// supported operator set or invalid source ranges.
+pub fn build_inventory_with_color_space_env(
+    source: &[u8],
+    records: &[OperatorRecord],
+    page: PageIndex,
+    scope: &ContentScope,
+    image_xobject_names: &[PdfName],
+    form_xobject_names: &[PdfName],
+    color_space_env: ColorSpaceEnv<'_>,
+) -> Result<Inventory, GraphicsWalkError> {
+    collect_entries_streaming(source, records, color_space_env, |event, sequence| {
         // Same fixed dispatch order as `inventory_from_graphics_events`: image is
         // tried before form so a name present in both lists wins as an image.
         vector_entry(page, scope, event, sequence)
@@ -314,9 +361,10 @@ fn collect_entries(
 fn collect_entries_streaming(
     source: &[u8],
     records: &[OperatorRecord],
+    color_space_env: ColorSpaceEnv<'_>,
     mut classify: impl FnMut(&GraphicsStateEvent, u32) -> Option<InventoryEntry>,
 ) -> Result<Inventory, GraphicsWalkError> {
-    let mut walker = GraphicsStateWalker::new();
+    let mut walker = GraphicsStateWalker::with_color_space_env(color_space_env);
     let mut entries = Vec::new();
     for (index, record) in records.iter().enumerate() {
         let event = walker.step(source, index, record)?;

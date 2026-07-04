@@ -17,8 +17,8 @@
 use std::collections::BTreeSet;
 
 use presslint_inventory::{
-    GraphicsStateEventKind, GraphicsWalkError, Inventory, InventoryEntry, build_inventory,
-    walk_graphics_state,
+    ColorSpaceEnv, ColorSpaceResource, GraphicsStateEventKind, GraphicsWalkError, Inventory,
+    InventoryEntry, build_inventory, build_inventory_with_color_space_env, walk_graphics_state,
 };
 use presslint_pdf::{
     IndirectRef, ObjectLookup, PageXObjectResourceTarget, SkippedPageXObjectResource,
@@ -186,6 +186,7 @@ pub fn build_page_inventory_with_forms(
     page_image_names: &[PdfName],
     page_form_names: &[PdfName],
     form_targets: &[PageXObjectResourceTarget],
+    page_color_spaces: &[ColorSpaceResource],
     context: FormWalkContext,
 ) -> Result<FormExpandedInventory, InventoryPageSkip> {
     let (page_bytes, first_stream_offset) =
@@ -201,13 +202,19 @@ pub fn build_page_inventory_with_forms(
             error,
         })?;
 
-    let page_inventory = build_inventory(
+    // The PAGE content stream resolves `cs`/`scn` against the page colour-space
+    // environment. Form XObject content (below) keeps its OWN resource
+    // environment and must NOT inherit the page one, so form walks use the
+    // device-only `build_inventory`; form-scope resource-colour tracking is
+    // slice 1b.
+    let page_inventory = build_inventory_with_color_space_env(
         source,
         &assembled.records,
         page_index,
         &ContentScope::Page,
         page_image_names,
         page_form_names,
+        ColorSpaceEnv::new(page_color_spaces),
     )
     .map_err(|error| InventoryPageSkip::GraphicsWalkFailed {
         object_byte_offset: first_stream_offset,

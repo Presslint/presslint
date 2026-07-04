@@ -130,6 +130,7 @@ fn expand_first_page_with_context(
         &image_names,
         &form_names,
         &page_resources.form_xobjects,
+        &[],
         context,
     )
     .expect("first page inventory")

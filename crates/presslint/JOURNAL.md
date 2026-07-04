@@ -1,5 +1,40 @@
 # presslint Journal
 
+## T137 - Page Resource Colour-Space Tracking Wiring (F4-6 slice 1a)
+
+- Both inventory bridges (`build_classic_pdf_inventory`, `build_pdf_inventory`) now
+  run the `presslint-pdf` page colour-space resource pass alongside the `/XObject`
+  pass and thread each page's classified colour spaces into the walker via a borrowed
+  `ColorSpaceEnv`. `color_space_env_resources` maps a `presslint-pdf`
+  `ClassifiedColorSpaceResource` (structural family) into the inventory-native
+  `ColorSpaceResource` — the crate-layering seam. The alternate space is a recorded
+  fact and is deliberately NOT substituted. New non-fatal `color_space_resource_error`
+  + per-page `color_space_resource_skipped` mirror the existing `xobject_resource_*`
+  fields. Shared `split_color_space_report` helper keeps both bridges under the
+  100-line pedantic gate; `backend_lookup` factors the neutral backend dispatch.
+- `audit_color_usage`: resource colours resolved to their real family
+  (`IccBased`/`Separation`/`DeviceN`) are now HONEST observations, no longer
+  `UnmodeledColorSpace` coverage gaps — only still-unresolvable spaces
+  (`Lab`/`CalGray`/`CalRGB`/`Indexed`/`Pattern`/`Resource(_)`/non-image `Unknown`)
+  remain gaps. New coverage-gap kinds `ColorSpaceResourceSkipped` (a present-but-
+  unresolvable page colour space hides colour) and `ColorSpaceResourceInspectionError`
+  (the document-level pass could not begin, e.g. a compressed root — honest, not a
+  hard failure); `MissingColorSpaceResources`/`MissingColorSpace` are NOT gaps (no
+  colour to miss).
+- Read-only: the write/convert path is untouched and the converter's up-front
+  selector rejection for resource colour spaces is preserved. Scope is PAGE content
+  streams; form XObject resource colours are a counted skip (slice 1b). Existing
+  audit tests updated for the corrected behaviour (an `IccBased` observation is no
+  longer an unmodeled gap; the compressed-leaf audit tolerates the new colour-space
+  inspection-error gap) — no test weakened.
+- Resource colour visibility note: before this slice, `cs`/`scn` were `NoOp`
+  and resource colour usage was invisible in the audit. After it, the audit sees
+  and attributes-by-name page-scope resource colour usage. Colour spaces declared
+  only in FORM XObject `/Resources /ColorSpace` remain outside page-scope 1a, so
+  they honestly surface as `ColorSpace::Resource(name)` -> `UnmodeledColorSpace`
+  gaps rather than resolved `IccBased`/`Separation`; completing that resolution is
+  exactly slice 1b (form-scope resource tracking).
+
 ## T134 - Compressed-Leaf Content Inventory Wiring
 
 - `decode_page_content` now handles the additive
@@ -27,9 +62,9 @@
   1000-line gate): two compressed leaves referencing uncompressed RGB content now
   produce `Inventoried` pages and real `audit_color_usage` RGB findings with zero
   `SkippedPage` gaps; a compressed leaf whose `/Contents` target is itself compressed
-  stays a `TargetSkipped` skip with an `Incomplete`/no-colour audit. The 104MB real
+  stays a `TargetSkipped` skip with an `Incomplete`/no-colour audit. The real
   corpus was not re-run here (not present in this tree); the operator should confirm
-  the 36-`SkippedPage`-gaps → real-colour before/after where the corpus lives.
+  the `SkippedPage`-gaps -> real-colour before/after on a LOCAL-only file.
 
 ## T133 - Compressed Page-Tree Navigation In The Inventory Bridge
 

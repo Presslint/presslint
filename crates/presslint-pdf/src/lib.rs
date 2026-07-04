@@ -40,6 +40,8 @@ mod object_resolver;
 mod object_stream;
 mod object_stream_objects;
 mod page_boxes;
+mod page_color_space_classify;
+mod page_color_space_resources;
 mod page_content_extents;
 mod page_content_targets;
 mod page_contents;
@@ -178,6 +180,13 @@ pub use page_boxes::{
     DocumentPageBoxesInspection, PageBoxInspectionError, PageBoxKind, PageBoxSource,
     PageBoxesInspection, PageRectangle, ResolvedPageBox, SkippedPageBox, SkippedPageBoxReason,
     inspect_document_page_boxes,
+};
+pub use page_color_space_resources::{
+    ClassifiedColorSpaceResource, ColorSpaceFamily, DocumentPageColorSpaceResourcesInspection,
+    DocumentPageColorSpaceResourcesInspectionError, PageColorSpaceResourcesInspection,
+    SkippedColorSpaceResource, SkippedColorSpaceResourceReason,
+    inspect_document_page_color_space_resources,
+    inspect_document_page_color_space_resources_with_lookup,
 };
 pub use page_content_extents::{
     PageContentExtentInspection, PageContentExtentsInspection, inspect_page_content_extents,

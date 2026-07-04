@@ -1,17 +1,19 @@
 //! Public bridge from classic-xref PDF bytes to page-object inventory.
 
-use presslint_inventory::{GraphicsWalkError, Inventory};
+use presslint_inventory::{ColorSpaceResource, GraphicsWalkError, Inventory};
 use presslint_pdf::{
-    ContentStreamDataExtentInspectionError, ContentStreamDataSliceError,
-    ContentStreamFilterClassification, ContentStreamFilterClassificationError,
-    DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
-    DocumentPageContentExtentsInspectionError, FlateDecodeParametersResolution,
-    FlateDecodeParametersResolutionError, FlateDecodeStreamError, ObjectLookup,
+    ClassifiedColorSpaceResource, ColorSpaceFamily, ContentStreamDataExtentInspectionError,
+    ContentStreamDataSliceError, ContentStreamFilterClassification,
+    ContentStreamFilterClassificationError, DocumentPageColorSpaceResourcesInspection,
+    DocumentPageColorSpaceResourcesInspectionError, DocumentPageContentExtentInspection,
+    DocumentPageContentExtentResult, DocumentPageContentExtentsInspectionError,
+    FlateDecodeParametersResolution, FlateDecodeParametersResolutionError, FlateDecodeStreamError,
+    ObjectLookup, PageColorSpaceResourcesInspection, SkippedColorSpaceResource,
     SkippedPageContentTargetReason, inspect_classic_document_access,
-    inspect_document_page_content_extents,
+    inspect_document_page_color_space_resources, inspect_document_page_content_extents,
 };
 use presslint_syntax::{AssembleError, TokenizeError};
-use presslint_types::{PageIndex, PdfName};
+use presslint_types::{ColorSpace, PageIndex, PdfName};
 use serde::{Deserialize, Serialize};
 
 use crate::form_inventory::{
@@ -33,6 +35,9 @@ pub struct ClassicPdfInventory {
     /// Non-fatal page `XObject` resource inspection failure, when the resource
     /// pass could not begin.
     pub xobject_resource_error: Option<presslint_pdf::DocumentPageXObjectResourcesInspectionError>,
+    /// Non-fatal page `/Resources /ColorSpace` inspection failure, when the
+    /// colour-space resource pass could not begin.
+    pub color_space_resource_error: Option<DocumentPageColorSpaceResourcesInspectionError>,
     /// One document-ordered result for each enumerated page.
     pub pages: Vec<ClassicPdfInventoryPage>,
 }
@@ -46,6 +51,8 @@ pub struct ClassicPdfInventoryPage {
     pub result: ClassicPdfInventoryPageResult,
     /// Page-local `XObject` resource diagnostics.
     pub xobject_resource_skipped: Vec<presslint_pdf::SkippedPageXObjectResource>,
+    /// Page-local `/Resources /ColorSpace` resource diagnostics.
+    pub color_space_resource_skipped: Vec<SkippedColorSpaceResource>,
 }
 
 /// Inventory result for one page.
@@ -255,6 +262,12 @@ pub fn build_classic_pdf_inventory(
         Ok(report) => (None, Some(report.pages)),
         Err(error) => (Some(error), None),
     };
+    let (color_space_resource_error, color_space_pages) =
+        split_color_space_report(inspect_document_page_color_space_resources(
+            input,
+            &access.xref_table,
+            access.page_tree_root.object_byte_offset,
+        ));
 
     let lookup = ObjectLookup::ClassicXref(&access.xref_table);
     let mut inventory = Inventory::default();
@@ -262,6 +275,9 @@ pub fn build_classic_pdf_inventory(
     for page in &extents.pages {
         let page_index = page_index_error(input, page.ordinal)?;
         let resources = xobject_pages
+            .as_ref()
+            .and_then(|pages| pages.get(page.ordinal));
+        let color_space_page = color_space_pages
             .as_ref()
             .and_then(|pages| pages.get(page.ordinal));
         let image_xobject_names = resources.map_or_else(Vec::new, |resources| {
@@ -272,6 +288,7 @@ pub fn build_classic_pdf_inventory(
         });
         let form_targets =
             resources.map_or(&[][..], |resources| resources.form_xobjects.as_slice());
+        let page_color_spaces = color_space_page.map_or_else(Vec::new, color_space_env_resources);
         let result = match build_page_inventory_with_forms(
             input,
             lookup,
@@ -281,6 +298,7 @@ pub fn build_classic_pdf_inventory(
             &image_xobject_names,
             &form_xobject_names,
             form_targets,
+            &page_color_spaces,
             FormWalkContext::bounded_default(),
         ) {
             Ok(expanded) => {
@@ -304,6 +322,8 @@ pub fn build_classic_pdf_inventory(
             result,
             xobject_resource_skipped: resources
                 .map_or_else(Vec::new, |resources| resources.skipped.clone()),
+            color_space_resource_skipped: color_space_page
+                .map_or_else(Vec::new, |page| page.skipped.clone()),
         });
     }
 
@@ -311,8 +331,70 @@ pub fn build_classic_pdf_inventory(
         byte_len: input.len(),
         inventory,
         xobject_resource_error,
+        color_space_resource_error,
         pages,
     })
+}
+
+/// The non-fatal error plus per-page reports of a colour-space resource pass.
+type ColorSpaceReportPass = (
+    Option<DocumentPageColorSpaceResourcesInspectionError>,
+    Option<Vec<PageColorSpaceResourcesInspection>>,
+);
+
+/// Split a colour-space resource inspection into its non-fatal begin-failure and
+/// per-page reports, mirroring the `XObject` resource pass shape. Shared by the
+/// classic and neutral inventory bridges.
+#[must_use]
+pub fn split_color_space_report(
+    result: Result<
+        DocumentPageColorSpaceResourcesInspection,
+        DocumentPageColorSpaceResourcesInspectionError,
+    >,
+) -> ColorSpaceReportPass {
+    match result {
+        Ok(report) => (None, Some(report.pages)),
+        Err(error) => (Some(error), None),
+    }
+}
+
+/// Map a page's classified `presslint-pdf` colour-space resources into the
+/// inventory-native [`ColorSpaceResource`] model consumed by the walker.
+///
+/// This is the crate-layering seam: `presslint-pdf` resolves the resource
+/// SHAPES (structural family + component count + spot names), and the umbrella
+/// maps those facts into the inventory colour model so `presslint-inventory`
+/// keeps no dependency on the structural PDF layer. The alternate space is a
+/// recorded fact only and is deliberately NOT substituted as the painted source.
+#[must_use]
+pub fn color_space_env_resources(
+    page: &PageColorSpaceResourcesInspection,
+) -> Vec<ColorSpaceResource> {
+    page.color_spaces.iter().map(color_space_resource).collect()
+}
+
+fn color_space_resource(resource: &ClassifiedColorSpaceResource) -> ColorSpaceResource {
+    ColorSpaceResource {
+        name: PdfName(resource.name.0.clone()),
+        space: color_space_from_family(resource.family),
+        component_count: resource.component_count,
+        spot_names: resource
+            .spot_names
+            .iter()
+            .map(|name| PdfName(name.0.clone()))
+            .collect(),
+    }
+}
+
+const fn color_space_from_family(family: ColorSpaceFamily) -> ColorSpace {
+    match family {
+        ColorSpaceFamily::DeviceGray => ColorSpace::DeviceGray,
+        ColorSpaceFamily::DeviceRgb => ColorSpace::DeviceRgb,
+        ColorSpaceFamily::DeviceCmyk => ColorSpace::DeviceCmyk,
+        ColorSpaceFamily::IccBased => ColorSpace::IccBased,
+        ColorSpaceFamily::Separation => ColorSpace::Separation,
+        ColorSpaceFamily::DeviceN => ColorSpace::DeviceN,
+    }
 }
 
 /// Decode a page's located content streams into borrowed or bounded-owned bytes,

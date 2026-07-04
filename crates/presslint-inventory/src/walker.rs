@@ -2,55 +2,74 @@ use presslint_syntax::OperatorRecord;
 use presslint_types::{ByteRange, ColorObservation, ColorSpace, ColorUsage, PdfName};
 use serde::{Deserialize, Serialize};
 
+use crate::color_space_env::{ColorSpaceEnv, ColorSpaceResource};
 use crate::operands::{
-    checked_source, concat_matrix, device_color, expect_operands, integer_operand, name_operand,
-    numeric_operands,
+    checked_source, color_operands, concat_matrix, device_color, expect_operands, integer_operand,
+    name_operand, numeric_operands,
 };
 
 const IDENTITY_CTM: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
-/// Device colour currently held by one side of the graphics state.
+/// Colour currently held by one side of the graphics state.
+///
+/// Generalised from device-only colour: it carries direct device colours
+/// (`g`/`rg`/`k`) exactly as before AND colours set through resource colour
+/// spaces (`cs`/`CS` + `sc`/`scn`/`SC`/`SCN`). For a resource colour, `space` is
+/// the REAL source family (`IccBased`/`Separation`/`DeviceN`), never collapsed
+/// to a device space; `resource_name` is the `/CS…` selector and `spot_name` is
+/// the colorant for `Separation`/`DeviceN`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GraphicsDeviceColor {
-    /// Device colour space selected by the operator stream.
+pub struct GraphicsColor {
+    /// Source colour space observed by the operator stream.
     pub space: ColorSpace,
     /// Components in source-space order.
     pub components: Vec<f64>,
+    /// Resource name (`cs`/`CS` operand) that selected this colour space.
+    ///
+    /// `None` for direct device operators and the page-default colour;
+    /// `Some(name)` once `cs`/`CS` selected a resource colour space.
+    pub resource_name: Option<PdfName>,
+    /// Spot colorant name for `Separation`/`DeviceN` colours.
+    pub spot_name: Option<PdfName>,
     /// Record byte range of the operator that set this colour.
     ///
     /// `None` for the page-default/inherited colour; `Some(range)` once a
-    /// device-colour operator in the walked stream established it. The range
-    /// travels with the colour through `q`/`Q` save/restore.
+    /// colour operator in the walked stream established it. The range travels
+    /// with the colour through `q`/`Q` save/restore.
     pub source: Option<ByteRange>,
 }
 
-impl GraphicsDeviceColor {
-    /// Create a graphics-state colour snapshot with no recorded source.
+impl GraphicsColor {
+    /// Create a device-colour snapshot with no recorded source.
     ///
-    /// The page-default colour and any colour whose origin is unknown use this
-    /// constructor; the walker stamps `source` when a device-colour operator
-    /// sets the colour.
+    /// The page-default colour and direct device operators use this
+    /// constructor; the walker stamps `source` when a colour operator sets the
+    /// colour. `resource_name`/`spot_name` stay `None`, so device colours are
+    /// byte-identical to the pre-generalisation behaviour.
     #[must_use]
     pub const fn new(space: ColorSpace, components: Vec<f64>) -> Self {
         Self {
             space,
             components,
+            resource_name: None,
+            spot_name: None,
             source: None,
         }
     }
 
     /// Return this colour as an inventory colour observation.
     ///
-    /// The observation carries the colour-setting operator's record range as
-    /// its `source`, so callers can map the observed colour back to the bytes
-    /// that established it.
+    /// The observation carries the real source family, the spot colorant name
+    /// when present, and the colour-setting operator's record range as its
+    /// `source`, so callers can map the observed colour back to the bytes that
+    /// established it.
     #[must_use]
     pub fn observation(&self, usage: ColorUsage) -> ColorObservation {
         ColorObservation {
             usage,
             space: self.space.clone(),
             components: self.components.clone(),
-            spot_name: None,
+            spot_name: self.spot_name.clone(),
             source: self.source,
         }
     }
@@ -61,10 +80,10 @@ impl GraphicsDeviceColor {
 pub struct GraphicsStateSnapshot {
     /// Current transformation matrix in PDF `[a b c d e f]` layout.
     pub ctm: [f64; 6],
-    /// Current stroking device colour.
-    pub stroking_color: GraphicsDeviceColor,
-    /// Current nonstroking device colour.
-    pub nonstroking_color: GraphicsDeviceColor,
+    /// Current stroking colour.
+    pub stroking_color: GraphicsColor,
+    /// Current nonstroking colour.
+    pub nonstroking_color: GraphicsColor,
     /// Current text rendering mode.
     pub text_rendering_mode: TextRenderingMode,
 }
@@ -75,8 +94,8 @@ impl GraphicsStateSnapshot {
     pub fn page_default() -> Self {
         Self {
             ctm: IDENTITY_CTM,
-            stroking_color: GraphicsDeviceColor::new(ColorSpace::DeviceGray, vec![0.0]),
-            nonstroking_color: GraphicsDeviceColor::new(ColorSpace::DeviceGray, vec![0.0]),
+            stroking_color: GraphicsColor::new(ColorSpace::DeviceGray, vec![0.0]),
+            nonstroking_color: GraphicsColor::new(ColorSpace::DeviceGray, vec![0.0]),
             text_rendering_mode: TextRenderingMode::Fill,
         }
     }
@@ -235,15 +254,21 @@ pub enum GraphicsStateEventKind {
         /// Operand matrix in PDF `[a b c d e f]` layout.
         matrix: [f64; 6],
     },
-    /// A stroking device-colour operator changed state.
-    SetStrokingDeviceColor {
+    /// A stroking colour operator changed state.
+    ///
+    /// Emitted by the direct device operators (`G`/`RG`/`K`) and by
+    /// `CS` + `SC`/`SCN` resource colour selection/setting.
+    SetStrokingColor {
         /// Updated stroking colour.
-        color: GraphicsDeviceColor,
+        color: GraphicsColor,
     },
-    /// A nonstroking device-colour operator changed state.
-    SetNonstrokingDeviceColor {
+    /// A nonstroking colour operator changed state.
+    ///
+    /// Emitted by the direct device operators (`g`/`rg`/`k`) and by
+    /// `cs` + `sc`/`scn` resource colour selection/setting.
+    SetNonstrokingColor {
         /// Updated nonstroking colour.
-        color: GraphicsDeviceColor,
+        color: GraphicsColor,
     },
     /// A path paint operator observed the current state.
     PathPaint {
@@ -355,19 +380,34 @@ pub enum GraphicsWalkErrorKind {
 }
 
 /// Stateful walker over assembled content-stream operator records.
+///
+/// The walker borrows a page colour-space environment
+/// ([`ColorSpaceEnv`]) so `cs`/`CS` + `sc`/`scn`/`SC`/`SCN` resolve resource
+/// colour spaces. A default-empty environment reproduces the device-only
+/// behaviour byte-for-byte.
 #[derive(Debug, Clone)]
-pub struct GraphicsStateWalker {
+pub struct GraphicsStateWalker<'a> {
     state: GraphicsStateSnapshot,
     stack: Vec<GraphicsStateSnapshot>,
+    color_space_env: ColorSpaceEnv<'a>,
 }
 
-impl GraphicsStateWalker {
-    /// Create a walker with the page-initial graphics state.
+impl<'a> GraphicsStateWalker<'a> {
+    /// Create a walker with the page-initial graphics state and no colour-space
+    /// environment (device-only behaviour).
     #[must_use]
     pub fn new() -> Self {
+        Self::with_color_space_env(ColorSpaceEnv::empty())
+    }
+
+    /// Create a walker with the page-initial graphics state that resolves
+    /// `cs`/`CS` names against a borrowed page colour-space environment.
+    #[must_use]
+    pub fn with_color_space_env(color_space_env: ColorSpaceEnv<'a>) -> Self {
         Self {
             state: GraphicsStateSnapshot::page_default(),
             stack: Vec::new(),
+            color_space_env,
         }
     }
 
@@ -402,34 +442,19 @@ impl GraphicsStateWalker {
         })
     }
 
-    fn event_kind(
+    /// Dispatch the colour operators: `G`/`g`/`RG`/`rg`/`K`/`k` device colours,
+    /// `CS`/`cs` colour-space selection, and `SC`/`SCN`/`sc`/`scn` colour setting.
+    ///
+    /// Returns `None` for any non-colour operator so
+    /// [`event_kind`](Self::event_kind) handles the structural operators. Kept
+    /// separate so each function stays bounded.
+    fn color_event(
         &mut self,
         source: &[u8],
         operator: &[u8],
         record: &OperatorRecord,
-    ) -> Result<GraphicsStateEventKind, GraphicsWalkError> {
-        match operator {
-            b"q" => {
-                expect_operands(operator, record, 0)?;
-                self.stack.push(self.state.clone());
-                Ok(GraphicsStateEventKind::Save)
-            }
-            b"Q" => {
-                expect_operands(operator, record, 0)?;
-                let Some(previous) = self.stack.pop() else {
-                    return Err(GraphicsWalkError::new(
-                        GraphicsWalkErrorKind::GraphicsStateStackUnderflow,
-                        record.range,
-                    ));
-                };
-                self.state = previous;
-                Ok(GraphicsStateEventKind::Restore)
-            }
-            b"cm" => {
-                let matrix = numeric_operands(source, operator, record, 6)?;
-                self.state.ctm = concat_matrix(matrix, self.state.ctm);
-                Ok(GraphicsStateEventKind::ConcatMatrix { matrix })
-            }
+    ) -> Option<Result<GraphicsStateEventKind, GraphicsWalkError>> {
+        Some(match operator {
             b"G" => {
                 self.set_stroking_device_color(source, operator, record, ColorSpace::DeviceGray, 1)
             }
@@ -460,6 +485,47 @@ impl GraphicsStateWalker {
                 ColorSpace::DeviceCmyk,
                 4,
             ),
+            b"CS" => self.select_color_space(source, operator, record, ColorSide::Stroking),
+            b"cs" => self.select_color_space(source, operator, record, ColorSide::Nonstroking),
+            b"SC" | b"SCN" => self.set_color_value(source, operator, record, ColorSide::Stroking),
+            b"sc" | b"scn" => {
+                self.set_color_value(source, operator, record, ColorSide::Nonstroking)
+            }
+            _ => return None,
+        })
+    }
+
+    fn event_kind(
+        &mut self,
+        source: &[u8],
+        operator: &[u8],
+        record: &OperatorRecord,
+    ) -> Result<GraphicsStateEventKind, GraphicsWalkError> {
+        if let Some(result) = self.color_event(source, operator, record) {
+            return result;
+        }
+        match operator {
+            b"q" => {
+                expect_operands(operator, record, 0)?;
+                self.stack.push(self.state.clone());
+                Ok(GraphicsStateEventKind::Save)
+            }
+            b"Q" => {
+                expect_operands(operator, record, 0)?;
+                let Some(previous) = self.stack.pop() else {
+                    return Err(GraphicsWalkError::new(
+                        GraphicsWalkErrorKind::GraphicsStateStackUnderflow,
+                        record.range,
+                    ));
+                };
+                self.state = previous;
+                Ok(GraphicsStateEventKind::Restore)
+            }
+            b"cm" => {
+                let matrix = numeric_operands(source, operator, record, 6)?;
+                self.state.ctm = concat_matrix(matrix, self.state.ctm);
+                Ok(GraphicsStateEventKind::ConcatMatrix { matrix })
+            }
             b"Tr" => self.set_text_rendering_mode(source, operator, record),
             b"S" => Self::path_paint(operator, record, PathPaintKind::Stroke),
             b"s" => Self::path_paint(operator, record, PathPaintKind::CloseAndStroke),
@@ -519,7 +585,7 @@ impl GraphicsStateWalker {
     ) -> Result<GraphicsStateEventKind, GraphicsWalkError> {
         let color = sourced_device_color(source, operator, record, space, count)?;
         self.state.stroking_color = color.clone();
-        Ok(GraphicsStateEventKind::SetStrokingDeviceColor { color })
+        Ok(GraphicsStateEventKind::SetStrokingColor { color })
     }
 
     fn set_nonstroking_device_color(
@@ -532,7 +598,85 @@ impl GraphicsStateWalker {
     ) -> Result<GraphicsStateEventKind, GraphicsWalkError> {
         let color = sourced_device_color(source, operator, record, space, count)?;
         self.state.nonstroking_color = color.clone();
-        Ok(GraphicsStateEventKind::SetNonstrokingDeviceColor { color })
+        Ok(GraphicsStateEventKind::SetNonstrokingColor { color })
+    }
+
+    /// Handle `cs`/`CS`: select the current colour space by resource name and
+    /// reset the current colour to that space's implied initial colour.
+    ///
+    /// The name is resolved against the borrowed page colour-space environment.
+    /// A resolved resource space adopts its REAL source family (never collapsed
+    /// to a device space); an unresolved name is reported honestly as
+    /// [`ColorSpace::Resource`] (never a bare `Unknown`), so the audit surfaces
+    /// it as a coverage gap rather than a fabricated device colour.
+    fn select_color_space(
+        &mut self,
+        source: &[u8],
+        operator: &[u8],
+        record: &OperatorRecord,
+        side: ColorSide,
+    ) -> Result<GraphicsStateEventKind, GraphicsWalkError> {
+        let name = name_operand(source, operator, record)?;
+        let color = self.selected_color(&name, record.range);
+        Ok(self.apply_color(side, color))
+    }
+
+    /// Handle `sc`/`scn`/`SC`/`SCN`: set a colour value in the current space.
+    ///
+    /// The numeric operands become the colour components in the current space;
+    /// the space, resource name, and spot colorant carried by `cs`/`CS` are
+    /// preserved. A trailing name operand (pattern colour) is recorded as the
+    /// resource name but not otherwise modelled in this slice.
+    fn set_color_value(
+        &mut self,
+        source: &[u8],
+        operator: &[u8],
+        record: &OperatorRecord,
+        side: ColorSide,
+    ) -> Result<GraphicsStateEventKind, GraphicsWalkError> {
+        let (components, pattern_name) = color_operands(source, operator, record)?;
+        let current = self.side_color(side);
+        let mut color = current.clone();
+        color.components = components;
+        if let Some(name) = pattern_name {
+            color.resource_name = Some(name);
+        }
+        color.source = Some(record.range);
+        Ok(self.apply_color(side, color))
+    }
+
+    /// Build the [`GraphicsColor`] a `cs`/`CS` selection establishes.
+    fn selected_color(&self, name: &PdfName, range: ByteRange) -> GraphicsColor {
+        self.color_space_env.resolve(name).map_or_else(
+            || GraphicsColor {
+                space: ColorSpace::Resource(name.clone()),
+                components: Vec::new(),
+                resource_name: Some(name.clone()),
+                spot_name: None,
+                source: Some(range),
+            },
+            |resource| resource_initial_color(resource, name.clone(), range),
+        )
+    }
+
+    const fn side_color(&self, side: ColorSide) -> &GraphicsColor {
+        match side {
+            ColorSide::Stroking => &self.state.stroking_color,
+            ColorSide::Nonstroking => &self.state.nonstroking_color,
+        }
+    }
+
+    fn apply_color(&mut self, side: ColorSide, color: GraphicsColor) -> GraphicsStateEventKind {
+        match side {
+            ColorSide::Stroking => {
+                self.state.stroking_color = color.clone();
+                GraphicsStateEventKind::SetStrokingColor { color }
+            }
+            ColorSide::Nonstroking => {
+                self.state.nonstroking_color = color.clone();
+                GraphicsStateEventKind::SetNonstrokingColor { color }
+            }
+        }
     }
 
     fn set_text_rendering_mode(
@@ -571,10 +715,19 @@ impl GraphicsStateWalker {
     }
 }
 
-impl Default for GraphicsStateWalker {
+impl Default for GraphicsStateWalker<'_> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Which side of the graphics state a colour operator targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColorSide {
+    /// Stroking colour (`CS`/`SC`/`SCN`).
+    Stroking,
+    /// Nonstroking colour (`cs`/`sc`/`scn`).
+    Nonstroking,
 }
 
 /// Resolve a device-colour operator and stamp its own record range as the
@@ -589,10 +742,31 @@ fn sourced_device_color(
     record: &OperatorRecord,
     space: ColorSpace,
     count: usize,
-) -> Result<GraphicsDeviceColor, GraphicsWalkError> {
+) -> Result<GraphicsColor, GraphicsWalkError> {
     let mut color = device_color(source, operator, record, space, count)?;
     color.source = Some(record.range);
     Ok(color)
+}
+
+/// Build the colour a `cs`/`CS` selection establishes for a resolved resource.
+///
+/// The observed space is the resource's REAL source family (`ICCBased` with `N=4`
+/// stays `IccBased`, not `DeviceCmyk`; `Separation`/`DeviceN` keep the special
+/// space, never their alternate). The current colour is the space's implied
+/// initial colour so a paint/text-show observed before any `sc`/`scn` reports a
+/// real colour rather than a stale device colour.
+fn resource_initial_color(
+    resource: &ColorSpaceResource,
+    name: PdfName,
+    range: ByteRange,
+) -> GraphicsColor {
+    GraphicsColor {
+        space: resource.space.clone(),
+        components: resource.initial_color(),
+        resource_name: Some(name),
+        spot_name: resource.spot_name(),
+        source: Some(range),
+    }
 }
 
 /// Walk assembled operator records into ordered graphics-state events.

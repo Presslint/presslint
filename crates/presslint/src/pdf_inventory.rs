@@ -5,16 +5,21 @@ use presslint_pdf::{
     ContentStreamDataExtentInspectionError, ContentStreamDataSliceError,
     ContentStreamFilterClassification, ContentStreamFilterClassificationError, DocumentAccess,
     DocumentAccessBackend, DocumentAccessError, DocumentAccessRejection,
-    DocumentPageContentExtentsInspection, DocumentPageContentExtentsInspectionError,
-    FlateDecodeParametersResolution, FlateDecodeParametersResolutionError, FlateDecodeStreamError,
-    ObjectLookup, SkippedPageContentTargetReason, inspect_document_access,
+    DocumentPageColorSpaceResourcesInspectionError, DocumentPageContentExtentsInspection,
+    DocumentPageContentExtentsInspectionError, FlateDecodeParametersResolution,
+    FlateDecodeParametersResolutionError, FlateDecodeStreamError, ObjectLookup,
+    SkippedColorSpaceResource, SkippedPageContentTargetReason, inspect_document_access,
+    inspect_document_page_color_space_resources_with_lookup,
     inspect_document_page_content_extents_resolved,
     inspect_document_page_xobject_resources_with_lookup, resolve_object,
 };
 use presslint_types::PageIndex;
 use serde::{Deserialize, Serialize};
 
-use crate::document_inventory::{InventoryPageSkip, inventory_names, page_index};
+use crate::document_inventory::{
+    InventoryPageSkip, color_space_env_resources, inventory_names, page_index,
+    split_color_space_report,
+};
 use crate::form_inventory::{
     FormExpandedInventory, FormWalkContext, SkippedFormInventory, build_page_inventory_with_forms,
 };
@@ -33,6 +38,9 @@ pub struct PdfInventory {
     /// Non-fatal page `XObject` resource inspection failure, when the resource
     /// pass could not begin.
     pub xobject_resource_error: Option<presslint_pdf::DocumentPageXObjectResourcesInspectionError>,
+    /// Non-fatal page `/Resources /ColorSpace` inspection failure, when the
+    /// colour-space resource pass could not begin.
+    pub color_space_resource_error: Option<DocumentPageColorSpaceResourcesInspectionError>,
     /// One document-ordered result for each enumerated page.
     pub pages: Vec<PdfInventoryPage>,
 }
@@ -51,6 +59,8 @@ pub struct PdfInventoryPage {
     pub image_xobjects: Vec<presslint_pdf::PageXObjectResourceTarget>,
     /// Page-local `XObject` resource diagnostics.
     pub xobject_resource_skipped: Vec<presslint_pdf::SkippedPageXObjectResource>,
+    /// Page-local `/Resources /ColorSpace` resource diagnostics.
+    pub color_space_resource_skipped: Vec<SkippedColorSpaceResource>,
 }
 
 /// Inventory result for one page.
@@ -241,16 +251,7 @@ pub fn build_pdf_inventory(
         )
     })?;
 
-    let lookup = match &access.backend {
-        DocumentAccessBackend::ClassicXref { xref_table, .. } => {
-            ObjectLookup::ClassicXref(xref_table)
-        }
-        DocumentAccessBackend::ClassicXrefChain { chain } => ObjectLookup::ClassicXrefChain(chain),
-        DocumentAccessBackend::XrefStreamSection { section } => {
-            ObjectLookup::XrefStreamSection(section)
-        }
-        DocumentAccessBackend::XrefStreamChain { chain } => ObjectLookup::XrefStreamChain(chain),
-    };
+    let lookup = backend_lookup(&access.backend);
     let extents = resolved_page_content_extents(input, lookup, &access, max_decoded_stream_bytes)?;
     let xobject_resources = inspect_document_page_xobject_resources_with_lookup(
         input,
@@ -261,6 +262,12 @@ pub fn build_pdf_inventory(
         Ok(report) => (None, Some(report.pages)),
         Err(error) => (Some(error), None),
     };
+    let (color_space_resource_error, color_space_pages) =
+        split_color_space_report(inspect_document_page_color_space_resources_with_lookup(
+            input,
+            lookup,
+            access.page_tree_root.object_byte_offset,
+        ));
 
     let mut inventory = Inventory::default();
     let mut pages = Vec::with_capacity(extents.pages.len());
@@ -274,11 +281,15 @@ pub fn build_pdf_inventory(
         let resources = xobject_pages
             .as_ref()
             .and_then(|pages| pages.get(page.ordinal));
+        let color_space_page = color_space_pages
+            .as_ref()
+            .and_then(|pages| pages.get(page.ordinal));
         let image_xobject_names =
             resources.map_or_else(Vec::new, |r| inventory_names(&r.image_xobject_names));
         let form_xobject_names =
             resources.map_or_else(Vec::new, |r| inventory_names(&r.form_xobject_names));
         let form_targets = resources.map_or(&[][..], |r| r.form_xobjects.as_slice());
+        let page_color_spaces = color_space_page.map_or_else(Vec::new, color_space_env_resources);
         let result = match build_page_inventory_with_forms(
             input,
             lookup,
@@ -288,6 +299,7 @@ pub fn build_pdf_inventory(
             &image_xobject_names,
             &form_xobject_names,
             form_targets,
+            &page_color_spaces,
             FormWalkContext::bounded_default(),
         ) {
             Ok(expanded) => {
@@ -313,6 +325,8 @@ pub fn build_pdf_inventory(
                 .map_or_else(Vec::new, |resources| resources.image_xobjects.clone()),
             xobject_resource_skipped: resources
                 .map_or_else(Vec::new, |resources| resources.skipped.clone()),
+            color_space_resource_skipped: color_space_page
+                .map_or_else(Vec::new, |page| page.skipped.clone()),
         });
     }
 
@@ -320,8 +334,23 @@ pub fn build_pdf_inventory(
         byte_len: input.len(),
         inventory,
         xobject_resource_error,
+        color_space_resource_error,
         pages,
     })
+}
+
+/// Select the unified object-lookup backend for a resolved document access.
+const fn backend_lookup(backend: &DocumentAccessBackend) -> ObjectLookup<'_> {
+    match backend {
+        DocumentAccessBackend::ClassicXref { xref_table, .. } => {
+            ObjectLookup::ClassicXref(xref_table)
+        }
+        DocumentAccessBackend::ClassicXrefChain { chain } => ObjectLookup::ClassicXrefChain(chain),
+        DocumentAccessBackend::XrefStreamSection { section } => {
+            ObjectLookup::XrefStreamSection(section)
+        }
+        DocumentAccessBackend::XrefStreamChain { chain } => ObjectLookup::XrefStreamChain(chain),
+    }
 }
 
 impl From<InventoryPageSkip> for PdfInventorySkip {

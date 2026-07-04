@@ -6,6 +6,7 @@ use presslint_types::{
 mod combined;
 mod extgstate;
 mod json;
+mod resource_color;
 mod serde_shape;
 mod xobject;
 
@@ -159,9 +160,11 @@ fn path_paint_event_carries_post_operator_snapshot_and_provenance() -> Result<()
     assert_ctm_near(event.state.ctm, [2.0, 0.0, 0.0, 2.0, 8.0, 9.0]);
     assert_eq!(
         event.state.nonstroking_color,
-        super::GraphicsDeviceColor {
+        super::GraphicsColor {
             space: ColorSpace::DeviceGray,
             components: vec![0.25],
+            resource_name: None,
+            spot_name: None,
             source: Some(ByteRange { start: 0, end: 6 }),
         }
     );

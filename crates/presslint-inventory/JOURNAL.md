@@ -1,5 +1,37 @@
 # presslint-inventory Journal
 
+## T137 - Page Resource Colour-Space Tracking (F4-6 slice 1a)
+
+- The graphics-state colour slot is generalised from `GraphicsDeviceColor` to
+  `GraphicsColor { space, components, resource_name, spot_name, source }`. Direct
+  device operators (`g/G`, `rg/RG`, `k/K`) keep byte-identical behaviour and
+  provenance (`resource_name`/`spot_name` stay `None`); the rename is contained to
+  this crate plus the one colour event type. The colour events are renamed
+  `SetStrokingColor`/`SetNonstrokingColor` (from `Set*DeviceColor`).
+- The walker now interprets `cs`/`CS` (select the current nonstroking/stroking
+  colour space by resource name) and `sc`/`scn`/`SC`/`SCN` (set a colour value in
+  the current space), resolving names against a BORROWED page colour-space
+  environment (`ColorSpaceEnv<'a>` over a `&[ColorSpaceResource]` slice). This is
+  the one new abstraction; `GraphicsStateWalker<'a>` carries it and
+  `with_color_space_env` builds it. A default-empty environment reproduces the
+  device-only walk byte-for-byte (a device-only stream is unaffected — regression
+  tested).
+- Honest reporting: a resolved resource colour emits a normal `ColorObservation`
+  with the REAL source family (`IccBased`/`Separation`/`DeviceN`), `spot_name`
+  populated for `Separation`/`DeviceN`, and the `scn`/`cs` record range as `source`.
+  `ICCBased` with `N=4` is reported as `IccBased`, never `DeviceCmyk`.
+- Initial-colour-after-`cs` (ISO 32000-1 §8.6.3): selecting a space also sets its
+  implied initial colour (device zeros, `DeviceCMYK` `0 0 0 1`, ICC zeros,
+  `Separation`/`DeviceN` full tint), so paint observed after `cs` but before any
+  `sc`/`scn` reports a real colour, never a stale device colour. An unresolved
+  `cs`/`CS` name is reported honestly as `ColorSpace::Resource(name)`, never a bare
+  `Unknown`, so the audit surfaces it as a coverage gap.
+- Crate layering: `presslint-inventory` owns paint/graphics-state semantics only and
+  never parses PDF dictionaries — it consumes the classified model produced by
+  `presslint-pdf` and mapped by the umbrella crate. `presslint-color-lcms`/write path
+  untouched; a trailing `scn` pattern name is recorded as `resource_name` but not
+  otherwise modelled (Pattern is out of this slice).
+
 ## Current State
 
 - Defines deterministic inventory and inventory-entry data contracts.

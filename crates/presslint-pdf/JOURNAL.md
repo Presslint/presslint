@@ -4,6 +4,44 @@ Older accumulated journal history lives in [JOURNAL-archive-2.md](JOURNAL-archiv
 
 ## Current State
 
+### T137 - Page Resource Colour-Space Classification (F4-6 slice 1a)
+
+- New read-only inspector `inspect_document_page_color_space_resources[_with_lookup]`
+  walks the page tree root-down (same inheritance/lookup machinery as the `/XObject`
+  resource pass — `ResourceContext::from_dictionary`, `resolve_reference`,
+  `unique_entry`) and classifies each page's effective `/Resources /ColorSpace`
+  entries into `ClassifiedColorSpaceResource { name, family, component_count,
+  spot_names, alternate_space }`. It resolves resource SHAPES only — no paint
+  semantics, colourimetry, tint-transform evaluation, or profile parsing beyond the
+  shallow `/ICCBased /N`.
+- `ColorSpaceFamily` covers device families + `IccBased`/`Separation`/`DeviceN`.
+  HONESTY rules enforced by classification: an `ICCBased` space with `N=4` is
+  reported as `IccBased` (component count tracked separately), NEVER `DeviceCmyk`;
+  a `Separation`/`DeviceN` alternate space is recorded as a FACT (`alternate_space`)
+  but is never substituted as the painted source.
+- Unsupported/unresolvable shapes become structured `SkippedColorSpaceResource`
+  diagnostics (never a bare unknown): `MissingColorSpaceResources`, `MissingColorSpace`,
+  `Duplicate*`, `NonDictionaryColorSpace`, `UnknownColorSpaceName`,
+  `MalformedColorSpaceOperand`, `WrongComponentCount`, `UnsupportedPatternColor`,
+  `UnsupportedIndexedColor`, `UnsupportedLabOrCalSpace`, `UnresolvedResourceReference`,
+  `UnsupportedTintTransform`, plus a delegated `Resources` bucket for inherited
+  `/Resources` failures.
+- Scope: PAGE-scope resources only (form XObject resource environments are slice 1b).
+  Read-only: no byte mutation; a `/Resources /ColorSpace` value read via `lookup`
+  (including from a resolved compressed object) contributes family/shape facts only —
+  no resolved-object member span is ever surfaced as an original-PDF source offset
+  (reuses the T134 resolved-body provenance boundary).
+- Module split for the 1000-line gate: `page_color_space_resources.rs` owns the
+  page-tree walk, report types, and skip taxonomy; `page_color_space_classify.rs`
+  owns the per-entry classification (name / array / indirect definition → family,
+  shallow array element scanning, `/ICCBased /N`, `/Alternate`).
+- Concepts cross-checked (never copied, no GPL/AGPL read): Apache PDFBox
+  `PDColorSpace` (factory from name/array + `getNumberOfComponents`), pdf.js graphics-
+  state fill/stroke colour-space resolution through resources, pikepdf's operator-
+  interpretation guidance; ISO 32000-1 §7.8.3 (resource dictionaries + inheritance),
+  §8.6.5 (ICCBased is profile-based, not device), §8.6.6 (Separation/DeviceN/Indexed/
+  Pattern), §8.6.8 (`CS/cs`, `SC/SCN/sc/scn`).
+
 ### T134 - Compressed-Leaf Content Inventory (Resolved-Body Provenance)
 
 - Turns T133's honest-but-empty compressed-leaf skips into REAL content inventory.
@@ -56,8 +94,8 @@ Older accumulated journal history lives in [JOURNAL-archive-2.md](JOURNAL-archiv
   extent whose bytes round-trip; a compressed leaf whose `/Contents` target is
   itself compressed stays a located-skip; PROVENANCE test — the surfaced references
   carry the zero sentinel span while the extent offset is a real source offset > 0.
-- LIVE corpus before/after (LOCAL path only): the 104MB compressed-page-tree file
-  that T133 left with 36 `SkippedPage` gaps was NOT re-run in this working tree —
+- LIVE before/after (LOCAL path only): a large compressed-page-tree file
+  that T133 left with several `SkippedPage` gaps was NOT re-run in this working tree —
   the corpus file is not present here — so the real before/after is left for the
   operator to confirm where the corpus lives. The synthetic end-to-end tests in
   `presslint` reproduce the transition exactly: a compressed leaf that was a zero-
@@ -102,8 +140,8 @@ Older accumulated journal history lives in [JOURNAL-archive-2.md](JOURNAL-archiv
   yet the resolved bridge navigates it; compressed leaves report `CompressedLeaf`
   (never located, serde round-trips with the `compressed_leaf` tag and leaks no
   member body bytes); a focused `is_located`-false unit test. Real before/after:
-  no local corpus is checked into the public tree, so the 104MB reproduction is
-  validated on a LOCAL-only file (`_local/…` corpus path, never committed) —
+  no local corpus is checked into the public tree, so the reproduction is
+  validated on a LOCAL-only file (never committed) —
   `presslint audit` moved from a hard `PageContentExtents`/`PageTreeKidTargets ->
   MalformedHeader` failure to returning an audit; the synthetic fixtures above
   model that exact failure shape.
