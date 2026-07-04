@@ -117,7 +117,28 @@ pub enum PipelineSkipReason {
         occurrences: usize,
         disposition: IndirectObjectEditDisposition,
     },
+    /// A page-level preflight hook poisoned the WHOLE page: one or more of its
+    /// decodable content streams contains a `gs` (`ExtGState` set) operator, so the
+    /// page is left byte-verbatim (the interim overprint/transparency guard, T140).
+    ExtGStatePresent,
     Unchanged,
+}
+
+/// Whole-page decision returned by a pipeline preflight hook, evaluated BEFORE any
+/// dirty object is emitted for a page.
+///
+/// The hook is GENERIC and OPT-IN: the pipeline decodes a page's editable content
+/// streams once and hands them to the caller-supplied closure, which either lets
+/// the normal per-stream edit loop run ([`PagePreflight::Continue`]) or poisons
+/// the ENTIRE page ([`PagePreflight::SkipPage`], emit one whole-page skip and
+/// convert nothing). The pipeline itself stays scanner-agnostic; the converter
+/// supplies the `gs`-presence scanner.
+pub enum PagePreflight {
+    /// Run the normal per-stream edit loop for this page.
+    Continue,
+    /// Poison the whole page: emit one [`PipelinePageSkip`] with this reason and
+    /// edit none of the page's streams.
+    SkipPage(PipelineSkipReason),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,6 +211,61 @@ pub fn edit_page_content_incremental_indexed<F>(
 where
     F: Fn(PageIndex, &[u8]) -> EditedContent,
 {
+    // Existing callers stay behaviourally identical: a no-op preflight that never
+    // poisons a page and does not pay the preflight decode pass.
+    edit_page_content_incremental_indexed_inner(
+        input,
+        pages,
+        mode,
+        None::<&fn(PageIndex, &[Vec<u8>]) -> PagePreflight>,
+        edit,
+    )
+}
+
+/// Page-aware, MULTI-stream-capable content edit with a GENERIC, OPT-IN page-level
+/// PREFLIGHT hook: before any dirty object is emitted for a selected page, the
+/// pipeline decodes that page's editable content streams once and calls
+/// `preflight(page_index, &decoded_streams)`. On [`PagePreflight::SkipPage`] the
+/// whole page is left byte-verbatim and reported as one [`PipelinePageSkip`]
+/// (`stream_ordinal: 0`, `content_object: None`); on [`PagePreflight::Continue`]
+/// the existing per-stream edit loop runs unchanged.
+///
+/// The preflight is deliberately whole-page (ISO 32000 §7.8.2: a page's content
+/// streams share graphics state), so a poisoned page converts NONE of its streams
+/// even when only one carries the poison operator. The decoded-stream slice passed
+/// to the hook contains only the streams that decode successfully (an undecodable
+/// stream is never edited either); this is the interim double-decode (preflight
+/// scan then edit decode) accepted for T140, bounded by [`MAX_CONTENT_STREAM_BYTES`].
+///
+/// # Errors
+///
+/// Returns [`EditPageContentError`] under the same conditions as
+/// [`edit_page_content_incremental_indexed`].
+pub fn edit_page_content_incremental_indexed_with_preflight<P, F>(
+    input: &[u8],
+    pages: &PageSelection,
+    mode: StreamMode,
+    preflight: P,
+    edit: F,
+) -> Result<EditPageContentOutput, EditPageContentError>
+where
+    P: Fn(PageIndex, &[Vec<u8>]) -> PagePreflight,
+    F: Fn(PageIndex, &[u8]) -> EditedContent,
+{
+    edit_page_content_incremental_indexed_inner(input, pages, mode, Some(&preflight), edit)
+}
+
+fn edit_page_content_incremental_indexed_inner<P, F>(
+    input: &[u8],
+    pages: &PageSelection,
+    mode: StreamMode,
+    preflight: Option<&P>,
+    edit: F,
+) -> Result<EditPageContentOutput, EditPageContentError>
+where
+    P: Fn(PageIndex, &[Vec<u8>]) -> PagePreflight,
+    F: Fn(PageIndex, &[u8]) -> EditedContent,
+{
     let access = inspect_document_access(input).map_err(|error| EditPageContentError::Open {
         error: Box::new(error),
     })?;
@@ -227,6 +303,14 @@ where
                 reason,
             }),
             PageStreamsPlan::Streams(outcomes) => {
+                if let Some(preflight) = &preflight {
+                    if let Some(skip) =
+                        run_page_preflight(input, page_index_of(page), &outcomes, *preflight)
+                    {
+                        skipped.push(skip);
+                        continue;
+                    }
+                }
                 for outcome in outcomes {
                     match outcome {
                         StreamOutcome::Skip {
@@ -282,6 +366,38 @@ where
         edited,
         skipped,
     })
+}
+
+fn run_page_preflight<P>(
+    input: &[u8],
+    page_index: PageIndex,
+    outcomes: &[StreamOutcome<'_>],
+    preflight: &P,
+) -> Option<PipelinePageSkip>
+where
+    P: Fn(PageIndex, &[Vec<u8>]) -> PagePreflight,
+{
+    // PAGE-LEVEL PREFLIGHT: decode this page's located (editable) streams ONCE
+    // and let the hook poison the whole page before any dirty object is emitted.
+    // Undecodable/skipped slots are excluded from the scan (they are never
+    // edited); per-stream skips are still reported by the edit loop on Continue.
+    let decoded_streams: Vec<Vec<u8>> = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            StreamOutcome::Located(located) => decode_located_stream_for_preflight(input, located),
+            StreamOutcome::Skip { .. } => None,
+        })
+        .collect();
+    if let PagePreflight::SkipPage(reason) = preflight(page_index, &decoded_streams) {
+        Some(PipelinePageSkip {
+            page_index,
+            stream_ordinal: 0,
+            content_object: None,
+            reason,
+        })
+    } else {
+        None
+    }
 }
 
 const fn lookup_from_backend(backend: &DocumentAccessBackend) -> ObjectLookup<'_> {
@@ -506,6 +622,28 @@ fn classify_filter(
             | ContentStreamFilterClassification::UnsupportedFilterChain { .. },
         )
         | Err(_) => Err(PipelineSkipReason::UnsupportedFilter),
+    }
+}
+
+/// Best-effort decode of one located content stream for the page-level preflight
+/// scan. Returns the decoded bytes, or `None` when the stream's filter is
+/// unsupported, its data slice is unavailable, or `FlateDecode` fails — such a
+/// stream is never converted by the per-stream edit loop either, so excluding it
+/// keeps the preflight scan aligned with what the loop would actually edit.
+fn decode_located_stream_for_preflight(
+    input: &[u8],
+    located: &LocatedContentStream<'_>,
+) -> Option<Vec<u8>> {
+    let filter = classify_filter(input, located.object_byte_offset).ok()?;
+    let stream_data = content_stream_data_slice(input, located.extent).ok()?;
+    match filter {
+        PipelineFilterKind::Raw => Some(stream_data.to_vec()),
+        PipelineFilterKind::Flate => decode_flate_stream(
+            stream_data,
+            FlateDecodeParameters::default(),
+            MAX_CONTENT_STREAM_BYTES,
+        )
+        .ok(),
     }
 }
 

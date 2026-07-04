@@ -40,10 +40,11 @@ use crate::{
     PlannedWriteError, WriteError,
     black_preservation::{BlackPreservationPolicy, black_preservation_replacement},
     content_edit_pipeline::{
-        EditPageContentError, EditedContent, PageSelection, PipelinePageSkip, PipelineSkipReason,
-        edit_page_content_incremental_indexed,
+        EditPageContentError, EditedContent, PagePreflight, PageSelection, PipelinePageSkip,
+        PipelineSkipReason, edit_page_content_incremental_indexed_with_preflight,
     },
     content_stream_plan::StreamMode,
+    extgstate_guard::has_extgstate,
     link_routing::{DeviceLinkInput, LinkConversionCounts, LinkRouting, build_link_routing},
     pdf_number_serialize::serialize_color_component,
     selector_match::{
@@ -172,6 +173,11 @@ pub enum ConvertPageSkipReason {
         /// Disposition returned by the ownership decision.
         disposition: IndirectObjectEditDisposition,
     },
+    /// One or more of the page's decodable content streams contains a `gs`
+    /// (`ExtGState` set) operator, so the converter — which is overprint/transparency
+    /// blind — left the WHOLE page byte-verbatim rather than risk a silent
+    /// under-overprint colour change. Interim guard; see [`crate::extgstate_guard`].
+    ExtGStatePresent,
 }
 
 /// Output of a successful [`convert_content_colors_incremental`] call.
@@ -365,10 +371,21 @@ pub fn convert_content_colors_incremental(
     let tallies: RefCell<Vec<PageTally>> = RefCell::new(Vec::new());
     let target = request.target.as_ref();
 
-    let output = edit_page_content_incremental_indexed(
+    let output = edit_page_content_incremental_indexed_with_preflight(
         input,
         &request.pages,
         StreamMode::MultiStream,
+        // INTERIM ExtGState GUARD (T140): the converter is overprint/transparency
+        // blind, so a page ANY of whose decodable streams sets an ExtGState via `gs`
+        // is poisoned WHOLE and left byte-verbatim (ISO 32000 §7.8.2: page streams
+        // share graphics state), reported once as `ExtGStatePresent`.
+        |_page, decoded_streams| {
+            if decoded_streams.iter().any(|stream| has_extgstate(stream)) {
+                PagePreflight::SkipPage(PipelineSkipReason::ExtGStatePresent)
+            } else {
+                PagePreflight::Continue
+            }
+        },
         |page_index, decoded| {
             match convert_decoded(
                 page_index,
@@ -740,6 +757,7 @@ const fn map_skip_reason(reason: PipelineSkipReason) -> ConvertPageSkipReason {
             occurrences,
             disposition,
         },
+        PipelineSkipReason::ExtGStatePresent => ConvertPageSkipReason::ExtGStatePresent,
     }
 }
 

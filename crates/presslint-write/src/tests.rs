@@ -10,6 +10,7 @@ mod append;
 mod content_color_convert;
 mod content_color_convert_multistream;
 mod content_color_rewrite;
+mod extgstate_guard;
 mod link_routing;
 mod page_boxes;
 mod page_boxes_xref_stream;

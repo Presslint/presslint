@@ -15,6 +15,29 @@ conversion (F4-2), generalised to MULTI-LINK source-space routing (F4-5) and, as
 of T136, to MULTI-content-stream pages (each content-stream OBJECT edited
 independently).
 
+## T140 - Interim ExtGState Guard for Device-Colour Conversion
+
+`convert_content_colors_incremental` now performs an opt-in page preflight before
+editing selected content streams: if ANY decodable stream on the page contains a
+`gs` operator, the converter reports `ExtGStatePresent` once and leaves the WHOLE
+page byte-verbatim. The guard is deliberately conservative because `gs` applies
+an ExtGState to the current graphics state and the current converter does not yet
+model overprint or transparency. Multi-stream pages are guarded at page
+granularity, so a `gs` in one content stream also prevents conversion in sibling
+streams on the same page.
+
+The pipeline hook is generic and opt-in. Existing content edit callers keep the
+no-op preflight entry point; the device-colour converter supplies the tiny
+operator scanner from `extgstate_guard.rs`. Detection is presence-only: it
+matches an assembled operator whose bytes are exactly `gs`, with no ExtGState
+resource lookup, dictionary inspection, or graphics-state stack.
+
+Copy budget: selected pages now pay an interim preflight decode/scan of editable
+streams before the normal edit decode. The duplicate decode is bounded by the
+existing content-stream byte limit and is accepted here as a correctness guard;
+guarded pages emit no dirty content objects and preserve the original byte
+prefix exactly.
+
 ## T139 - Numeric Component-Compare Target Leaf (selector enrichment 3a)
 
 The operator-local evaluator (`selector_match.rs`) now mirrors the selector

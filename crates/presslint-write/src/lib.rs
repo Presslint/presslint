@@ -55,6 +55,7 @@ mod content_color_convert;
 mod content_color_rewrite;
 mod content_edit_pipeline;
 mod content_stream_plan;
+mod extgstate_guard;
 mod link_routing;
 mod page_box_serialize;
 mod page_boxes;
