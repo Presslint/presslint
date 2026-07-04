@@ -17,7 +17,8 @@ use crate::error::CliError;
 
 const SELECT_HELP: &str = "Selector JSON, or @file.json. Conversion supports only ColorSpace \
     DeviceGray/DeviceRGB/DeviceCMYK, Page/PageMatch, ColorUsage fill/stroke, and \
-    ColorComponents over those device spaces.";
+    ColorComponents or ComponentCompare over those device spaces with usage \
+    None/Fill/Stroke.";
 const MEMORY_HELP: &str = "Reads the whole input and holds the converted output in memory; peak \
     memory is roughly two to three times the PDF size.";
 const MAX_EXPLICIT_PAGE_INDICES: usize = 1_000_000;

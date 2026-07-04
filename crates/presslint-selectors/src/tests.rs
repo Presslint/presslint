@@ -1,5 +1,6 @@
 #![allow(clippy::expect_used, clippy::missing_errors_doc)]
 
+mod component_compare;
 mod json;
 
 use presslint_inventory::InventoryEntry;

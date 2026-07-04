@@ -1,10 +1,10 @@
 use std::fs;
 
-use presslint_selectors::{Predicate, Selector};
+use presslint_selectors::{CompareOp, Predicate, Selector};
 use presslint_types::{ColorSpace, ColorUsage};
 
 use crate::{
-    args::{parse_device_link_arg, parse_selector_arg},
+    args::{Cli, parse_device_link_arg, parse_selector_arg},
     error::CliError,
 };
 
@@ -21,6 +21,28 @@ fn parses_selector_json() {
         Selector::Predicate {
             predicate: Predicate::ColorUsage {
                 usage: ColorUsage::Fill,
+            },
+        }
+    );
+}
+
+#[test]
+fn parses_component_compare_selector_json() {
+    let selector = parse_selector_arg(Some(
+        r#"{"op":"predicate","predicate":{"kind":"component_compare","space":"device_cmyk","usage":"fill","component_index":3,"op":"ge","value":0.85}}"#,
+    ))
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        selector,
+        Selector::Predicate {
+            predicate: Predicate::ComponentCompare {
+                space: ColorSpace::DeviceCmyk,
+                usage: Some(ColorUsage::Fill),
+                component_index: 3,
+                op: CompareOp::Ge,
+                value: 0.85,
             },
         }
     );
@@ -99,4 +121,16 @@ fn unsupported_selector_error_names_supported_subset() {
     .to_string();
     assert!(error.contains("unsupported target selector leaves"));
     assert!(error.contains("supported selector subset"));
+    assert!(error.contains("ComponentCompare"));
+    assert!(error.contains("None/Fill/Stroke"));
+}
+
+#[test]
+fn select_help_names_component_compare_supported_subset() {
+    let help = Cli::try_parse_from(["presslint", "convert", "--help"])
+        .unwrap_err()
+        .to_string();
+
+    assert!(help.contains("ComponentCompare"));
+    assert!(help.contains("None/Fill/Stroke"));
 }

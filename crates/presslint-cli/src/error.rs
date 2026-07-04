@@ -7,7 +7,7 @@ use presslint_write::ConvertContentColorsError;
 
 const SUPPORTED_SELECTOR_SUBSET: &str = "supported selector subset: ColorSpace \
 DeviceGray/DeviceRGB/DeviceCMYK, Page/PageMatch, ColorUsage fill/stroke, and \
-ColorComponents over those device spaces";
+ColorComponents or ComponentCompare over those device spaces with usage None/Fill/Stroke";
 
 /// Hard CLI error. Every variant maps to process exit code 1.
 #[derive(Debug)]

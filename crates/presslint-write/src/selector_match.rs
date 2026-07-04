@@ -17,7 +17,7 @@
 //! [`collect_unsupported_leaves`] so the caller can reject the whole request
 //! before any page traversal, rather than silently under-converting.
 
-use presslint_selectors::{PageMatcher, PageParity, Predicate, Selector};
+use presslint_selectors::{CompareOp, PageMatcher, PageParity, Predicate, Selector};
 use presslint_types::{ColorSpace, ColorUsage, PageIndex};
 use serde::{Deserialize, Serialize};
 
@@ -78,6 +78,14 @@ pub enum UnsupportedTargetLeaf {
         /// The requested optional usage.
         usage: Option<ColorUsage>,
     },
+    /// A `ComponentCompare` predicate over a non-direct-device space or an
+    /// Image/Shading usage.
+    ComponentCompare {
+        /// The requested colour space.
+        space: ColorSpace,
+        /// The requested optional usage.
+        usage: Option<ColorUsage>,
+    },
 }
 
 /// Walk `selector` and collect every leaf this operator-local evaluator cannot
@@ -124,14 +132,31 @@ fn unsupported_leaf(predicate: &Predicate) -> Option<UnsupportedTargetLeaf> {
         Predicate::ColorUsage { usage } => (!is_fill_or_stroke(*usage))
             .then_some(UnsupportedTargetLeaf::ColorUsage { usage: *usage }),
         Predicate::ColorComponents { space, usage, .. } => {
-            let supported = is_device_space(space) && usage.is_none_or(is_fill_or_stroke);
-            (!supported).then(|| UnsupportedTargetLeaf::ColorComponents {
-                space: space.clone(),
-                usage: *usage,
+            (!is_supported_component_leaf(space, *usage)).then(|| {
+                UnsupportedTargetLeaf::ColorComponents {
+                    space: space.clone(),
+                    usage: *usage,
+                }
+            })
+        }
+        Predicate::ComponentCompare { space, usage, .. } => {
+            (!is_supported_component_leaf(space, *usage)).then(|| {
+                UnsupportedTargetLeaf::ComponentCompare {
+                    space: space.clone(),
+                    usage: *usage,
+                }
             })
         }
         Predicate::Page { .. } | Predicate::PageMatch { .. } => None,
     }
+}
+
+const fn is_supported_component_leaf(space: &ColorSpace, usage: Option<ColorUsage>) -> bool {
+    is_device_space(space)
+        && match usage {
+            Some(usage) => is_fill_or_stroke(usage),
+            None => true,
+        }
 }
 
 /// Evaluate `selector`'s boolean tree against one operator view.
@@ -166,6 +191,17 @@ fn predicate_matches(predicate: &Predicate, view: &OperatorView) -> bool {
             device_color_space(view.color_space) == *space
                 && usage.is_none_or(|usage| view.usage == usage)
                 && components_match(components, view.components, *tolerance)
+        }
+        Predicate::ComponentCompare {
+            space,
+            usage,
+            component_index,
+            op,
+            value,
+        } => {
+            device_color_space(view.color_space) == *space
+                && usage.is_none_or(|usage| view.usage == usage)
+                && component_compare_matches(view.components.get(*component_index), *op, *value)
         }
         // Unsupported leaves are rejected up front; never reached here.
         Predicate::ObjectKind { .. } | Predicate::Editable { .. } | Predicate::Scope { .. } => {
@@ -209,6 +245,34 @@ fn components_match(expected: &[f64], actual: &[f64], tolerance: Option<f64>) ->
             })
         }
         Some(_) => false,
+    }
+}
+
+/// Reimplements the selector crate's private component-compare semantics locally.
+///
+/// A missing component (index out of range), a non-finite `value`, or a
+/// non-finite `actual` is a clean non-match — never a panic.
+#[must_use]
+fn component_compare_matches(actual: Option<&f64>, op: CompareOp, value: f64) -> bool {
+    let Some(&actual) = actual else {
+        return false;
+    };
+    if !actual.is_finite() || !value.is_finite() {
+        return false;
+    }
+    compare_op(actual, op, value)
+}
+
+/// Apply one [`CompareOp`] to two finite `f64`s (`Eq` is exact, no tolerance).
+#[must_use]
+#[allow(clippy::float_cmp)]
+fn compare_op(actual: f64, op: CompareOp, value: f64) -> bool {
+    match op {
+        CompareOp::Ge => actual >= value,
+        CompareOp::Gt => actual > value,
+        CompareOp::Le => actual <= value,
+        CompareOp::Lt => actual < value,
+        CompareOp::Eq => actual == value,
     }
 }
 

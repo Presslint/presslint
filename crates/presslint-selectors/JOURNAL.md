@@ -41,9 +41,34 @@
   uses exact `f64` equality; with `tolerance`, every absolute per-component
   difference must be less than or equal to that non-negative tolerance. Non-finite
   predicate components or tolerance values are clean non-matches.
+- The component-compare predicate (`ComponentCompare`) is the first NUMERIC
+  colour target: serde shape
+  `{ "kind": "component_compare", "space": <ColorSpace>, "usage"?: <ColorUsage>,
+  "component_index": <usize>, "op": <CompareOp>, "value": <f64> }`. It matches
+  when any `ColorObservation` supplies the requested space, the optional usage,
+  and a component at `component_index` satisfying `component op value`. `CompareOp`
+  is a unit-variant enum serializing as `"ge" | "gt" | "le" | "lt" | "eq"`,
+  applied as `component op value` (so `Ge` with `value: 0.85` is `component >=
+  0.85`).
+  - VALUE CONVENTION: `value` and the observed components are PDF fractions in
+    `0.0..=1.0`, so `K >= 85%` is `value: 0.85`. The `%`->fraction conversion is
+    the CLI/API caller's job and is NOT encoded in the AST.
+  - BANDS reuse the boolean selector: `K >= 0.2 and K < 0.8` is a
+    `Selector::And` of two `ComponentCompare` predicates; there is deliberately
+    no dedicated band/range variant.
+  - ROBUSTNESS (no panics): a `component_index` past the observed components is a
+    clean NON-MATCH (`slice::get`, never a panic, never `Unsupported`); a
+    non-finite `value` or a non-finite observed component is a NON-MATCH. `Eq`
+    uses exact `f64` equality (narrow `#[allow(clippy::float_cmp)]` on the
+    `compare_op` helper) with NO tolerance field in this slice. Finite
+    out-of-`[0,1]` values are mathematically valid and are NOT special-cased.
+  - It is O(observations) with a single indexed component read and one float
+    compare per observation; the matcher borrows the entry component slice and
+    allocates nothing per `matches` call (no copy budget added).
 - `Selector` and `Predicate` expose `PartialEq` but not `Eq`, because the
-  serde-stable color-components payload can contain constructible `f64` values
-  such as `NaN` even though matching rejects non-finite predicate values.
+  serde-stable color-components and component-compare payloads can contain
+  constructible `f64` values such as `NaN` even though matching rejects
+  non-finite predicate values.
 - The color-components matcher borrows predicate and entry component slices,
   performs a bounded linear scan over `entry.colors`, and allocates nothing per
   `matches` call.
@@ -53,9 +78,12 @@
   cover parity (odd/even), inclusive range (including the empty `start > end`
   case), and set membership (including the empty set).
 - Tests live in a `tests` submodule split across files: `tests.rs` holds the
-  shape and matcher tests, and `tests/json.rs` holds the test-only in-memory
-  JSON serde harness, keeping `lib.rs` focused on production code and under the
-  file-size gate.
+  shape and matcher tests, `tests/json.rs` holds the test-only in-memory JSON
+  serde harness, and `tests/component_compare.rs` holds the `ComponentCompare` /
+  `CompareOp` matcher and serde shape-lock tests (each `CompareOp` around a K
+  boundary, usage gating, out-of-range index, non-finite value/component, a band
+  via `And`, and the locked JSON shapes), keeping `lib.rs` focused on production
+  code and under the file-size gate.
 
 ## Follow-Ups
 

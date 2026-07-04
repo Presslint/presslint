@@ -88,6 +88,51 @@ pub enum Predicate {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tolerance: Option<f64>,
     },
+    /// Numerically compare a single observed component against a threshold.
+    ///
+    /// Matches when one `ColorObservation` supplies the requested color space,
+    /// the optional usage, and a component at `component_index` whose value
+    /// satisfies `component op value`. A threshold such as `K >= 0.85` is one
+    /// `ComponentCompare`; a band such as `K >= 0.2 and K < 0.8` is an
+    /// [`Selector::And`] of two `ComponentCompare` predicates — there is
+    /// deliberately no dedicated band variant.
+    ///
+    /// VALUE CONVENTION: `value` and the observed components are PDF fractions in
+    /// `0.0..=1.0`, so `K >= 85%` is `value: 0.85`. Any `%`-to-fraction
+    /// conversion is the caller's responsibility and is not encoded here.
+    ComponentCompare {
+        /// Color space to match on the compared observation.
+        space: ColorSpace,
+        /// Optional color usage to match on the same observation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<ColorUsage>,
+        /// Zero-based index of the component to compare. An index past the
+        /// observed components is a clean non-match, never a panic.
+        component_index: usize,
+        /// Comparison operator applied as `component op value`.
+        op: CompareOp,
+        /// Threshold as a PDF fraction in `0.0..=1.0` (caller does `%`->fraction).
+        value: f64,
+    },
+}
+
+/// Numeric comparison operator for [`Predicate::ComponentCompare`].
+///
+/// `op` is applied as `component op value`, so [`CompareOp::Ge`] with
+/// `value: 0.85` expresses `component >= 0.85`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompareOp {
+    /// `component >= value`.
+    Ge,
+    /// `component > value`.
+    Gt,
+    /// `component <= value`.
+    Le,
+    /// `component < value`.
+    Lt,
+    /// `component == value` (exact `f64` equality; no tolerance).
+    Eq,
 }
 
 /// Page matcher for the [`Predicate::PageMatch`] leaf predicate.
@@ -198,6 +243,48 @@ fn matches_predicate(predicate: &Predicate, entry: &InventoryEntry) -> bool {
                 && usage.is_none_or(|usage| color.usage == usage)
                 && components_match(components, &color.components, *tolerance)
         }),
+        Predicate::ComponentCompare {
+            space,
+            usage,
+            component_index,
+            op,
+            value,
+        } => entry.colors.iter().any(|color| {
+            color.space == *space
+                && usage.is_none_or(|usage| color.usage == usage)
+                && component_compare_matches(color.components.get(*component_index), *op, *value)
+        }),
+    }
+}
+
+/// Evaluate `actual op value` for a single component read.
+///
+/// A missing component (index out of range), a non-finite `value`, or a
+/// non-finite `actual` is a clean non-match — never a panic.
+#[must_use]
+fn component_compare_matches(actual: Option<&f64>, op: CompareOp, value: f64) -> bool {
+    let Some(&actual) = actual else {
+        return false;
+    };
+    if !actual.is_finite() || !value.is_finite() {
+        return false;
+    }
+    compare_op(actual, op, value)
+}
+
+/// Apply one [`CompareOp`] to two finite `f64`s.
+///
+/// `Eq` uses the crate's exact-float policy (no tolerance); callers guarantee
+/// both operands are finite.
+#[must_use]
+#[allow(clippy::float_cmp)]
+fn compare_op(actual: f64, op: CompareOp, value: f64) -> bool {
+    match op {
+        CompareOp::Ge => actual >= value,
+        CompareOp::Gt => actual > value,
+        CompareOp::Le => actual <= value,
+        CompareOp::Lt => actual < value,
+        CompareOp::Eq => actual == value,
     }
 }
 

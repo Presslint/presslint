@@ -4,7 +4,7 @@
 //! [`OperatorView`]s, with no PDF, no inventory, and no graphics state.
 
 use presslint_pdf::DocumentAccessBackend;
-use presslint_selectors::{PageMatcher, PageParity, Predicate, Selector};
+use presslint_selectors::{CompareOp, PageMatcher, PageParity, Predicate, Selector};
 use presslint_types::{ColorSpace, ColorUsage, EditCapability, ObjectKind, PageIndex};
 
 use crate::content_color_convert::DeviceColorSpace;
@@ -285,6 +285,243 @@ fn supported_selector_has_no_unsupported_leaves() {
         ],
     };
     assert!(collect_unsupported_leaves(&selector).is_empty());
+}
+
+#[test]
+fn component_compare_leaf_evaluates_over_device_cmyk_operator() {
+    let dark = view(
+        0,
+        DeviceColorSpace::Cmyk,
+        ColorUsage::Fill,
+        &[0.0, 0.0, 0.0, 0.9],
+    );
+    let light = view(
+        0,
+        DeviceColorSpace::Cmyk,
+        ColorUsage::Fill,
+        &[0.0, 0.0, 0.0, 0.5],
+    );
+
+    let ge = predicate(Predicate::ComponentCompare {
+        space: ColorSpace::DeviceCmyk,
+        usage: None,
+        component_index: 3,
+        op: CompareOp::Ge,
+        value: 0.85,
+    });
+    assert!(selector_matches(&ge, &dark));
+    assert!(!selector_matches(&ge, &light));
+
+    let lt = predicate(Predicate::ComponentCompare {
+        space: ColorSpace::DeviceCmyk,
+        usage: None,
+        component_index: 3,
+        op: CompareOp::Lt,
+        value: 0.85,
+    });
+    assert!(!selector_matches(&lt, &dark));
+    assert!(selector_matches(&lt, &light));
+
+    // The remaining ops over the same device CMYK operator, so the duplicated
+    // operator-local compare path is exercised for every `CompareOp`.
+    let gt = predicate(Predicate::ComponentCompare {
+        space: ColorSpace::DeviceCmyk,
+        usage: None,
+        component_index: 3,
+        op: CompareOp::Gt,
+        value: 0.9,
+    });
+    // 0.9 is not strictly greater than 0.9; 0.5 is not either.
+    assert!(!selector_matches(&gt, &dark));
+    assert!(!selector_matches(&gt, &light));
+
+    let le = predicate(Predicate::ComponentCompare {
+        space: ColorSpace::DeviceCmyk,
+        usage: None,
+        component_index: 3,
+        op: CompareOp::Le,
+        value: 0.5,
+    });
+    // 0.9 <= 0.5 is false; 0.5 <= 0.5 is true (boundary inclusive).
+    assert!(!selector_matches(&le, &dark));
+    assert!(selector_matches(&le, &light));
+
+    let eq = predicate(Predicate::ComponentCompare {
+        space: ColorSpace::DeviceCmyk,
+        usage: None,
+        component_index: 3,
+        op: CompareOp::Eq,
+        value: 0.9,
+    });
+    // Exact float equality (no tolerance this slice).
+    assert!(selector_matches(&eq, &dark));
+    assert!(!selector_matches(&eq, &light));
+}
+
+#[test]
+fn component_compare_non_finite_value_or_component_is_non_match() {
+    // A non-finite `value` never matches, whatever the actual component is.
+    let cmyk = view(
+        0,
+        DeviceColorSpace::Cmyk,
+        ColorUsage::Fill,
+        &[0.0, 0.0, 0.0, 0.9],
+    );
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for op in [
+            CompareOp::Ge,
+            CompareOp::Gt,
+            CompareOp::Le,
+            CompareOp::Lt,
+            CompareOp::Eq,
+        ] {
+            let selector = predicate(Predicate::ComponentCompare {
+                space: ColorSpace::DeviceCmyk,
+                usage: None,
+                component_index: 3,
+                op,
+                value,
+            });
+            assert!(!selector_matches(&selector, &cmyk));
+        }
+    }
+
+    // A non-finite actual component never matches, whatever the finite value is.
+    let nan_component = view(
+        0,
+        DeviceColorSpace::Cmyk,
+        ColorUsage::Fill,
+        &[0.0, 0.0, 0.0, f64::NAN],
+    );
+    let selector = predicate(Predicate::ComponentCompare {
+        space: ColorSpace::DeviceCmyk,
+        usage: None,
+        component_index: 3,
+        op: CompareOp::Ge,
+        value: 0.5,
+    });
+    assert!(!selector_matches(&selector, &nan_component));
+}
+
+#[test]
+fn component_compare_usage_gates_the_operator() {
+    let stroke = view(
+        0,
+        DeviceColorSpace::Cmyk,
+        ColorUsage::Stroke,
+        &[0.0, 0.0, 0.0, 0.9],
+    );
+    let fill_only = predicate(Predicate::ComponentCompare {
+        space: ColorSpace::DeviceCmyk,
+        usage: Some(ColorUsage::Fill),
+        component_index: 3,
+        op: CompareOp::Ge,
+        value: 0.85,
+    });
+    assert!(!selector_matches(&fill_only, &stroke));
+
+    let stroke_only = predicate(Predicate::ComponentCompare {
+        space: ColorSpace::DeviceCmyk,
+        usage: Some(ColorUsage::Stroke),
+        component_index: 3,
+        op: CompareOp::Ge,
+        value: 0.85,
+    });
+    assert!(selector_matches(&stroke_only, &stroke));
+}
+
+#[test]
+fn component_compare_band_via_and() {
+    // `K >= 0.2 AND K < 0.8` via the boolean `And` — no band variant.
+    let band = Selector::And {
+        exprs: vec![
+            predicate(Predicate::ComponentCompare {
+                space: ColorSpace::DeviceCmyk,
+                usage: None,
+                component_index: 3,
+                op: CompareOp::Ge,
+                value: 0.2,
+            }),
+            predicate(Predicate::ComponentCompare {
+                space: ColorSpace::DeviceCmyk,
+                usage: None,
+                component_index: 3,
+                op: CompareOp::Lt,
+                value: 0.8,
+            }),
+        ],
+    };
+    let mid = view(
+        0,
+        DeviceColorSpace::Cmyk,
+        ColorUsage::Fill,
+        &[0.0, 0.0, 0.0, 0.5],
+    );
+    let high = view(
+        0,
+        DeviceColorSpace::Cmyk,
+        ColorUsage::Fill,
+        &[0.0, 0.0, 0.0, 0.9],
+    );
+    assert!(selector_matches(&band, &mid));
+    assert!(!selector_matches(&band, &high));
+}
+
+#[test]
+fn component_compare_out_of_range_index_is_non_match() {
+    // A DeviceGray operator has one operand; index 3 is out of range.
+    let gray = view(0, DeviceColorSpace::Gray, ColorUsage::Fill, &[0.5]);
+    let selector = predicate(Predicate::ComponentCompare {
+        space: ColorSpace::DeviceGray,
+        usage: None,
+        component_index: 3,
+        op: CompareOp::Ge,
+        value: 0.0,
+    });
+    assert!(!selector_matches(&selector, &gray));
+}
+
+#[test]
+fn component_compare_non_device_or_image_usage_is_unsupported() {
+    let non_device = predicate(Predicate::ComponentCompare {
+        space: ColorSpace::IccBased,
+        usage: None,
+        component_index: 0,
+        op: CompareOp::Ge,
+        value: 0.5,
+    });
+    assert_eq!(
+        collect_unsupported_leaves(&non_device),
+        vec![UnsupportedTargetLeaf::ComponentCompare {
+            space: ColorSpace::IccBased,
+            usage: None,
+        }]
+    );
+
+    let image_usage = predicate(Predicate::ComponentCompare {
+        space: ColorSpace::DeviceCmyk,
+        usage: Some(ColorUsage::Shading),
+        component_index: 3,
+        op: CompareOp::Ge,
+        value: 0.5,
+    });
+    assert_eq!(
+        collect_unsupported_leaves(&image_usage),
+        vec![UnsupportedTargetLeaf::ComponentCompare {
+            space: ColorSpace::DeviceCmyk,
+            usage: Some(ColorUsage::Shading),
+        }]
+    );
+
+    // Device space + Fill/Stroke usage is supported (no unsupported leaf).
+    let supported = predicate(Predicate::ComponentCompare {
+        space: ColorSpace::DeviceCmyk,
+        usage: Some(ColorUsage::Fill),
+        component_index: 3,
+        op: CompareOp::Ge,
+        value: 0.85,
+    });
+    assert!(collect_unsupported_leaves(&supported).is_empty());
 }
 
 // --- F4-4 integration: selector-targeted conversion over real PDFs ---------

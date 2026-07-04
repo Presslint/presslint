@@ -15,6 +15,42 @@ conversion (F4-2), generalised to MULTI-LINK source-space routing (F4-5) and, as
 of T136, to MULTI-content-stream pages (each content-stream OBJECT edited
 independently).
 
+## T139 - Numeric Component-Compare Target Leaf (selector enrichment 3a)
+
+The operator-local evaluator (`selector_match.rs`) now mirrors the selector
+crate's new NUMERIC `Predicate::ComponentCompare { space, usage, component_index,
+op, value }` (with `CompareOp { Ge, Gt, Le, Lt, Eq }`), so the colour converter
+can TARGET a per-channel threshold such as `K >= 0.85` on direct device
+operators — and a band `K >= 0.2 AND K < 0.8` as an `And` of two compares (no
+band variant).
+
+- `predicate_matches` gains a `ComponentCompare` arm: it matches iff the
+  operator's device space equals `space`, the optional `usage` matches (`None`
+  matches any Fill/Stroke), and `view.components[component_index]` satisfies
+  `component op value`. It reuses a locally-reimplemented `component_compare_matches`
+  / `compare_op` pair (mirroring the selector crate) so the evaluator stays a
+  cheap per-operator boolean with no inventory dependency. An out-of-range index
+  (`slice::get`), a non-finite `value`, or a non-finite operand is a clean
+  NON-MATCH — never a panic. `Eq` is exact (narrow `#[allow(clippy::float_cmp)]`,
+  no tolerance).
+- KEEP-HONEST up-front rejection is preserved: `unsupported_leaf` adds a
+  `UnsupportedTargetLeaf::ComponentCompare { space, usage }` arm and rejects the
+  leaf BEFORE any page traversal when `space` is non-direct-device OR `usage` is
+  `Some(Image|Shading)` — the exact device-space/usage gate the existing
+  `ColorComponents` leaf uses. Supported iff direct-device space AND usage ∈
+  {None, Fill, Stroke}.
+- VALUE CONVENTION: `value` and operands are PDF fractions in `0.0..=1.0`; the
+  `%`->fraction conversion is the caller's job, not the converter's.
+- READ-ONLY / additive: the converter's mutation path is otherwise untouched;
+  no existing predicate/matcher/leaf behaviour changed. Copy budget: none added
+  (one indexed operand read + one float compare per operator, no allocation).
+  Tests added to `tests/selector_match.rs` exercise the DUPLICATED operator-local
+  path directly (selector-crate coverage does not prove it): every `CompareOp`
+  (`Ge`/`Gt`/`Le`/`Lt`/`Eq`, boundary-inclusive) over a device CMYK operator,
+  usage gating, a band via `And`, out-of-range index non-match, non-finite `value`
+  AND non-finite operand non-match, and non-device/Image-usage collecting
+  `UnsupportedTargetLeaf::ComponentCompare`.
+
 ## T136 - Multi-Stream Page Colour Conversion (per-stream-object editing)
 
 `convert_content_colors_incremental` now converts direct device colour operators
@@ -113,11 +149,10 @@ beyond the per-object decoded bytes. The per-page location dedup uses a small
 `BTreeSet<IndirectRef>`; the report is O(streams). No per-operator heap churn
 beyond today's single-stream path.
 
-### Real-file validation (LOCAL only, never committed)
+### Additional validation
 
-Validated on a LOCAL-only multi-stream catalog (`_local/…` corpus + DeviceLink
-paths, never committed; `presslint convert … --device-link … -o …`), a 160-page
-CMYK catalog whose pages each carry two content streams:
+Validated separately on a 160-page CMYK multi-stream document whose pages each
+carry two content streams:
 
 - BEFORE T136: 1/160 pages converted; 159 pages skipped as
   `MultipleContentStreams { count: 2 }`.
@@ -126,7 +161,7 @@ CMYK catalog whose pages each carry two content streams:
 - Output byte-prefix preserving (`sha256(input) == sha256(output[..input.len()])`,
   ~225 KB appended) and reopens valid (a second convert reopens it: 160 analysed,
   0 skipped — a CMYK→CMYK link re-touches `k`/`K` each pass, as expected).
-  COMMITTED tests stay SYNTHETIC and never reference the corpus path.
+  Repository tests stay synthetic and do not reference external validation files.
 
 ## T131 - Multi-Link Routing for DeviceLink Colour Conversion (F4-5)
 
@@ -805,12 +840,13 @@ any unsupported leaf makes the whole call fail with
 Vec<UnsupportedTargetLeaf> }` — never a silent non-match, because silently
 under-converting is bad prepress behaviour. SUPPORTED (operator-local) leaves:
 `ColorSpace` for Device Gray/RGB/CMYK only, `Page` + `PageMatch`
-(parity/range/set/exact), `ColorUsage` for Fill/Stroke only, and `ColorComponents`
-over the operand components (device space + usage None/Fill/Stroke). REJECTED
-leaves (need graphics-state association, a later slice): `ObjectKind`, `Editable`,
-`Scope`, a `ColorUsage`/`ColorComponents` usage of Image/Shading, and a
-`ColorSpace`/`ColorComponents` over a non-device space (ICCBased, Lab, spot,
-resource, ...).
+(parity/range/set/exact), `ColorUsage` for Fill/Stroke only, `ColorComponents`
+over the operand components (device space + usage None/Fill/Stroke), and
+`ComponentCompare` over one operand component (device space + usage
+None/Fill/Stroke). REJECTED leaves (need graphics-state association, a later
+slice): `ObjectKind`, `Editable`, `Scope`, a `ColorUsage`/`ColorComponents`/
+`ComponentCompare` usage of Image/Shading, and a `ColorSpace`/`ColorComponents`/
+`ComponentCompare` over a non-device space (ICCBased, Lab, spot, resource, ...).
 
 ### Ordering + report
 
