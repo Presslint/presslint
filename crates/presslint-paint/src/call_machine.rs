@@ -76,6 +76,16 @@ pub trait FormResolver<'a> {
     /// Returns a [`GraphicsWalkError`] when caller-owned policy refuses the
     /// traversal as a hard failure rather than a normal [`ResolveForm::Skip`].
     fn resolve_form(&mut self, call: CallSite<'_>) -> Result<ResolveForm<'a>, GraphicsWalkError>;
+
+    /// Observe return from a descended form before its frame is popped.
+    ///
+    /// `path` is the full child invocation path that is about to be left. The
+    /// hook is called once for every successful [`ResolveForm::Descend`],
+    /// including empty callees. If a callee walk or resolver call yields an
+    /// error, the machine unwinds every still-open descended frame in LIFO order
+    /// before propagating the error, so resolver-owned active-path policy can
+    /// clean up exactly once per completed or aborted descent.
+    fn on_return(&mut self, _path: &InvocationPath) {}
 }
 
 /// Visitor event carrying the current invocation path for one paint op.
@@ -117,12 +127,19 @@ impl CallMachine {
                     .pop()
                     .is_some_and(|finished| finished.pop_path_on_return)
                 {
+                    resolver.on_return(&path);
                     path.frames.pop();
                 }
                 continue;
             };
 
-            let event = next?;
+            let event = match next {
+                Ok(event) => event,
+                Err(error) => {
+                    unwind_open_frames(&mut stack, &mut path, resolver);
+                    return Err(error);
+                }
+            };
             visitor(CallEvent {
                 path: &path,
                 op: &event,
@@ -138,12 +155,18 @@ impl CallMachine {
 
             let ordinal = frame.next_form_ordinal;
             frame.next_form_ordinal = frame.next_form_ordinal.saturating_add(1);
-            let decision = resolver.resolve_form(CallSite {
+            let decision = match resolver.resolve_form(CallSite {
                 caller_path: &path,
                 ordinal,
                 name,
                 event: &event,
-            })?;
+            }) {
+                Ok(decision) => decision,
+                Err(error) => {
+                    unwind_open_frames(&mut stack, &mut path, resolver);
+                    return Err(error);
+                }
+            };
 
             if let ResolveForm::Descend(callee) = decision {
                 path.frames.push(InvocationFrame {
@@ -155,6 +178,19 @@ impl CallMachine {
         }
 
         Ok(())
+    }
+}
+
+fn unwind_open_frames<'a>(
+    stack: &mut Vec<WalkFrame<'a>>,
+    path: &mut InvocationPath,
+    resolver: &mut impl FormResolver<'a>,
+) {
+    while let Some(frame) = stack.pop() {
+        if frame.pop_path_on_return {
+            resolver.on_return(path);
+            path.frames.pop();
+        }
     }
 }
 

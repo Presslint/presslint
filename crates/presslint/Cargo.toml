@@ -11,6 +11,7 @@ description.workspace = true
 presslint-types.workspace = true
 presslint-pdf.workspace = true
 presslint-syntax.workspace = true
+presslint-paint.workspace = true
 presslint-inventory.workspace = true
 presslint-selectors.workspace = true
 presslint-actions.workspace = true

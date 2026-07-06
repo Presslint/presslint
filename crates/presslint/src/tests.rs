@@ -6,6 +6,7 @@ use crate::{
 };
 
 mod color_audit;
+mod form_expansion_differential;
 mod form_inventory;
 mod form_inventory_golden;
 mod pdf_inventory;

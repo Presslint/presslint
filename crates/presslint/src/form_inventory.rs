@@ -107,9 +107,9 @@ pub enum SkippedFormInventoryReason {
 /// the current descent depth.
 #[derive(Debug, Clone)]
 pub struct FormWalkContext {
-    max_depth: usize,
-    max_expansions: usize,
-    remaining_expansions: usize,
+    pub(crate) max_depth: usize,
+    pub(crate) max_expansions: usize,
+    pub(crate) remaining_expansions: usize,
     visited: BTreeSet<FormObjectKey>,
 }
 

@@ -271,6 +271,7 @@ dependencies = [
  "presslint-actions",
  "presslint-color",
  "presslint-inventory",
+ "presslint-paint",
  "presslint-pdf",
  "presslint-selectors",
  "presslint-syntax",

@@ -1,5 +1,29 @@
 # presslint Journal
 
+## T150 - Machine-Driven Form Expansion Parallel Proof (Phase 0b-4a)
+
+- Added a private parallel form-expansion adapter in `form_expansion_machine.rs`
+  that drives `presslint-paint`'s call machine while leaving the public
+  `build_page_inventory_with_forms` entry on the existing recursive path. The
+  resolver preserves today's policy order: missing targets are silent skips,
+  cycle/depth skips do not consume budget, budget is consumed before content
+  work, content failures keep that budget consumed, resource coverage skips are
+  recorded in the existing order, and active form keys are removed on the paint
+  return hook.
+- The adapter builds the page inventory exactly as today, uses the machine as
+  call-order truth, matches local form entries to streamed callee ops by decoded
+  record range, rebases only form-path `id.sequence` values onto the page-global
+  counter, and deliberately does not recompute digests so the frozen v2 identity
+  quirk remains byte-identical.
+- Added `form_expansion_differential.rs` over the six golden fixtures
+  (shared-twice, nested, cycle, max-depth, budget-exhaustion, image/form
+  conflict), asserting full `FormExpandedInventory` equality between the old
+  and machine paths. Existing T147 goldens remain unchanged.
+- Added a direct `presslint-paint` dependency for the umbrella crate because the
+  parallel adapter consumes machine types directly. The new path is test-only in
+  this slice, so there is no production hot-path change; the arena prebuild
+  keeps decoded form buffers and resource vectors owned for the page walk.
+
 ## T147 - Form-Expanded Inventory Golden Oracle (Phase 0b-1)
 
 - New tests-only module `src/tests/form_inventory_golden.rs`: a golden lock for

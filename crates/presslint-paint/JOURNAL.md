@@ -1,5 +1,17 @@
 # presslint-paint Journal
 
+## T150 - Form Resolver Return Hook (Phase 0b-4a)
+
+- `FormResolver` now has a default no-op `on_return(&InvocationPath)` hook.
+  `CallMachine::walk` calls it immediately before popping a descended frame,
+  including empty callees, and unwinds every still-open descended frame in LIFO
+  order before returning a callee walker or resolver error. Resolver skips and
+  resolver errors still do not create a new child frame, so they only fire the
+  hook for already-open frames being unwound.
+- Added focused call-machine tests for LIFO return ordering, empty callee
+  return cleanup, and error-path cleanup. The hook is mechanics only; depth,
+  cycle, resource, and budget policy remain outside `presslint-paint`.
+
 ## T149 - Exact depth-first flat projection (Phase 0b-3)
 
 - New `flat_projection.rs` adds `flat_call_events(root, resolver, sink)` plus the

@@ -293,6 +293,117 @@ fn call_machine_nested_descent_is_depth_first_and_pops_on_return() -> Result<(),
 }
 
 #[derive(Debug)]
+struct ReturnTrackingResolver<'a> {
+    a: PaintSubProgram<'a>,
+    b: PaintSubProgram<'a>,
+    returns: Vec<InvocationPath>,
+}
+
+impl<'a> FormResolver<'a> for ReturnTrackingResolver<'a> {
+    fn resolve_form(&mut self, call: CallSite<'_>) -> Result<ResolveForm<'a>, GraphicsWalkError> {
+        if call.name == &name(b"A") {
+            Ok(ResolveForm::Descend(self.a.clone()))
+        } else {
+            Ok(ResolveForm::Descend(self.b.clone()))
+        }
+    }
+
+    fn on_return(&mut self, path: &InvocationPath) {
+        self.returns.push(path.clone());
+    }
+}
+
+#[test]
+fn call_machine_return_hook_fires_lifo_and_for_empty_callee() -> Result<(), String> {
+    let root_source = b"/A Do /B Do";
+    let a_source = b"/B Do";
+    let b_source = b"";
+    let root_records = assemble(root_source)?;
+    let a_records = assemble(a_source)?;
+    let b_records = assemble(b_source)?;
+    let no_images = [];
+    let root_forms = [name(b"A"), name(b"B")];
+    let a_forms = [name(b"B")];
+    let root = page_program(root_source, &root_records, &no_images, &root_forms);
+    let a = form_program(a_source, &a_records, &no_images, &a_forms, name(b"A"));
+    let b = form_program(b_source, &b_records, &no_images, &[], name(b"B"));
+    let mut resolver = ReturnTrackingResolver {
+        a,
+        b,
+        returns: Vec::new(),
+    };
+
+    CallMachine::walk(root, &mut resolver, |_| {}).map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(
+        resolver.returns,
+        vec![
+            InvocationPath {
+                frames: vec![
+                    InvocationFrame {
+                        ordinal: 0,
+                        name: name(b"A"),
+                    },
+                    InvocationFrame {
+                        ordinal: 0,
+                        name: name(b"B"),
+                    },
+                ],
+            },
+            InvocationPath {
+                frames: vec![InvocationFrame {
+                    ordinal: 0,
+                    name: name(b"A"),
+                }],
+            },
+            InvocationPath {
+                frames: vec![InvocationFrame {
+                    ordinal: 1,
+                    name: name(b"B"),
+                }],
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn call_machine_return_hook_fires_before_callee_error_unwinds() -> Result<(), String> {
+    let root_source = b"/B Do";
+    let b_source = b"0.4 g f 1 2 RG";
+    let root_records = assemble(root_source)?;
+    let b_records = assemble(b_source)?;
+    let no_images = [];
+    let root_forms = [name(b"B")];
+    let root = page_program(root_source, &root_records, &no_images, &root_forms);
+    let b = form_program(b_source, &b_records, &no_images, &[], name(b"B"));
+    let mut resolver = ReturnTrackingResolver {
+        a: b.clone(),
+        b,
+        returns: Vec::new(),
+    };
+
+    let error = CallMachine::walk(root, &mut resolver, |_| {})
+        .err()
+        .ok_or("callee error should abort the walk")?;
+
+    assert!(matches!(
+        error.kind,
+        crate::GraphicsWalkErrorKind::MalformedOperandCount { .. }
+    ));
+    assert_eq!(
+        resolver.returns,
+        vec![InvocationPath {
+            frames: vec![InvocationFrame {
+                ordinal: 0,
+                name: name(b"B"),
+            }],
+        }]
+    );
+    Ok(())
+}
+
+#[derive(Debug)]
 struct SkipResolver {
     calls: usize,
 }

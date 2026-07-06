@@ -8,6 +8,7 @@ use presslint_pdf::{
 use presslint_types::PageIndex;
 
 use crate::document_inventory::inventory_names;
+use crate::form_expansion_machine::build_page_inventory_with_forms_machine;
 use crate::{
     ColorSpace, ContentScope, FormExpandedInventory, FormWalkContext, ObjectKind, PdfInventorySkip,
     PdfName, SkippedFormInventoryReason, build_classic_pdf_inventory,
@@ -112,6 +113,30 @@ pub(super) fn expand_first_page_with_extra_images(
     context: FormWalkContext,
     extra_image_names: &[PdfName],
 ) -> FormExpandedInventory {
+    expand_first_page_with_extra_images_using(source, context, extra_image_names, false)
+}
+
+pub(super) fn expand_first_page_with_context_machine(
+    source: &[u8],
+    context: FormWalkContext,
+) -> FormExpandedInventory {
+    expand_first_page_with_extra_images_using(source, context, &[], true)
+}
+
+pub(super) fn expand_first_page_with_extra_images_machine(
+    source: &[u8],
+    context: FormWalkContext,
+    extra_image_names: &[PdfName],
+) -> FormExpandedInventory {
+    expand_first_page_with_extra_images_using(source, context, extra_image_names, true)
+}
+
+fn expand_first_page_with_extra_images_using(
+    source: &[u8],
+    context: FormWalkContext,
+    extra_image_names: &[PdfName],
+    machine: bool,
+) -> FormExpandedInventory {
     let access = inspect_document_access(source).expect("document access");
     let lookup = match &access.backend {
         DocumentAccessBackend::ClassicXref { xref_table, .. } => {
@@ -133,6 +158,21 @@ pub(super) fn expand_first_page_with_extra_images(
     let mut image_names = inventory_names(&page_resources.image_xobject_names);
     image_names.extend_from_slice(extra_image_names);
     let form_names = inventory_names(&page_resources.form_xobject_names);
+    if machine {
+        return build_page_inventory_with_forms_machine(
+            source,
+            lookup,
+            page,
+            PageIndex(0),
+            MAX,
+            &image_names,
+            &form_names,
+            &page_resources.form_xobjects,
+            &[],
+            context,
+        )
+        .expect("first page inventory");
+    }
     build_page_inventory_with_forms(
         source,
         lookup,
