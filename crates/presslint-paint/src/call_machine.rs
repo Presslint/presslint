@@ -18,7 +18,9 @@
 use presslint_syntax::OperatorRecord;
 use presslint_types::{ContentScope, InvocationFrame, InvocationPath, PdfName};
 
-use crate::{ColorSpaceEnv, GraphicsWalkError, PaintOp, PaintOpKind, PaintOps, PaintProgram};
+use crate::{
+    ColorSpaceEnv, ExtGStateEnv, GraphicsWalkError, PaintOp, PaintOpKind, PaintOps, PaintProgram,
+};
 
 /// Borrowed descriptor for one paint sub-program.
 ///
@@ -33,6 +35,8 @@ pub struct PaintSubProgram<'a> {
     pub records: &'a [OperatorRecord],
     /// Colour-space environment used by the paint walker.
     pub color_space_env: ColorSpaceEnv<'a>,
+    /// `ExtGState` environment used by the paint walker for `gs`.
+    pub extgstate_env: ExtGStateEnv<'a>,
     /// Names classified by the caller as image `XObject`s.
     pub image_xobject_names: &'a [PdfName],
     /// Names classified by the caller as form `XObject`s.
@@ -212,7 +216,13 @@ impl<'a> WalkFrame<'a> {
     }
 
     fn new(program: PaintSubProgram<'a>, pop_path_on_return: bool) -> Self {
-        let ops = PaintProgram::new(program.source, program.records, program.color_space_env).ops();
+        let ops = PaintProgram::with_envs(
+            program.source,
+            program.records,
+            program.color_space_env,
+            program.extgstate_env,
+        )
+        .ops();
         Self {
             program,
             ops,

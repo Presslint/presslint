@@ -5,6 +5,7 @@ use presslint_types::{ByteRange, ColorObservation, ColorSpace, ColorUsage, PdfNa
 use serde::{Deserialize, Serialize};
 
 use crate::color_space_env::{ColorSpaceEnv, ColorSpaceResource};
+use crate::extgstate_env::{ExtGStateEnv, GraphicsExtGStateSnapshot};
 use crate::operands::{
     checked_source, color_operands, concat_matrix, device_color, expect_operands, integer_operand,
     name_operand, numeric_operands,
@@ -92,6 +93,8 @@ pub struct GraphicsStateSnapshot {
     pub nonstroking_color: GraphicsColor,
     /// Current text rendering mode.
     pub text_rendering_mode: TextRenderingMode,
+    /// Current classified `ExtGState` state (values only; no resource names).
+    pub extgstate: GraphicsExtGStateSnapshot,
 }
 
 impl GraphicsStateSnapshot {
@@ -103,6 +106,7 @@ impl GraphicsStateSnapshot {
             stroking_color: GraphicsColor::new(ColorSpace::DeviceGray, vec![0.0]),
             nonstroking_color: GraphicsColor::new(ColorSpace::DeviceGray, vec![0.0]),
             text_rendering_mode: TextRenderingMode::Fill,
+            extgstate: GraphicsExtGStateSnapshot::page_default(),
         }
     }
 
@@ -396,31 +400,43 @@ pub enum GraphicsWalkErrorKind {
 ///
 /// The walker borrows a page colour-space environment
 /// ([`ColorSpaceEnv`]) so `cs`/`CS` + `sc`/`scn`/`SC`/`SCN` resolve resource
-/// colour spaces. A default-empty environment reproduces the device-only
-/// behaviour byte-for-byte.
+/// colour spaces, and a page/form `ExtGState` environment ([`ExtGStateEnv`]) so
+/// `gs` classifies overprint/transparency state onto the snapshot. Default-empty
+/// environments reproduce the earlier behaviour byte-for-byte: with an empty
+/// colour-space env no `cs` name resolves, and with an empty `ExtGState` env `gs`
+/// mutates nothing.
 #[derive(Debug, Clone)]
 pub struct GraphicsStateWalker<'a> {
     state: Rc<GraphicsStateSnapshot>,
     stack: Vec<Rc<GraphicsStateSnapshot>>,
     color_space_env: ColorSpaceEnv<'a>,
+    extgstate_env: ExtGStateEnv<'a>,
 }
 
 impl<'a> GraphicsStateWalker<'a> {
-    /// Create a walker with the page-initial graphics state and no colour-space
-    /// environment (device-only behaviour).
+    /// Create a walker with the page-initial graphics state and no colour-space or
+    /// `ExtGState` environment (earlier device-only, `gs`-inert behaviour).
     #[must_use]
     pub fn new() -> Self {
-        Self::with_color_space_env(ColorSpaceEnv::empty())
+        Self::with_envs(ColorSpaceEnv::empty(), ExtGStateEnv::empty())
     }
 
-    /// Create a walker with the page-initial graphics state that resolves
-    /// `cs`/`CS` names against a borrowed page colour-space environment.
+    /// Create a walker that resolves `cs`/`CS` names against a borrowed page
+    /// colour-space environment, with no `ExtGState` environment.
     #[must_use]
     pub fn with_color_space_env(color_space_env: ColorSpaceEnv<'a>) -> Self {
+        Self::with_envs(color_space_env, ExtGStateEnv::empty())
+    }
+
+    /// Create a walker that resolves `cs`/`CS` against a colour-space environment
+    /// and `gs` against an `ExtGState` environment.
+    #[must_use]
+    pub fn with_envs(color_space_env: ColorSpaceEnv<'a>, extgstate_env: ExtGStateEnv<'a>) -> Self {
         Self {
             state: Rc::new(GraphicsStateSnapshot::page_default()),
             stack: Vec::new(),
             color_space_env,
+            extgstate_env,
         }
     }
 
@@ -573,9 +589,11 @@ impl<'a> GraphicsStateWalker<'a> {
             b"Do" => Ok(PaintOpKind::XObjectInvoke {
                 name: name_operand(source, operator, record)?,
             }),
-            b"gs" => Ok(PaintOpKind::SetExtGState {
-                name: name_operand(source, operator, record)?,
-            }),
+            b"gs" => {
+                let name = name_operand(source, operator, record)?;
+                self.apply_extgstate(&name);
+                Ok(PaintOpKind::SetExtGState { name })
+            }
             _ => Ok(PaintOpKind::NoOp),
         }
     }
@@ -671,6 +689,34 @@ impl<'a> GraphicsStateWalker<'a> {
                 self.state_mut().nonstroking_color = color.clone();
                 PaintOpKind::SetNonstrokingColor { color }
             }
+        }
+    }
+
+    /// Mutate the snapshot's classified `ExtGState` state for one `gs` operator.
+    ///
+    /// This applies a deliberate tri-level rule so the empty environment stays
+    /// byte-and-state-identical to the pre-classification walker:
+    ///
+    /// - empty environment (feature off): mutate NOTHING — every existing caller
+    ///   passes an empty env, so a `gs` only emits its event, exactly as before;
+    /// - non-empty environment, name NOT found: set ALL seven params to
+    ///   [`GsParam::Unresolved`](crate::extgstate_env::GsParam::Unresolved) — we
+    ///   cannot know what that `gs` did, and never invent a value;
+    /// - name found: layer the resource's params over the current state, leaving
+    ///   fields the dictionary does not carry untouched.
+    fn apply_extgstate(&mut self, name: &PdfName) {
+        if self.extgstate_env.is_empty() {
+            return;
+        }
+        // Copy the resolved params out (they are `Copy`) so the borrow of the env
+        // is released before the copy-on-write `state_mut`.
+        let resolved = self
+            .extgstate_env
+            .resolve(name)
+            .map(|resource| resource.params);
+        match resolved {
+            Some(params) => self.state_mut().extgstate.apply(&params),
+            None => self.state_mut().extgstate.set_all_unresolved(),
         }
     }
 

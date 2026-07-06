@@ -1,5 +1,13 @@
 # presslint Journal
 
+## T156 - Mechanical ExtGState env threading (Phase 1-2 ripple)
+
+- `form_expansion_machine.rs` constructs `PaintSubProgram` with the new
+  `extgstate_env` field set to `ExtGStateEnv::empty()` at the root- and
+  descend-sites: the classified graphics-state feature stays OFF here until the
+  wiring slice populates page- and form-scope environments. No behaviour
+  change; form-expanded goldens byte-identical.
+
 ## T153 - Born-final form-expanded identity (entry identity v3)
 
 - The machine-driven form-expansion adapter now builds each expanded entry's

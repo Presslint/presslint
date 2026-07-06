@@ -10,6 +10,8 @@
 //! - [`mutation_class`]: the [`MutationClass`](crate::MutationClass) routing predicates.
 //! - [`call_machine`]: the call/return [`CallMachine`](crate::CallMachine) traversal,
 //!   invocation identity, and the `InvocationPath` JSON round trip.
+//! - [`extgstate_env`]: `gs` classification onto the snapshot — layered hits, the
+//!   all-`Unresolved` miss, the empty-env legacy identity, and `q`/`Q` restore.
 //! - [`mini_json`]: the dependency-free JSON serializer/parser shared by the
 //!   serde-transparency and invocation-path locks.
 //!
@@ -21,9 +23,10 @@
 use presslint_syntax::{OperatorRecord, assemble_operators, tokenize};
 use presslint_types::{ContentScope, PdfName};
 
-use crate::{ColorSpaceEnv, PaintSubProgram};
+use crate::{ColorSpaceEnv, ExtGStateEnv, PaintSubProgram};
 
 mod call_machine;
+mod extgstate_env;
 mod mini_json;
 mod mutation_class;
 mod paint_program;
@@ -51,6 +54,7 @@ pub fn page_program<'a>(
         source,
         records,
         color_space_env: ColorSpaceEnv::empty(),
+        extgstate_env: ExtGStateEnv::empty(),
         image_xobject_names: images,
         form_xobject_names: forms,
         scope: ContentScope::Page,
@@ -68,6 +72,7 @@ pub fn form_program<'a>(
         source,
         records,
         color_space_env: ColorSpaceEnv::empty(),
+        extgstate_env: ExtGStateEnv::empty(),
         image_xobject_names: images,
         form_xobject_names: forms,
         scope: ContentScope::FormXObject { name: form_name },

@@ -1,5 +1,31 @@
 # presslint-paint Journal
 
+## T156 - ExtGState env + snapshot classification (Phase 1-2)
+
+- New `extgstate_env.rs`: per-parameter classification `GsParam<T>` (`Default` /
+  `Set(T)` / `Unresolved` / `Unclassified`), classified value enums
+  (`OverprintMode`, `AlphaClass`, `BlendModeClass`, `SoftMaskClass`),
+  `ExtGStateParams` (OP, op, OPM, CA, ca, BM, SMask), `ExtGStateResource`
+  (name + params + `has_unclassified_keys`), and the borrowed `Copy`
+  `ExtGStateEnv<'a>` mirroring `ColorSpaceEnv` (`new`/`empty`/`resolve`/
+  `is_empty`). No resource names enter the graphics-state snapshot.
+- `GraphicsStateSnapshot` gains one nested `Copy` field
+  (`extgstate: GraphicsExtGStateSnapshot`, all-`Default` in `page_default()`),
+  so `q`/`Q` save/restore it for free and the copy-on-write cost class is
+  unchanged.
+- `gs` still emits `SetExtGState { name }` and now also mutates the snapshot
+  with a documented three-level rule: EMPTY env (every pre-existing caller)
+  leaves the state untouched — byte-and-state-identical legacy behaviour,
+  pinned by a dedicated test; a non-empty env with an unresolved name sets all
+  seven parameters to `Unresolved` (classification never invents values); a
+  resolved resource LAYERS only the parameters its dictionary actually sets
+  over the current state.
+- `PaintProgram`/`GraphicsStateWalker` grow sibling env constructors;
+  `PaintSubProgram` gains the `extgstate_env` field (mechanical empty-env
+  updates in the umbrella adapter). Digests are untouched by construction —
+  snapshot fields are not digest inputs; the bit-identity and form goldens
+  pass byte-identical.
+
 ## T154 - Split the paint test module (Phase 1-0, tests-only)
 
 - Verbatim mechanical split of the 985-line `tests.rs` into a thin aggregator

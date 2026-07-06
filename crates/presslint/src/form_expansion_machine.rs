@@ -16,8 +16,8 @@ use presslint_inventory::{
     Inventory, InventoryEntry, build_inventory_with_color_space_env, expanded_entry_identity,
 };
 use presslint_paint::{
-    CallSite, ColorSpaceEnv, FormResolver, GraphicsWalkError, PaintSubProgram, ResolveForm,
-    flat_call_events,
+    CallSite, ColorSpaceEnv, ExtGStateEnv, FormResolver, GraphicsWalkError, PaintSubProgram,
+    ResolveForm, flat_call_events,
 };
 use presslint_pdf::{
     ObjectLookup, PageXObjectResourceTarget, SkippedPageXObjectResource,
@@ -185,6 +185,7 @@ pub fn build_page_inventory_with_forms(
         source,
         records: &assembled.records,
         color_space_env: ColorSpaceEnv::new(page_color_spaces),
+        extgstate_env: ExtGStateEnv::empty(),
         image_xobject_names: page_image_names,
         form_xobject_names: page_form_names,
         scope: ContentScope::Page,
@@ -388,6 +389,7 @@ impl<'arena> FormResolver<'arena> for UmbrellaFormResolver<'arena, '_> {
             source: data.content.as_slice(),
             records: &data.records,
             color_space_env: ColorSpaceEnv::new(&data.color_spaces),
+            extgstate_env: ExtGStateEnv::empty(),
             image_xobject_names: &data.image_names,
             form_xobject_names: &data.form_names,
             scope,

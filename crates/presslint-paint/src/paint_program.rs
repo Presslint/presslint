@@ -22,6 +22,7 @@
 use presslint_syntax::OperatorRecord;
 
 use crate::color_space_env::ColorSpaceEnv;
+use crate::extgstate_env::ExtGStateEnv;
 use crate::walker::{GraphicsStateWalker, GraphicsWalkError, PaintOp};
 
 /// Cheap, replayable descriptor of a paint program.
@@ -36,21 +37,36 @@ pub struct PaintProgram<'a> {
     source: &'a [u8],
     records: &'a [OperatorRecord],
     env: ColorSpaceEnv<'a>,
+    extgstate_env: ExtGStateEnv<'a>,
 }
 
 impl<'a> PaintProgram<'a> {
     /// Describe a paint program over `source`, its assembled `records`, and the
-    /// borrowed page colour-space environment `env`.
+    /// borrowed page colour-space environment `env`, with no `ExtGState`
+    /// environment (`gs` stays inert).
     #[must_use]
     pub const fn new(
         source: &'a [u8],
         records: &'a [OperatorRecord],
         env: ColorSpaceEnv<'a>,
     ) -> Self {
+        Self::with_envs(source, records, env, ExtGStateEnv::empty())
+    }
+
+    /// Describe a paint program that also resolves `gs` against a borrowed
+    /// `ExtGState` environment.
+    #[must_use]
+    pub const fn with_envs(
+        source: &'a [u8],
+        records: &'a [OperatorRecord],
+        env: ColorSpaceEnv<'a>,
+        extgstate_env: ExtGStateEnv<'a>,
+    ) -> Self {
         Self {
             source,
             records,
             env,
+            extgstate_env,
         }
     }
 
@@ -63,7 +79,7 @@ impl<'a> PaintProgram<'a> {
     #[must_use]
     pub fn ops(&self) -> PaintOps<'a> {
         PaintOps {
-            walker: GraphicsStateWalker::with_color_space_env(self.env),
+            walker: GraphicsStateWalker::with_envs(self.env, self.extgstate_env),
             source: self.source,
             records: self.records,
             index: 0,
