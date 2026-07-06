@@ -1,5 +1,66 @@
 # presslint Journal
 
+## T158 - Audit graphics-state findings, page scope (Phase 1-4)
+
+- `ColorUsageAudit` gains ONE additive top-level field:
+  `#[serde(default, skip_serializing_if = "Vec::is_empty")] graphics_state_findings:
+  Vec<GraphicsStateFinding>`. An empty vec is omitted from serialization, so
+  every existing audit JSON shape is byte-identical, and old JSON deserializes
+  through `default`. The new `graphics_state_findings.rs` module owns the
+  finding types and derivation (the conditional split target from the brief;
+  `color_audit.rs` stays at 697 lines).
+- `GraphicsStateFinding { page, source, overprint, transparency, unresolved,
+  unclassified }` (serde snake_case, shape-locked by a new pinned serde-value
+  test). `GraphicsStateFindingSource` has `PageExtGState` and `FormExtGState`;
+  this slice EMITS ONLY the page variant — the form variant is the declared
+  contract for the deep form-scope follow-up in the `/Group` slice era. At most
+  one finding per page per source: the booleans aggregate over the page's
+  classified `/ExtGState` resources; absent or all-trigger-free resources
+  produce no finding.
+- SEMANTICS: declared-in-resources presence. A resource declared but never
+  selected by any `gs` still counts; per-`gs` usage precision belongs to the
+  convert-guard slice (which will reuse this derivation on the write side).
+  Booleans: `overprint` = `OP`/`op` written `true` or `OPM` written `1`/other
+  classified non-default token (ISO 32000-1 §8.6.7 — `OPM` alone modulates
+  rather than enables, but it is declared overprint-relevant state);
+  `transparency` = non-opaque
+  `CA`/`ca`, non-`/Normal` blend mode (including unrecognised/array shapes), or
+  present `SMask` (§11.3.5); `unresolved` = an all-`Unresolved` env entry (a
+  named slot that could not be classified); `unclassified` = any parameter
+  `Unclassified` or `has_unclassified_keys` (partial classification is worth
+  surfacing on its own).
+- Findings-vs-gaps discipline: detection success is a finding, inspection
+  failure is a gap, never both for one fact. `CoverageGapKind` gains the
+  additive `ExtGStateResourceInspectionError` (the pass could not begin;
+  document-anchored, mirrors the colour-space pair — a compressed offset-only
+  root now honestly reports it, symmetric with the existing XObject/colour-space
+  inspection-error gaps) and `ExtGStateResourceSkipped` (a skip the derivation
+  cannot see: unnamed non-absence skips, and a named duplicate shadowed by an
+  earlier classified entry). Named skips the env surfaces as all-`Unresolved`
+  entries are findings, not gaps; absence (`MissingExtGState(Resources)`,
+  missing `/Resources`) is neither.
+- DATA PATH and purity: the Phase 1-3 bridges run the inspection but drop the
+  reports, and `PdfInventory`'s serde shape must not change, so
+  `audit_color_usage` re-runs `inspect_document_page_extgstate_resources_with_lookup`
+  itself (dictionary-only, one bounded page-tree walk, no content-stream work)
+  and folds the result into the report through a private `build_audit`.
+  `build_color_usage_audit(inventory)` stays pure and behaviour-identical
+  (empty findings, no `ExtGState` gaps; now test-only). Findings reuse the
+  exact `page_extgstate_env` mapping the walker consumes, so audit and paint
+  agree on the classified vocabulary by construction.
+- Tests: existing audit pins untouched and green; new pinned serde-value shapes
+  for the finding, both source strings, and both gap kinds; a pinned
+  finding-bearing audit entry (declared-only resource, no `gs` in content);
+  behavioural cases for OP-true + OPM-1 aggregation, BM Multiply, CA 0.5,
+  unresolved entry (finding not gap), `/LW`-only and malformed-value
+  unclassified, all-default/no-`ExtGState` (no finding), non-dictionary
+  `/ExtGState` (gap not finding), begin-failure (document-anchored gap), and
+  duplicate-name shadowing (finding plus gap for distinct facts).
+- Cost class: one extra dictionary-only resource pass per audited document
+  (same class as the audit's existing document access); the report grows only
+  on finding-bearing pages; no content re-reads, no stream or profile bytes
+  retained. Every changed file stays under 1000 lines.
+
 ## T157 - Wire page- and form-scope ExtGState environments (Phase 1-3)
 
 - Turns the classified-`ExtGState` read path ON end-to-end, mirroring the

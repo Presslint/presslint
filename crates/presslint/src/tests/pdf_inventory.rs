@@ -701,11 +701,11 @@ fn audit_over_compressed_leaves_counts_pages_with_skipped_page_gaps() -> Result<
 
     // Both compressed-leaf pages are COUNTED as enumerated, each with an empty
     // per-page summary and exactly one page-scoped `SkippedPage` coverage gap.
-    // (The document-level `XObject` and `/Resources /ColorSpace` resource passes
-    // still use the offset-only root, which for a compressed root cannot begin and
-    // each add one honest inspection-error gap (`ResourceInspectionError` /
-    // `ColorSpaceResourceInspectionError`); that is out of scope for this
-    // content-extents slice and is not a hard failure.)
+    // (The document-level `XObject`, `/Resources /ColorSpace`, and
+    // `/Resources /ExtGState` resource passes still use the offset-only root,
+    // which for a compressed root cannot begin and each add one honest
+    // inspection-error gap; that is out of scope for this content-extents slice
+    // and is not a hard failure.)
     assert_eq!(audit.status, ColorAuditStatus::Incomplete);
     assert_eq!(audit.pages.len(), 2);
     let skipped_page_gaps = audit
@@ -722,7 +722,8 @@ fn audit_over_compressed_leaves_counts_pages_with_skipped_page_gaps() -> Result<
             .iter()
             .all(|gap| gap.kind == CoverageGapKind::SkippedPage
                 || gap.kind == CoverageGapKind::ResourceInspectionError
-                || gap.kind == CoverageGapKind::ColorSpaceResourceInspectionError)
+                || gap.kind == CoverageGapKind::ColorSpaceResourceInspectionError
+                || gap.kind == CoverageGapKind::ExtGStateResourceInspectionError)
     );
     assert!(audit.rgb_findings.is_empty());
     assert!(audit.document.color_space_counts.is_empty());

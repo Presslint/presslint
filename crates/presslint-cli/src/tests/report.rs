@@ -139,6 +139,7 @@ fn synthetic_audit() -> ColorUsageAudit {
         }],
         spot_names: Vec::new(),
         rgb_findings: Vec::new(),
+        graphics_state_findings: Vec::new(),
         coverage_gaps: Vec::new(),
         inventory: PdfInventory {
             byte_len: 0,

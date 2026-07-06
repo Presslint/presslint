@@ -4,8 +4,10 @@
 //! [`build_pdf_inventory`], then scans the merged, page-ordered inventory once
 //! and reports what the engine observed: deterministic document-level and
 //! per-page counts by [`ColorSpace`], [`ColorUsage`], and [`ObjectKind`],
-//! deduplicated spot-colorant names, explicit `DeviceRGB` findings, and a list
-//! of coverage gaps where the current engine could not fully classify color.
+//! deduplicated spot-colorant names, explicit `DeviceRGB` findings, per-page
+//! declared graphics-state findings from the classified page `/ExtGState`
+//! resources (see `graphics_state_findings`), and a list of coverage gaps where
+//! the current engine could not fully classify color or graphics state.
 //!
 //! This is CHK2: a descriptive audit, not a print-safety verdict. It does NOT
 //! compute ink limits / TAC, does NOT run ICC transforms, resolve alternate
@@ -31,6 +33,9 @@ use presslint_inventory::InventoryEntry;
 use presslint_types::{ColorObservation, ColorSpace, ColorUsage, ObjectId, ObjectKind, PageIndex};
 use serde::{Deserialize, Serialize};
 
+use crate::graphics_state_findings::{
+    GraphicsStateFinding, GraphicsStateScan, scan_document_graphics_state,
+};
 use crate::pdf_inventory::{
     PdfInventory, PdfInventoryError, PdfInventoryPageResult, build_pdf_inventory,
 };
@@ -156,6 +161,18 @@ pub enum CoverageGapKind {
     /// Resource colours resolved to `IccBased`/`Separation`/`DeviceN` are NOT
     /// gaps: they are honest observations of the real source family.
     UnmodeledColorSpace,
+    /// The document-level page `/Resources /ExtGState` inspection could not
+    /// begin, so whether any page declares overprint/transparency-relevant
+    /// graphics state is unknown.
+    ExtGStateResourceInspectionError,
+    /// A page `/ExtGState` resource was skipped in a way the graphics-state
+    /// finding derivation cannot see (a duplicate or non-dictionary
+    /// `/ExtGState`, an unscannable dictionary, a `/Resources` resolution
+    /// failure, or a named entry shadowed by an earlier classified one).
+    ///
+    /// A named entry that could not be classified is NOT a gap: it surfaces as
+    /// the [`GraphicsStateFinding`] `unresolved` flag instead.
+    ExtGStateResourceSkipped,
 }
 
 /// One coverage gap: a place the audit could not fully classify color.
@@ -205,7 +222,18 @@ pub struct ColorUsageAudit {
     /// Explicit `DeviceRGB` observations in document/page/entry/observation
     /// order.
     pub rgb_findings: Vec<RgbFinding>,
-    /// Coverage gaps in document order.
+    /// Per-page DECLARED graphics-state findings in document page order, at
+    /// most one per page per source; this slice emits page-scope findings only.
+    ///
+    /// These are declared-in-resources facts: a page's effective `/ExtGState`
+    /// resource that sets overprint/transparency-relevant state counts even if
+    /// no `gs` ever selects it (see [`GraphicsStateFinding`]). The field is
+    /// additive: an empty vec is omitted from serialization and absent in older
+    /// reports, so existing audit JSON shapes are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graphics_state_findings: Vec<GraphicsStateFinding>,
+    /// Coverage gaps in document order: the inventory-scan gaps first, then any
+    /// graphics-state inspection gaps (page order, document-level last).
     pub coverage_gaps: Vec<CoverageGap>,
     /// Neutral inventory the audit ran over, owned by the report.
     pub inventory: PdfInventory,
@@ -227,7 +255,12 @@ pub fn audit_color_usage(
     max_decoded_stream_bytes: usize,
 ) -> Result<ColorUsageAudit, PdfInventoryError> {
     let inventory = build_pdf_inventory(input, max_decoded_stream_bytes)?;
-    Ok(build_color_usage_audit(inventory))
+    // Graphics-state findings need document access the owned inventory does not
+    // carry, so they are derived here in the outer composing function (the same
+    // dictionary-only inspection the bridges already ran) and folded into the
+    // pure build. `build_color_usage_audit` itself stays pure over its input.
+    let graphics_state = scan_document_graphics_state(input);
+    Ok(build_audit(inventory, graphics_state))
 }
 
 /// Analyze an owned neutral inventory and assemble the read-only audit.
@@ -235,11 +268,29 @@ pub fn audit_color_usage(
 /// Split from [`audit_color_usage`] so the pure inventory-to-report scan can be
 /// exercised over synthetic inventories without building a PDF. The inventory is
 /// scanned by borrow and then moved into the returned report; it is never
-/// cloned.
+/// cloned. Graphics-state findings need document access, so this pure path
+/// carries none: `graphics_state_findings` is empty and no `ExtGState` gap is
+/// recorded, exactly the pre-finding behaviour.
+///
+/// Crate-internal and now exercised only by the synthetic-inventory tests
+/// (`audit_color_usage` composes [`build_audit`] with the graphics-state pass
+/// directly), so it is compiled for tests only.
+#[cfg(test)]
 #[must_use]
 pub fn build_color_usage_audit(inventory: PdfInventory) -> ColorUsageAudit {
+    build_audit(inventory, GraphicsStateScan::default())
+}
+
+/// Fold the inventory scan and the graphics-state pass into one report.
+///
+/// `ExtGState` coverage gaps append after the inventory-scan gaps (they are
+/// produced by a separate document pass), and the status verdict is computed
+/// over the combined gap list.
+fn build_audit(inventory: PdfInventory, graphics_state: GraphicsStateScan) -> ColorUsageAudit {
     let scan = scan_inventory(&inventory);
-    let status = if scan.coverage_gaps.is_empty() {
+    let mut coverage_gaps = scan.coverage_gaps;
+    coverage_gaps.extend(graphics_state.coverage_gaps);
+    let status = if coverage_gaps.is_empty() {
         ColorAuditStatus::Complete
     } else {
         ColorAuditStatus::Incomplete
@@ -250,7 +301,8 @@ pub fn build_color_usage_audit(inventory: PdfInventory) -> ColorUsageAudit {
         pages: scan.pages,
         spot_names: scan.spot_names.into_iter().collect(),
         rgb_findings: scan.rgb_findings,
-        coverage_gaps: scan.coverage_gaps,
+        graphics_state_findings: graphics_state.findings,
+        coverage_gaps,
         inventory,
     }
 }
@@ -517,7 +569,10 @@ const fn is_unclassified_color_space_skip(
 }
 
 /// Build a page-anchored coverage gap with no object detail.
-const fn page_gap(kind: CoverageGapKind, page: PageIndex) -> CoverageGap {
+///
+/// Shared with the graphics-state pass in `graphics_state_findings`, which
+/// anchors its `ExtGState` gaps the same way.
+pub const fn page_gap(kind: CoverageGapKind, page: PageIndex) -> CoverageGap {
     CoverageGap {
         kind,
         page: Some(page),

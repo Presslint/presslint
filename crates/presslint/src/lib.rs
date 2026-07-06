@@ -18,6 +18,7 @@ mod color_audit;
 mod document_inventory;
 mod form_expansion_machine;
 mod form_inventory;
+mod graphics_state_findings;
 mod page_content;
 mod pdf_inventory;
 mod pdf_query;
@@ -38,6 +39,7 @@ pub use form_inventory::{
     FormExpandedInventory, FormWalkContext, SkippedFormInventory, SkippedFormInventoryReason,
     build_page_inventory_with_forms,
 };
+pub use graphics_state_findings::{GraphicsStateFinding, GraphicsStateFindingSource};
 pub use pdf_inventory::{
     PdfInventory, PdfInventoryError, PdfInventoryPage, PdfInventoryPageResult,
     PdfInventoryRejection, PdfInventorySkip, build_pdf_inventory,

@@ -7,16 +7,19 @@ mod serde_harness;
 
 use serde::{Serialize, de::DeserializeOwned};
 
-use serde_harness::{from_serde_value, serde_value};
+use serde_harness::{TestSerdeValue, from_serde_value, serde_value};
 
+use super::form_inventory::{CATALOG, PAGES, classic_pdf, stream_object};
 use super::single_page_pdf;
 use crate::color_audit::build_color_usage_audit;
+use crate::graphics_state_findings::scan_document_graphics_state;
 use crate::inventory::{Inventory, InventoryEntry};
 use crate::{
     ColorAuditStatus, ColorObservation, ColorSpace, ColorUsage, ColorUsageAudit, ContentScope,
-    CoverageGap, CoverageGapKind, ObjectId, ObjectKind, PageColorUsage, PageIndex, PdfInventory,
-    PdfInventoryError, PdfInventoryPage, PdfInventoryPageResult, PdfInventorySkip, PdfName,
-    Provenance, RgbFinding, SkippedFormInventory, SkippedFormInventoryReason, audit_color_usage,
+    CoverageGap, CoverageGapKind, GraphicsStateFinding, GraphicsStateFindingSource, ObjectId,
+    ObjectKind, PageColorUsage, PageIndex, PdfInventory, PdfInventoryError, PdfInventoryPage,
+    PdfInventoryPageResult, PdfInventorySkip, PdfName, Provenance, RgbFinding,
+    SkippedFormInventory, SkippedFormInventoryReason, audit_color_usage,
 };
 
 const CMYK_FILL_CONTENT: &[u8] = b"q\n0 0 0 1 k\n12 12 80 80 re\nf\nQ";
@@ -537,5 +540,311 @@ fn rgb_page_through_pdf_reports_finding_and_stays_complete() -> Result<(), PdfIn
     assert_eq!(audit.rgb_findings.len(), 1);
     assert_eq!(audit.rgb_findings[0].usage, ColorUsage::Fill);
     assert_eq!(space_count(&audit.document, &ColorSpace::DeviceRgb), 1);
+    Ok(())
+}
+
+// --- graphics-state findings (page-scope declared `/ExtGState` state) ---
+
+/// CMYK-only content that never invokes `gs`, so graphics-state cases add no
+/// colour findings or gaps and prove the DECLARED-in-resources semantics.
+const CMYK_CONTENT_NO_GS: &[u8] = b"0 0 0 1 k\n12 12 80 80 re\nf";
+
+/// A single-page classic PDF whose page carries `resources` as its literal
+/// `/Resources` dictionary body and one raw content stream.
+fn page_with_resources_pdf(resources: &str, content: &[u8]) -> Vec<u8> {
+    let page = format!(
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << {resources} >> /Contents 4 0 R >>\nendobj\n"
+    )
+    .into_bytes();
+    let content_object = stream_object(4, "", content);
+    classic_pdf(&[CATALOG, PAGES, &page, &content_object])
+}
+
+/// A single-page classic PDF whose `/Resources /ExtGState` dictionary body is
+/// `dict` (same fixture shape as the `extgstate_wiring` tests).
+fn page_with_extgstate_pdf(dict: &str, content: &[u8]) -> Vec<u8> {
+    page_with_resources_pdf(&format!("/ExtGState << {dict} >>"), content)
+}
+
+// The four flags mirror the pinned finding shape positionally
+// (overprint/transparency/unresolved/unclassified); a builder would only
+// restate the struct.
+#[allow(clippy::fn_params_excessive_bools)]
+fn page_finding(
+    overprint: bool,
+    transparency: bool,
+    unresolved: bool,
+    unclassified: bool,
+) -> GraphicsStateFinding {
+    GraphicsStateFinding {
+        page: PageIndex(0),
+        source: GraphicsStateFindingSource::PageExtGState,
+        overprint,
+        transparency,
+        unresolved,
+        unclassified,
+    }
+}
+
+fn audit_extgstate_page(dict: &str) -> Result<ColorUsageAudit, String> {
+    audit_color_usage(&page_with_extgstate_pdf(dict, CMYK_CONTENT_NO_GS), 1024)
+        .map_err(|error| format!("{error:?}"))
+}
+
+#[test]
+fn graphics_state_finding_serde_shape_is_pinned() -> Result<(), String> {
+    let finding = GraphicsStateFinding {
+        page: PageIndex(2),
+        source: GraphicsStateFindingSource::PageExtGState,
+        overprint: true,
+        transparency: false,
+        unresolved: true,
+        unclassified: false,
+    };
+
+    let value = serde_value(&finding).map_err(|error| error.to_string())?;
+    assert_eq!(
+        value,
+        TestSerdeValue::Map(vec![
+            ("page".to_string(), TestSerdeValue::U64(2)),
+            (
+                "source".to_string(),
+                TestSerdeValue::String("page_ext_g_state".to_string()),
+            ),
+            ("overprint".to_string(), TestSerdeValue::Bool(true)),
+            ("transparency".to_string(), TestSerdeValue::Bool(false)),
+            ("unresolved".to_string(), TestSerdeValue::Bool(true)),
+            ("unclassified".to_string(), TestSerdeValue::Bool(false)),
+        ])
+    );
+    round_trip(&finding)?;
+
+    // The form-scope variant is a declared contract only in this slice: its
+    // serde string is pinned here, but nothing emits it yet.
+    assert_eq!(
+        serde_value(&GraphicsStateFindingSource::FormExtGState)
+            .map_err(|error| error.to_string())?,
+        TestSerdeValue::String("form_ext_g_state".to_string())
+    );
+    round_trip(&GraphicsStateFindingSource::FormExtGState)?;
+
+    // The two additive coverage-gap kinds are shape-locked the same way.
+    assert_eq!(
+        serde_value(&CoverageGapKind::ExtGStateResourceInspectionError)
+            .map_err(|error| error.to_string())?,
+        TestSerdeValue::String("ext_g_state_resource_inspection_error".to_string())
+    );
+    assert_eq!(
+        serde_value(&CoverageGapKind::ExtGStateResourceSkipped)
+            .map_err(|error| error.to_string())?,
+        TestSerdeValue::String("ext_g_state_resource_skipped".to_string())
+    );
+    round_trip(&CoverageGapKind::ExtGStateResourceSkipped)?;
+    Ok(())
+}
+
+#[test]
+fn audit_without_findings_omits_the_field_and_old_json_deserializes() -> Result<(), String> {
+    // The synthetic pure-build path carries no graphics-state pass at all, so
+    // the vec is empty and `skip_serializing_if` omits the key: every existing
+    // pinned audit JSON stays byte-identical.
+    let inventory = synthetic_inventory(
+        vec![entry(
+            0,
+            0,
+            ObjectKind::Vector,
+            vec![observation(ColorUsage::Fill, ColorSpace::DeviceCmyk)],
+        )],
+        vec![inventoried_page(0, 1)],
+    );
+    let audit = build_color_usage_audit(inventory);
+    assert!(audit.graphics_state_findings.is_empty());
+
+    let value = serde_value(&audit).map_err(|error| error.to_string())?;
+    let TestSerdeValue::Map(fields) = &value else {
+        return Err("audit should serialize as a map".to_string());
+    };
+    assert!(
+        fields
+            .iter()
+            .all(|(key, _)| key != "graphics_state_findings")
+    );
+
+    // The serialized map WITHOUT the key is exactly an old-format report: it
+    // must deserialize through `#[serde(default)]`.
+    let decoded: ColorUsageAudit = from_serde_value(value).map_err(|error| error.to_string())?;
+    assert!(decoded.graphics_state_findings.is_empty());
+    assert_eq!(&decoded, &audit);
+    Ok(())
+}
+
+#[test]
+fn finding_bearing_audit_pins_the_graphics_state_findings_entry() -> Result<(), String> {
+    // Content with no colour operators: the finding comes from the DECLARED
+    // resources alone, and the audit then carries no f64 colour components the
+    // dependency-free serde harness cannot model.
+    let source = page_with_extgstate_pdf("/GS0 << /OP true /BM /Multiply >>", b"q\nQ");
+    let audit = audit_color_usage(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    let value = serde_value(&audit).map_err(|error| error.to_string())?;
+    let TestSerdeValue::Map(fields) = &value else {
+        return Err("audit should serialize as a map".to_string());
+    };
+    let (_, findings) = fields
+        .iter()
+        .find(|(key, _)| key == "graphics_state_findings")
+        .ok_or_else(|| "graphics_state_findings key should be present".to_string())?;
+    assert_eq!(
+        findings,
+        &TestSerdeValue::Seq(vec![TestSerdeValue::Map(vec![
+            ("page".to_string(), TestSerdeValue::U64(0)),
+            (
+                "source".to_string(),
+                TestSerdeValue::String("page_ext_g_state".to_string()),
+            ),
+            ("overprint".to_string(), TestSerdeValue::Bool(true)),
+            ("transparency".to_string(), TestSerdeValue::Bool(true)),
+            ("unresolved".to_string(), TestSerdeValue::Bool(false)),
+            ("unclassified".to_string(), TestSerdeValue::Bool(false)),
+        ])])
+    );
+    round_trip(&audit)?;
+    Ok(())
+}
+
+#[test]
+fn op_true_and_opm_one_aggregate_into_one_overprint_finding() -> Result<(), String> {
+    // Two resources on one page aggregate into ONE finding; the content never
+    // invokes `gs`, proving declared-in-resources presence counts.
+    let audit = audit_extgstate_page("/GS0 << /OP true >> /GS1 << /OPM 1 >>")?;
+
+    assert_eq!(audit.status, ColorAuditStatus::Complete);
+    assert!(audit.coverage_gaps.is_empty());
+    assert_eq!(
+        audit.graphics_state_findings,
+        vec![page_finding(true, false, false, false)]
+    );
+    Ok(())
+}
+
+#[test]
+fn non_normal_blend_mode_and_non_opaque_alpha_report_transparency() -> Result<(), String> {
+    let blend = audit_extgstate_page("/GS0 << /BM /Multiply >>")?;
+    assert_eq!(
+        blend.graphics_state_findings,
+        vec![page_finding(false, true, false, false)]
+    );
+
+    let alpha = audit_extgstate_page("/GS0 << /CA 0.5 >>")?;
+    assert_eq!(alpha.status, ColorAuditStatus::Complete);
+    assert_eq!(
+        alpha.graphics_state_findings,
+        vec![page_finding(false, true, false, false)]
+    );
+    Ok(())
+}
+
+#[test]
+fn unresolved_entry_is_an_unresolved_finding_not_a_gap() -> Result<(), String> {
+    // `/GS0` is an indirect reference to a missing object: the env surfaces it
+    // all-`Unresolved`, so the fact is a finding flag and NOT a coverage gap.
+    let audit = audit_extgstate_page("/GS0 99 0 R")?;
+
+    assert_eq!(audit.status, ColorAuditStatus::Complete);
+    assert!(audit.coverage_gaps.is_empty());
+    assert_eq!(
+        audit.graphics_state_findings,
+        vec![page_finding(false, false, true, false)]
+    );
+    Ok(())
+}
+
+#[test]
+fn unclassified_keys_or_values_alone_report_an_unclassified_finding() -> Result<(), String> {
+    // A harmless non-safety key (`/LW`) alone: partial classification is worth
+    // surfacing, so the finding exists with ONLY `unclassified` set.
+    let keys = audit_extgstate_page("/GS0 << /LW 2 >>")?;
+    assert_eq!(keys.status, ColorAuditStatus::Complete);
+    assert_eq!(
+        keys.graphics_state_findings,
+        vec![page_finding(false, false, false, true)]
+    );
+
+    // A safety key with an unclassifiable VALUE (`/op` must be a boolean).
+    let values = audit_extgstate_page("/GS0 << /op 3 >>")?;
+    assert_eq!(
+        values.graphics_state_findings,
+        vec![page_finding(false, false, false, true)]
+    );
+    Ok(())
+}
+
+#[test]
+fn all_default_or_absent_extgstate_produces_no_finding() -> Result<(), String> {
+    // Every classified parameter written with its trigger-free value.
+    let defaults = audit_extgstate_page(
+        "/GS0 << /op false /OP false /OPM 0 /ca 1.0 /BM /Normal /SMask /None >>",
+    )?;
+    assert_eq!(defaults.status, ColorAuditStatus::Complete);
+    assert!(defaults.graphics_state_findings.is_empty());
+    assert!(defaults.coverage_gaps.is_empty());
+
+    // No `/ExtGState` (and no `/Resources`) at all: absence is not a finding
+    // and not a gap.
+    let absent = audit_color_usage(&single_page_pdf(b"", CMYK_FILL_CONTENT), 1024)
+        .map_err(|error| format!("{error:?}"))?;
+    assert_eq!(absent.status, ColorAuditStatus::Complete);
+    assert!(absent.graphics_state_findings.is_empty());
+    assert!(absent.coverage_gaps.is_empty());
+    Ok(())
+}
+
+#[test]
+fn extgstate_inspection_failure_is_a_gap_not_a_finding() -> Result<(), String> {
+    // A present but non-dictionary `/ExtGState` hides the whole scope from the
+    // finding derivation: a page-anchored gap, no finding.
+    let source = page_with_resources_pdf("/ExtGState [ ]", CMYK_CONTENT_NO_GS);
+    let audit = audit_color_usage(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(audit.status, ColorAuditStatus::Incomplete);
+    assert!(audit.graphics_state_findings.is_empty());
+    assert_eq!(audit.coverage_gaps.len(), 1);
+    let gap = &audit.coverage_gaps[0];
+    assert_eq!(gap.kind, CoverageGapKind::ExtGStateResourceSkipped);
+    assert_eq!(gap.page, Some(PageIndex(0)));
+    assert_eq!(gap.object, None);
+    round_trip(gap)?;
+
+    // A pass that cannot BEGIN at all yields one document-anchored
+    // inspection-error gap and no findings.
+    let scan = scan_document_graphics_state(b"not a pdf");
+    assert!(scan.findings.is_empty());
+    assert_eq!(scan.coverage_gaps.len(), 1);
+    assert_eq!(
+        scan.coverage_gaps[0].kind,
+        CoverageGapKind::ExtGStateResourceInspectionError
+    );
+    assert_eq!(scan.coverage_gaps[0].page, None);
+    Ok(())
+}
+
+#[test]
+fn duplicate_name_shadowed_by_a_classified_entry_is_a_gap() -> Result<(), String> {
+    // The first `/GS0` classifies (overprint finding); the duplicate `/GS0` is
+    // dropped by the env mapping, so its state is invisible to the derivation:
+    // that separate fact is a coverage gap alongside the finding.
+    let audit = audit_extgstate_page("/GS0 << /OP true >> /GS0 99 0 R")?;
+
+    assert_eq!(audit.status, ColorAuditStatus::Incomplete);
+    assert_eq!(
+        audit.graphics_state_findings,
+        vec![page_finding(true, false, false, false)]
+    );
+    assert_eq!(audit.coverage_gaps.len(), 1);
+    assert_eq!(
+        audit.coverage_gaps[0].kind,
+        CoverageGapKind::ExtGStateResourceSkipped
+    );
+    assert_eq!(audit.coverage_gaps[0].page, Some(PageIndex(0)));
     Ok(())
 }
