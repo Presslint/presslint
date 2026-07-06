@@ -4,6 +4,24 @@ Older accumulated journal history lives in [JOURNAL-archive-2.md](JOURNAL-archiv
 
 ## Current State
 
+### T155 - ExtGState Resource Inspector (Phase 1-1)
+
+- Added read-only page and form `/Resources /ExtGState` inspectors. Page scope
+  walks the page tree with the existing inherited `ResourceContext`; form scope
+  uses `ResourceContext::from_dictionary(..., None)` and reads only the form's
+  own resources.
+- Added a pdf-crate-local ExtGState classifier/report vocabulary for the Phase-1
+  safety keys only: `OP`, `op`, `OPM`, `CA`, `ca`, `BM`, and `SMask`, plus
+  `has_unclassified_keys` for any other dictionary key except `/Type`.
+- The classifier records per-parameter `Unset`/`Set`/`Malformed` states and does
+  not resolve runtime defaults such as `op` inheriting `OP`. Unresolved indirect
+  entries, duplicate names, missing/duplicate `/ExtGState`, non-dictionary
+  containers, non-dictionary entries, and wrong-typed parameter values are
+  reported structurally.
+- Scope remains read-only and consumer-free: paint, inventory, umbrella, write,
+  and CLI paths are untouched. Reports retain only small classified values and
+  byte-range diagnostics, not PDF bodies or streams.
+
 ### T138 - Form-Scope Resource Colour-Space Inspector (F4-6 slice 1b)
 
 - New read-only inspector `inspect_form_color_space_resources(input, lookup,

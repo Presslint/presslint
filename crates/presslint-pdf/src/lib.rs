@@ -28,7 +28,9 @@ mod dictionary_entries;
 mod dictionary_extent;
 mod document_access;
 mod document_page_content_extents;
+mod extgstate_classify;
 mod form_color_space_resources;
+mod form_extgstate_resources;
 mod form_xobject_resources;
 mod image_xobject;
 mod indirect_reference;
@@ -47,6 +49,7 @@ mod page_content_extents;
 mod page_content_targets;
 mod page_contents;
 mod page_contents_resolved;
+mod page_extgstate_resources;
 mod page_resource_inheritance;
 mod page_tree_kid_targets;
 mod page_tree_kids;
@@ -126,8 +129,16 @@ pub use document_page_content_extents::{
     inspect_document_page_content_extents, inspect_document_page_content_extents_resolved,
     inspect_document_page_content_extents_with_lookup,
 };
+pub use extgstate_classify::{
+    ClassifiedExtGStateResource, ExtGStateAlpha, ExtGStateBlendMode, ExtGStateOverprintMode,
+    ExtGStateParamClass, ExtGStateSoftMask, SkippedExtGStateResource,
+    SkippedExtGStateResourceReason, classify_extgstate_entry,
+};
 pub use form_color_space_resources::{
     FormColorSpaceResourcesInspection, inspect_form_color_space_resources,
+};
+pub use form_extgstate_resources::{
+    FormExtGStateResourcesInspection, inspect_form_extgstate_resources,
 };
 pub use form_xobject_resources::{FormXObjectResourcesInspection, inspect_form_xobject_resources};
 pub use image_xobject::{
@@ -208,6 +219,11 @@ pub use page_contents::{
 pub use page_contents_resolved::{
     ResolvedPageContents, ResolvedPageContentsError, inspect_page_contents_resolved,
     page_contents_inspection_from_resolved,
+};
+pub use page_extgstate_resources::{
+    DocumentPageExtGStateResourcesInspection, DocumentPageExtGStateResourcesInspectionError,
+    PageExtGStateResourcesInspection, inspect_document_page_extgstate_resources,
+    inspect_document_page_extgstate_resources_with_lookup,
 };
 pub use page_tree_kid_targets::{
     PageTreeKidTargetInspection, PageTreeKidTargetsInspection, PageTreeKidTargetsInspectionError,
