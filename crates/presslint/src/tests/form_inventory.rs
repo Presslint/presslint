@@ -1,13 +1,17 @@
 #![allow(clippy::expect_used)]
 
+use presslint_inventory::{
+    ColorSpaceEnv, ExtGStateEnv, ExtGStateResource, GraphicsStateWalker, GsParam, PaintOp,
+};
 use presslint_pdf::{
     DocumentAccessBackend, ObjectLookup, inspect_document_access,
     inspect_document_page_content_extents_with_lookup,
-    inspect_document_page_xobject_resources_with_lookup,
+    inspect_document_page_xobject_resources_with_lookup, inspect_form_extgstate_resources,
 };
+use presslint_syntax::{assemble_operators, tokenize};
 use presslint_types::PageIndex;
 
-use crate::document_inventory::inventory_names;
+use crate::document_inventory::{extgstate_env_resources, inventory_names};
 use crate::{
     ColorSpace, ContentScope, FormExpandedInventory, FormWalkContext, InvocationFrame,
     InvocationPath, ObjectKind, PdfInventorySkip, PdfName, SkippedFormInventoryReason,
@@ -142,6 +146,7 @@ pub(super) fn expand_first_page_with_extra_images(
         &image_names,
         &form_names,
         &page_resources.form_xobjects,
+        &[],
         &[],
         context,
     )
@@ -726,4 +731,93 @@ fn nested_resource_classification_skips_surface_as_form_skips() {
         expanded.form_skipped[0].reason,
         SkippedFormInventoryReason::Resource { .. }
     ));
+}
+
+fn backend_lookup(backend: &DocumentAccessBackend) -> ObjectLookup<'_> {
+    match backend {
+        DocumentAccessBackend::ClassicXref { xref_table, .. } => {
+            ObjectLookup::ClassicXref(xref_table)
+        }
+        DocumentAccessBackend::ClassicXrefChain { chain } => ObjectLookup::ClassicXrefChain(chain),
+        DocumentAccessBackend::XrefStreamSection { section } => {
+            ObjectLookup::XrefStreamSection(section)
+        }
+        DocumentAccessBackend::XrefStreamChain { chain } => ObjectLookup::XrefStreamChain(chain),
+    }
+}
+
+/// Build the FORM-local `ExtGState` env for the first page's first form, through
+/// the real pdf-side form inspector and the umbrella mapping — the same path the
+/// machine's `prepare_form_object` uses. No page resources are inherited.
+fn first_form_extgstate_env(source: &[u8]) -> Vec<ExtGStateResource> {
+    let access = inspect_document_access(source).expect("document access");
+    let lookup = backend_lookup(&access.backend);
+    let root = access.page_tree_root.object_byte_offset;
+    let resources = inspect_document_page_xobject_resources_with_lookup(source, lookup, root)
+        .expect("page xobject resources");
+    let form_target = &resources.pages[0].form_xobjects[0];
+    let report = inspect_form_extgstate_resources(source, lookup, form_target.object_byte_offset);
+    extgstate_env_resources(&report.extgstates, &report.skipped)
+}
+
+/// Directly walk `content` against a borrowed form-local `ExtGState` env.
+fn walk_form(content: &[u8], env: &[ExtGStateResource]) -> Vec<PaintOp> {
+    let tokens = tokenize(content).expect("tokenize");
+    let assembled = assemble_operators(&tokens).expect("assemble");
+    let mut walker = GraphicsStateWalker::with_envs(ColorSpaceEnv::empty(), ExtGStateEnv::new(env));
+    assembled
+        .records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| walker.step(content, index, record).expect("walk step"))
+        .collect()
+}
+
+#[test]
+fn form_scope_gs_applies_form_local_extgstate() {
+    // The form declares its OWN `/ExtGState /GS0` with `op true` and its content
+    // applies it. The form-local env must classify `/GS0` and the walk must carry
+    // it onto the snapshot.
+    let form = stream_object(
+        4,
+        " /Type /XObject /Subtype /Form /BBox [ 0 0 100 100 ] /Resources << /ExtGState << /GS0 << /op true >> >> >>",
+        b"/GS0 gs\n0 0 1 rg\n0 0 50 50 re\nf",
+    );
+    let page_content = stream_object(5, "", b"q\n/Fm Do\nQ");
+    let source = classic_pdf(&[CATALOG, PAGES, PAGE_WITH_FORM, &form, &page_content]);
+
+    let env = first_form_extgstate_env(&source);
+    assert_eq!(
+        env.iter()
+            .find(|resource| resource.name.0 == b"GS0")
+            .expect("form-local GS0")
+            .params
+            .overprint_fill,
+        GsParam::Set(true)
+    );
+
+    let ops = walk_form(b"/GS0 gs", &env);
+    assert_eq!(ops[0].state.extgstate.overprint_fill, GsParam::Set(true));
+}
+
+#[test]
+fn form_does_not_inherit_page_extgstate() {
+    // The PAGE declares `/ExtGState /GS0`, but the form omits `/ExtGState` and
+    // still uses `/GS0 gs`. Forms paint against their OWN resources only (same
+    // rule as colour spaces), so the form-local env is empty and the form's
+    // `/GS0 gs` is an honest legacy no-op, not the page's classification.
+    let page: &[u8] = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Fm 4 0 R >> /ExtGState << /GS0 << /op true >> >> >> /Contents 5 0 R >>\nendobj\n";
+    let form = stream_object(
+        4,
+        " /Type /XObject /Subtype /Form /BBox [ 0 0 100 100 ]",
+        b"/GS0 gs\n0 0 1 rg\n0 0 50 50 re\nf",
+    );
+    let page_content = stream_object(5, "", b"q\n/Fm Do\nQ");
+    let source = classic_pdf(&[CATALOG, PAGES, page, &form, &page_content]);
+
+    let env = first_form_extgstate_env(&source);
+    assert!(env.is_empty());
+
+    let ops = walk_form(b"/GS0 gs", &env);
+    assert_eq!(ops[0].state.extgstate.overprint_fill, GsParam::Default);
 }

@@ -11,13 +11,15 @@ use presslint_pdf::{
     SkippedColorSpaceResource, SkippedPageContentTargetReason, inspect_document_access,
     inspect_document_page_color_space_resources_with_lookup,
     inspect_document_page_content_extents_resolved,
+    inspect_document_page_extgstate_resources_with_lookup,
     inspect_document_page_xobject_resources_with_lookup, resolve_object,
 };
 use presslint_types::PageIndex;
 use serde::{Deserialize, Serialize};
 
 use crate::document_inventory::{
-    InventoryPageSkip, inventory_names, page_color_space_env, page_index, split_color_space_report,
+    InventoryPageSkip, inventory_names, page_color_space_env, page_extgstates_at, page_index,
+    split_color_space_report,
 };
 use crate::form_inventory::{
     FormExpandedInventory, FormWalkContext, SkippedFormInventory, build_page_inventory_with_forms,
@@ -237,6 +239,12 @@ pub enum PdfInventoryRejection {
 /// Returns [`PdfInventoryError`] only for failures that prevent the neutral
 /// document/page-content path from being established. Unsupported page and
 /// stream shapes are represented as structured page skips.
+// One straight-line orchestration bridge: establish the document path, run the
+// per-scope resource passes (xobject/colour-space/`ExtGState`), then loop pages
+// once. It is a couple of lines over the default with the `ExtGState` pass
+// added; the per-resource mapping is already factored into helpers, so keeping
+// the pass wiring inline reads better than an artificial split.
+#[allow(clippy::too_many_lines)]
 pub fn build_pdf_inventory(
     input: &[u8],
     max_decoded_stream_bytes: usize,
@@ -267,6 +275,17 @@ pub fn build_pdf_inventory(
             lookup,
             access.page_tree_root.object_byte_offset,
         ));
+    // Page-scope `/ExtGState` classification, mirroring the colour-space pass. A
+    // begin-failure is deferred to Phase 1-4 (no new report field here), so the
+    // env is then simply empty and `gs` keeps its legacy no-op behaviour.
+    let extgstate_pages = inspect_document_page_extgstate_resources_with_lookup(
+        input,
+        lookup,
+        access.page_tree_root.object_byte_offset,
+    )
+    .ok()
+    .map(|report| report.pages);
+    let extgstate_pages = extgstate_pages.as_ref();
 
     let mut inventory = Inventory::default();
     let mut pages = Vec::with_capacity(extents.pages.len());
@@ -289,6 +308,7 @@ pub fn build_pdf_inventory(
             resources.map_or_else(Vec::new, |r| inventory_names(&r.form_xobject_names));
         let form_targets = resources.map_or(&[][..], |r| r.form_xobjects.as_slice());
         let page_color_spaces = color_space_page.map_or_else(Vec::new, page_color_space_env);
+        let page_extgstates = page_extgstates_at(extgstate_pages, page.ordinal);
         let result = match build_page_inventory_with_forms(
             input,
             lookup,
@@ -299,6 +319,7 @@ pub fn build_pdf_inventory(
             &form_xobject_names,
             form_targets,
             &page_color_spaces,
+            &page_extgstates,
             FormWalkContext::bounded_default(),
         ) {
             Ok(expanded) => {

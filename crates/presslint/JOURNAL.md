@@ -1,5 +1,53 @@
 # presslint Journal
 
+## T157 - Wire page- and form-scope ExtGState environments (Phase 1-3)
+
+- Turns the classified-`ExtGState` read path ON end-to-end, mirroring the
+  colour-space flow exactly. `document_inventory.rs` gains the bridge helpers:
+  `extgstate_env_resources` maps a scope's `presslint-pdf` classified resources
+  (T155) into paint-native `ExtGStateResource`s (T156), and `page_extgstate_env`
+  is the thin per-page adapter (mirrors `color_space_env_resources` /
+  `page_color_space_env`). Per-parameter mapping: pdf `Unset -> GsParam::Default`,
+  `Set(v) -> Set(mapped v)`, `Malformed -> Unclassified`. `BM` names are
+  reclassified here per ISO 32000-1 §11.3.5 — `Normal`/`Compatible -> Normal`,
+  the standard separable (Table 136) + non-separable (Table 137) names ->
+  `NonNormal`, any other name or array-form list -> `OtherNamed` (the pdf side
+  only splits `Normal` from the rest, so the real vocabulary lives in the seam).
+- An UNRESOLVED entry (a named `/ExtGState` slot that could not be classified —
+  unresolved reference, non-dictionary entry, malformed entry dict) surfaces in
+  the env with EVERY param `Unresolved`, so `gs` on that name is honestly unknown
+  rather than silently swallowed; a named skip whose resource is already
+  classified is dropped. Resources-level skips (no resource name) cannot key an
+  env entry and are deferred to the audit/guard slices (1-4/1-5); no report serde
+  field was added, so all page/report shapes stay untouched.
+- PAGE scope: both inventory bridges (`document_inventory.rs` classic,
+  `pdf_inventory.rs` neutral) inspect page `/ExtGState` alongside the colour-space
+  pass and build the page env once per page (shared `page_extgstates_at` helper);
+  a begin-failure yields an empty env (legacy no-op). FORM scope:
+  `form_expansion_machine.rs` inspects each descended form's OWN `/ExtGState` via
+  the T155 form inspector and builds a form-LOCAL env (no page inheritance, same
+  rule as colour spaces). The root and descend `PaintSubProgram` literals now pass
+  the real envs instead of `ExtGStateEnv::empty()`.
+- Identity untouched: the classified state rides only the walk snapshot, never an
+  `InventoryEntry`, so digests are snapshot-independent. All six form-expanded
+  goldens, the inventory bit-identity/corpus goldens, and every umbrella test pass
+  byte-untouched even though the fixtures now walk through the new (empty-env)
+  code path. New `tests/extgstate_wiring.rs` proves the behavioural effect end to
+  end (page `gs` hit carries `Set(true)`, the set/unset/alpha/OPM/SMask/BM mapping
+  table, a miss on a non-empty env goes all-`Unresolved`, an unresolved entry
+  surfaces all-`Unresolved`, a page without `/ExtGState` stays legacy, and a
+  populated env leaves the page inventory identity byte-equal); `tests/form_inventory.rs`
+  adds the form-local + no-inheritance assertions. The behaviour is observed with a
+  direct paint walk because the snapshot deliberately does not reach the inventory
+  report.
+- `build_classic_pdf_inventory`/`build_pdf_inventory` are a couple of lines over
+  the clippy per-function default with the third resource pass added; the mapping
+  is fully factored into helpers, so both carry a scoped
+  `#[allow(clippy::too_many_lines)]` with a rationale rather than an artificial
+  split. Cost class: one extra dictionary-only resource inspection per page and
+  per descended form; envs built once per scope and borrowed by the walk, no
+  content re-reads. Every changed file stays under 1000 lines.
+
 ## T156 - Mechanical ExtGState env threading (Phase 1-2 ripple)
 
 - `form_expansion_machine.rs` constructs `PaintSubProgram` with the new

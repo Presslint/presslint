@@ -6,6 +6,7 @@ use crate::{
 };
 
 mod color_audit;
+mod extgstate_wiring;
 mod form_inventory;
 mod form_inventory_golden;
 mod pdf_inventory;

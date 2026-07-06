@@ -1,16 +1,22 @@
 //! Public bridge from classic-xref PDF bytes to page-object inventory.
 
-use presslint_inventory::{ColorSpaceResource, GraphicsWalkError, Inventory};
+use presslint_inventory::{
+    AlphaClass, BlendModeClass, ColorSpaceResource, ExtGStateParams, ExtGStateResource,
+    GraphicsWalkError, GsParam, Inventory, OverprintMode, SoftMaskClass,
+};
 use presslint_pdf::{
-    ClassifiedColorSpaceResource, ColorSpaceFamily, ContentStreamDataExtentInspectionError,
-    ContentStreamDataSliceError, ContentStreamFilterClassification,
-    ContentStreamFilterClassificationError, DocumentPageColorSpaceResourcesInspection,
-    DocumentPageColorSpaceResourcesInspectionError, DocumentPageContentExtentInspection,
-    DocumentPageContentExtentResult, DocumentPageContentExtentsInspectionError,
+    ClassicXrefTableInspection, ClassifiedColorSpaceResource, ClassifiedExtGStateResource,
+    ColorSpaceFamily, ContentStreamDataExtentInspectionError, ContentStreamDataSliceError,
+    ContentStreamFilterClassification, ContentStreamFilterClassificationError,
+    DocumentPageColorSpaceResourcesInspection, DocumentPageColorSpaceResourcesInspectionError,
+    DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
+    DocumentPageContentExtentsInspectionError, ExtGStateAlpha, ExtGStateBlendMode,
+    ExtGStateOverprintMode, ExtGStateParamClass, ExtGStateSoftMask,
     FlateDecodeParametersResolution, FlateDecodeParametersResolutionError, FlateDecodeStreamError,
-    ObjectLookup, PageColorSpaceResourcesInspection, SkippedColorSpaceResource,
-    SkippedPageContentTargetReason, inspect_classic_document_access,
-    inspect_document_page_color_space_resources, inspect_document_page_content_extents,
+    ObjectLookup, PageColorSpaceResourcesInspection, PageExtGStateResourcesInspection,
+    SkippedColorSpaceResource, SkippedExtGStateResource, SkippedPageContentTargetReason,
+    inspect_classic_document_access, inspect_document_page_color_space_resources,
+    inspect_document_page_content_extents, inspect_document_page_extgstate_resources,
 };
 use presslint_syntax::{AssembleError, TokenizeError};
 use presslint_types::{ColorSpace, PageIndex, PdfName};
@@ -228,6 +234,12 @@ pub enum ClassicPdfInventoryRejection {
 /// Returns [`ClassicPdfInventoryError`] only for failures that prevent the
 /// classic document/page-content path from being established. Unsupported page
 /// and stream shapes are represented as structured page skips.
+// One straight-line orchestration bridge: establish the document path, run the
+// per-scope resource passes (xobject/colour-space/`ExtGState`), then loop pages
+// once. It is a few lines over the default with the `ExtGState` pass added; the
+// per-resource mapping is already factored into helpers, so keeping the pass
+// wiring inline reads better than an artificial split.
+#[allow(clippy::too_many_lines)]
 pub fn build_classic_pdf_inventory(
     input: &[u8],
     max_decoded_stream_bytes: usize,
@@ -268,6 +280,11 @@ pub fn build_classic_pdf_inventory(
             &access.xref_table,
             access.page_tree_root.object_byte_offset,
         ));
+    let extgstate_pages = classic_page_extgstate_pages(
+        input,
+        &access.xref_table,
+        access.page_tree_root.object_byte_offset,
+    );
 
     let lookup = ObjectLookup::ClassicXref(&access.xref_table);
     let mut inventory = Inventory::default();
@@ -289,6 +306,7 @@ pub fn build_classic_pdf_inventory(
         let form_targets =
             resources.map_or(&[][..], |resources| resources.form_xobjects.as_slice());
         let page_color_spaces = color_space_page.map_or_else(Vec::new, page_color_space_env);
+        let page_extgstates = page_extgstates_at(extgstate_pages.as_ref(), page.ordinal);
         let result = match build_page_inventory_with_forms(
             input,
             lookup,
@@ -299,6 +317,7 @@ pub fn build_classic_pdf_inventory(
             &form_xobject_names,
             form_targets,
             &page_color_spaces,
+            &page_extgstates,
             FormWalkContext::bounded_default(),
         ) {
             Ok(expanded) => {
@@ -408,6 +427,176 @@ const fn color_space_from_family(family: ColorSpaceFamily) -> ColorSpace {
         ColorSpaceFamily::IccBased => ColorSpace::IccBased,
         ColorSpaceFamily::Separation => ColorSpace::Separation,
         ColorSpaceFamily::DeviceN => ColorSpace::DeviceN,
+    }
+}
+
+/// Map a scope's classified `presslint-pdf` `ExtGState` resources into the
+/// paint-native [`ExtGStateResource`] model the walker consumes, mirroring
+/// [`color_space_env_resources`].
+///
+/// This is the `ExtGState` crate-layering seam: `presslint-pdf` classifies the
+/// dictionaries per parameter (T155) and the umbrella maps those facts into the
+/// paint vocabulary (T156) so `presslint-paint` keeps no dependency on the
+/// structural PDF layer.
+///
+/// Two sources feed the env, keyed by resource name:
+/// - `classified`: fully classified entries, mapped parameter by parameter.
+/// - `skipped`: an entry that named a resource but could not be classified (an
+///   unresolved indirect reference, a non-dictionary entry, a malformed entry
+///   dictionary) surfaces with EVERY parameter [`GsParam::Unresolved`], so a
+///   `gs` on that name is honestly unknown rather than silently swallowed. A
+///   named skip whose resource is already classified (e.g. a duplicate-name
+///   diagnostic) is dropped, since the classified entry already stands for it.
+///
+/// Resources-level skips (a missing/duplicate/malformed `/ExtGState` dictionary,
+/// which carry no resource name) cannot key an env entry and are deferred to the
+/// audit/guard slices; the affected scope simply keeps an env that omits them.
+#[must_use]
+pub fn extgstate_env_resources(
+    classified: &[ClassifiedExtGStateResource],
+    skipped: &[SkippedExtGStateResource],
+) -> Vec<ExtGStateResource> {
+    let mut resources: Vec<ExtGStateResource> = classified.iter().map(extgstate_resource).collect();
+    for skip in skipped {
+        if let Some(name) = &skip.resource_name {
+            if !resources.iter().any(|resource| resource.name.0 == name.0) {
+                resources.push(unresolved_extgstate_resource(&name.0));
+            }
+        }
+    }
+    resources
+}
+
+/// Map one page report's classified `ExtGState` resources into the walker env
+/// model, a thin per-page adapter over [`extgstate_env_resources`] mirroring
+/// [`page_color_space_env`]. The form bridge calls [`extgstate_env_resources`]
+/// directly on the form report's slices; page and form envs never merge.
+#[must_use]
+pub fn page_extgstate_env(page: &PageExtGStateResourcesInspection) -> Vec<ExtGStateResource> {
+    extgstate_env_resources(&page.extgstates, &page.skipped)
+}
+
+/// Inspect classic page-scope `/ExtGState` resources, discarding a begin-failure
+/// (mirroring the colour-space pass; the failure is deferred to the audit/guard
+/// slices so no report serde field is added here) and returning the per-page
+/// reports. With no report the per-page env is simply empty, so `gs` keeps its
+/// T156 legacy no-op behaviour.
+fn classic_page_extgstate_pages(
+    input: &[u8],
+    xref: &ClassicXrefTableInspection,
+    root_node_object_offset: usize,
+) -> Option<Vec<PageExtGStateResourcesInspection>> {
+    inspect_document_page_extgstate_resources(input, xref, root_node_object_offset)
+        .ok()
+        .map(|report| report.pages)
+}
+
+/// The page-scope `ExtGState` env for one document-order page ordinal, empty when
+/// the pass could not begin or that page declared no classifiable resources.
+/// Shared by the classic and neutral inventory bridges.
+#[must_use]
+pub fn page_extgstates_at(
+    pages: Option<&Vec<PageExtGStateResourcesInspection>>,
+    ordinal: usize,
+) -> Vec<ExtGStateResource> {
+    pages
+        .and_then(|pages| pages.get(ordinal))
+        .map_or_else(Vec::new, page_extgstate_env)
+}
+
+fn extgstate_resource(resource: &ClassifiedExtGStateResource) -> ExtGStateResource {
+    ExtGStateResource {
+        name: PdfName(resource.name.0.clone()),
+        params: ExtGStateParams {
+            overprint_stroke: map_bool(&resource.op_stroking),
+            overprint_fill: map_bool(&resource.op_nonstroking),
+            overprint_mode: map_param(&resource.overprint_mode, map_overprint_mode),
+            stroke_alpha: map_param(&resource.stroking_alpha, map_alpha),
+            fill_alpha: map_param(&resource.nonstroking_alpha, map_alpha),
+            blend_mode: map_param(&resource.blend_mode, map_blend_mode),
+            soft_mask: map_param(&resource.soft_mask, |value| map_soft_mask(*value)),
+        },
+        has_unclassified_keys: resource.has_unclassified_keys,
+    }
+}
+
+fn unresolved_extgstate_resource(name: &[u8]) -> ExtGStateResource {
+    ExtGStateResource {
+        name: PdfName(name.to_vec()),
+        params: ExtGStateParams {
+            overprint_stroke: GsParam::Unresolved,
+            overprint_fill: GsParam::Unresolved,
+            overprint_mode: GsParam::Unresolved,
+            stroke_alpha: GsParam::Unresolved,
+            fill_alpha: GsParam::Unresolved,
+            blend_mode: GsParam::Unresolved,
+            soft_mask: GsParam::Unresolved,
+        },
+        has_unclassified_keys: false,
+    }
+}
+
+/// Map one classified parameter into its paint [`GsParam`]: an absent key becomes
+/// [`GsParam::Default`] (so `gs` layering leaves the current value in place), a
+/// classified value becomes [`GsParam::Set`], and a value outside the classified
+/// vocabulary becomes [`GsParam::Unclassified`].
+fn map_param<T, U>(class: &ExtGStateParamClass<T>, map_value: impl FnOnce(&T) -> U) -> GsParam<U> {
+    match class {
+        ExtGStateParamClass::Unset => GsParam::Default,
+        ExtGStateParamClass::Set { value } => GsParam::Set(map_value(value)),
+        ExtGStateParamClass::Malformed { .. } => GsParam::Unclassified,
+    }
+}
+
+fn map_bool(class: &ExtGStateParamClass<bool>) -> GsParam<bool> {
+    map_param(class, |value| *value)
+}
+
+const fn map_overprint_mode(mode: &ExtGStateOverprintMode) -> OverprintMode {
+    match mode {
+        ExtGStateOverprintMode::Zero => OverprintMode::Zero,
+        ExtGStateOverprintMode::One => OverprintMode::One,
+        ExtGStateOverprintMode::Other { .. } => OverprintMode::Other,
+    }
+}
+
+const fn map_alpha(alpha: &ExtGStateAlpha) -> AlphaClass {
+    match alpha {
+        ExtGStateAlpha::Opaque => AlphaClass::Opaque,
+        ExtGStateAlpha::NonOpaque { .. } => AlphaClass::NonOpaque,
+    }
+}
+
+const fn map_soft_mask(mask: ExtGStateSoftMask) -> SoftMaskClass {
+    match mask {
+        ExtGStateSoftMask::None => SoftMaskClass::None,
+        ExtGStateSoftMask::Present => SoftMaskClass::Present,
+    }
+}
+
+/// Map a classified `BM` value into the coarse [`BlendModeClass`].
+///
+/// The pdf-side classifier only splits `/Normal` from every other name; the real
+/// separable/non-separable vocabulary is applied here, per ISO 32000-1 §11.3.5.
+fn map_blend_mode(mode: &ExtGStateBlendMode) -> BlendModeClass {
+    match mode {
+        ExtGStateBlendMode::Normal { .. } => BlendModeClass::Normal,
+        ExtGStateBlendMode::NonNormal { raw_name } => classify_blend_name(&raw_name.0),
+        // An array-form list or any other value shape is present-but-other.
+        ExtGStateBlendMode::Array | ExtGStateBlendMode::Other { .. } => BlendModeClass::OtherNamed,
+    }
+}
+
+/// Classify a raw non-`/Normal` blend-mode name per ISO 32000-1 §11.3.5
+/// (separable Table 136, non-separable Table 137). `Compatible` is the
+/// deprecated `/Normal` alias; any unrecognised name is present-but-other.
+fn classify_blend_name(raw: &[u8]) -> BlendModeClass {
+    match raw {
+        b"Compatible" => BlendModeClass::Normal,
+        b"Multiply" | b"Screen" | b"Overlay" | b"Darken" | b"Lighten" | b"ColorDodge"
+        | b"ColorBurn" | b"HardLight" | b"SoftLight" | b"Difference" | b"Exclusion" | b"Hue"
+        | b"Saturation" | b"Color" | b"Luminosity" => BlendModeClass::NonNormal,
+        _ => BlendModeClass::OtherNamed,
     }
 }
 

@@ -22,13 +22,15 @@ use presslint_paint::{
 use presslint_pdf::{
     ObjectLookup, PageXObjectResourceTarget, SkippedPageXObjectResource,
     SkippedPageXObjectResourceReason, inspect_content_stream_data_extent_with_lookup,
-    inspect_form_color_space_resources, inspect_form_xobject_resources,
+    inspect_form_color_space_resources, inspect_form_extgstate_resources,
+    inspect_form_xobject_resources,
 };
 use presslint_syntax::{OperatorRecord, assemble_operators, tokenize};
 use presslint_types::{ContentScope, InvocationFrame, InvocationPath, PageIndex, PdfName};
 
 use crate::document_inventory::{
-    InventoryPageSkip, color_space_env_resources, decode_page_content, inventory_names,
+    InventoryPageSkip, color_space_env_resources, decode_page_content, extgstate_env_resources,
+    inventory_names,
 };
 use crate::form_inventory::{
     FormExpandedInventory, FormWalkContext, SkippedFormInventory, SkippedFormInventoryReason,
@@ -91,6 +93,7 @@ struct FormProgramData<'input> {
     nested: Vec<PreparedFormObject<'input>>,
     resource_skips: Vec<SkippedPageXObjectResource>,
     color_spaces: Vec<presslint_inventory::ColorSpaceResource>,
+    extgstates: Vec<presslint_inventory::ExtGStateResource>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -126,7 +129,8 @@ impl FormObjectKey {
 ///
 /// Form `XObject` content keeps its OWN resource environment and must NOT
 /// inherit the page one, so each form walk resolves `cs`/`scn` against a LOCAL
-/// env built from that form's own `/Resources /ColorSpace`.
+/// colour-space env AND `gs` against a LOCAL `ExtGState` env, both built from
+/// that form's own `/Resources` and never merged with the page's.
 ///
 /// # Errors
 ///
@@ -144,6 +148,7 @@ pub fn build_page_inventory_with_forms(
     page_form_names: &[PdfName],
     form_targets: &[PageXObjectResourceTarget],
     page_color_spaces: &[presslint_inventory::ColorSpaceResource],
+    page_extgstates: &[presslint_inventory::ExtGStateResource],
     context: FormWalkContext,
 ) -> Result<FormExpandedInventory, InventoryPageSkip> {
     let (page_bytes, first_stream_offset) =
@@ -185,7 +190,7 @@ pub fn build_page_inventory_with_forms(
         source,
         records: &assembled.records,
         color_space_env: ColorSpaceEnv::new(page_color_spaces),
-        extgstate_env: ExtGStateEnv::empty(),
+        extgstate_env: ExtGStateEnv::new(page_extgstates),
         image_xobject_names: page_image_names,
         form_xobject_names: page_form_names,
         scope: ContentScope::Page,
@@ -389,7 +394,7 @@ impl<'arena> FormResolver<'arena> for UmbrellaFormResolver<'arena, '_> {
             source: data.content.as_slice(),
             records: &data.records,
             color_space_env: ColorSpaceEnv::new(&data.color_spaces),
-            extgstate_env: ExtGStateEnv::empty(),
+            extgstate_env: ExtGStateEnv::new(&data.extgstates),
             image_xobject_names: &data.image_names,
             form_xobject_names: &data.form_names,
             scope,
@@ -543,6 +548,11 @@ fn prepare_form_object<'input>(
     let color_spaces = color_space_env_resources(
         &inspect_form_color_space_resources(input, lookup, target.object_byte_offset).color_spaces,
     );
+    // Form-LOCAL `ExtGState` env: the form's own `/Resources /ExtGState` only, no
+    // page inheritance — the same rule as the colour-space env above.
+    let form_extgstates =
+        inspect_form_extgstate_resources(input, lookup, target.object_byte_offset);
+    let extgstates = extgstate_env_resources(&form_extgstates.extgstates, &form_extgstates.skipped);
     // Materialise empty child slots for this form's own declared form resources.
     // They are inspected/decoded only if a nested invocation in turn reaches
     // them, keeping the whole descent lazy and bounded.
@@ -559,6 +569,7 @@ fn prepare_form_object<'input>(
         nested,
         resource_skips,
         color_spaces,
+        extgstates,
     })
 }
 
