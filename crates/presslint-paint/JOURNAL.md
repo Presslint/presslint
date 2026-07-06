@@ -1,5 +1,47 @@
 # presslint-paint Journal
 
+## T145 - Typed decoded/source provenance ranges (Phase 0a-6)
+
+- New `provenance.rs` defines two zero-cost newtypes over the shared
+  `ByteRange`: `DecodedRange` (offsets into the DECODED buffer the walker
+  consumed — the walked content stream) and `SourceRange` (offsets into the
+  original PDF source file; reserved, no producer yet). Both are
+  `#[repr(transparent)]` + `#[serde(transparent)]` `Copy` newtypes with
+  `#[must_use]` `const fn new`/`into_byte_range` (plus `const fn start`/`end`
+  on `DecodedRange`). They are paint-local for now and intended to move to
+  `presslint-types` when later layers adopt typed range bases.
+- Four paint provenance fields adopt the decoded basis as a TYPE:
+  `PaintOp.operator_range`, `PaintOp.record_range`, `GraphicsColor.source`
+  (`Option<DecodedRange>`), and `GraphicsWalkError.range`. The wrap-boundary
+  rule: syntax record/token ranges stay bare (caller-relative by design); the
+  walker wraps via `DecodedRange::new(...)` at every point a range enters a
+  paint-owned type (`step`, the colour-setting stamps, and every
+  `GraphicsWalkError::new` call site in `walker.rs`/`operands.rs`).
+- Conversion at the seams is EXPLICIT AND IDENTITY-ONLY: `into_byte_range()`
+  (or `.map(DecodedRange::into_byte_range)` in `GraphicsColor::observation`,
+  which keeps emitting `ColorObservation.source: Option<ByteRange>` unchanged).
+  No deref coercion, no blanket conversion traits in either direction, so the
+  compiler refuses to mix range bases silently.
+- Public serde shapes are byte-identical (`#[serde(transparent)]` keeps the
+  JSON of `GraphicsColor` and `GraphicsWalkError` a plain
+  `{"start":..,"end":..}` for the range fields). New unit tests lock this: the
+  newtype serializes exactly like the bare range, a `GraphicsColor` with a
+  typed `source` keeps the prior JSON shape, and the newtype round-trips from
+  the bare-range wire shape via a dependency-free mini JSON harness in
+  `tests.rs`.
+- Zero-cost by construction: transparent `Copy` newtypes over two `usize`
+  offsets; `new`/`into_byte_range` are `const fn` and compile away — no
+  allocation, no branch, no hot-path change. Same misleading doc comments
+  fixed alongside ("Source range" → "Decoded-buffer range"). Inventory output
+  proven bit-identical by the golden digest locks passing unchanged.
+- Ablation pass: the two per-side device-colour setters merged into one
+  `set_device_color(..., side)` that reuses `apply_color`, with the six
+  device-colour operators dispatching through a compact `(space, count, side)`
+  table; `numeric_operands_vec` now reuses `parse_finite_number` instead of
+  duplicating its parse/finite checks, and a `malformed_name` helper mirrors
+  `malformed_numeric` at the three name-operand error sites. Behaviour, error
+  values, and the golden digest locks are unchanged.
+
 ## T144 - Intern the per-event graphics state via `Rc` (Phase 0a-5)
 
 - Replaced the per-event `GraphicsStateSnapshot` clone with shared

@@ -12,15 +12,23 @@ mod serde_shape;
 mod xobject;
 
 use super::{
-    GraphicsStateWalker, GraphicsWalkError, GraphicsWalkErrorKind, Inventory, PaintOpKind,
-    PathPaintKind, TextRenderingMode, TextShowOperator, build_form_inventory,
+    DecodedRange, GraphicsStateWalker, GraphicsWalkError, GraphicsWalkErrorKind, Inventory,
+    PaintOpKind, PathPaintKind, TextRenderingMode, TextShowOperator, build_form_inventory,
     build_image_inventory, build_inventory, build_text_inventory, build_vector_inventory,
     walk_graphics_state,
 };
 
-fn walk(input: &[u8]) -> Result<Vec<super::PaintOp>, GraphicsWalkError> {
+/// Tokenize + assemble a content stream, mapping any syntax error to the
+/// walker's `InvalidSourceRange` so test helpers surface one error type.
+///
+/// Shared with the test submodules (for example `bit_identity`) so the
+/// syntax-error mapping lives in one place.
+fn assembled_records(input: &[u8]) -> Result<Vec<OperatorRecord>, GraphicsWalkError> {
     let tokens = tokenize(input).map_err(|error| {
-        GraphicsWalkError::new(GraphicsWalkErrorKind::InvalidSourceRange, error.range)
+        GraphicsWalkError::new(
+            GraphicsWalkErrorKind::InvalidSourceRange,
+            DecodedRange::new(error.range),
+        )
     })?;
     let assembled = assemble_operators(&tokens).map_err(|error| {
         let range = match error {
@@ -33,9 +41,16 @@ fn walk(input: &[u8]) -> Result<Vec<super::PaintOp>, GraphicsWalkError> {
             | presslint_syntax::AssembleError::OperatorInsideCompositeOperand { range, .. }
             | presslint_syntax::AssembleError::UnexpectedKeyword { range, .. } => range,
         };
-        GraphicsWalkError::new(GraphicsWalkErrorKind::InvalidSourceRange, range)
+        GraphicsWalkError::new(
+            GraphicsWalkErrorKind::InvalidSourceRange,
+            DecodedRange::new(range),
+        )
     })?;
-    walk_graphics_state(input, &assembled.records)
+    Ok(assembled.records)
+}
+
+fn walk(input: &[u8]) -> Result<Vec<super::PaintOp>, GraphicsWalkError> {
+    walk_graphics_state(input, &assembled_records(input)?)
 }
 
 fn vector_inventory(input: &[u8], scope: &ContentScope) -> Result<Inventory, String> {
@@ -166,11 +181,11 @@ fn path_paint_event_carries_post_operator_snapshot_and_provenance() -> Result<()
             components: vec![0.25],
             resource_name: None,
             spot_name: None,
-            source: Some(ByteRange { start: 0, end: 6 }),
+            source: Some(DecodedRange::new(ByteRange { start: 0, end: 6 })),
         }
     );
-    assert_eq!(event.record_range.start, 22);
-    assert_eq!(event.operator_range.end, 24);
+    assert_eq!(event.record_range.start(), 22);
+    assert_eq!(event.operator_range.end(), 24);
     Ok(())
 }
 
@@ -196,7 +211,10 @@ fn do_operator_emits_xobject_invocation_event() -> Result<(), String> {
             name: PdfName(b"Im1".to_vec()),
         }
     );
-    assert_eq!(events[0].record_range, ByteRange { start: 0, end: 7 });
+    assert_eq!(
+        events[0].record_range,
+        DecodedRange::new(ByteRange { start: 0, end: 7 })
+    );
     assert_eq!(
         events[0].state.as_ref(),
         &super::GraphicsStateSnapshot::page_default()
@@ -225,7 +243,7 @@ fn invalid_record_range_returns_structured_error() -> Result<(), String> {
         err,
         GraphicsWalkError::new(
             GraphicsWalkErrorKind::InvalidSourceRange,
-            presslint_types::ByteRange { start: 2, end: 1 },
+            DecodedRange::new(presslint_types::ByteRange { start: 2, end: 1 }),
         )
     );
     Ok(())
@@ -241,7 +259,7 @@ fn stack_underflow_returns_structured_error() -> Result<(), String> {
         err,
         GraphicsWalkError::new(
             GraphicsWalkErrorKind::GraphicsStateStackUnderflow,
-            presslint_types::ByteRange { start: 0, end: 1 },
+            DecodedRange::new(presslint_types::ByteRange { start: 0, end: 1 }),
         )
     );
     Ok(())
@@ -310,7 +328,7 @@ fn malformed_do_name_operand_returns_structured_error() -> Result<(), String> {
             operand_index: 0,
         }
     );
-    assert_eq!(err.range, ByteRange { start: 0, end: 2 });
+    assert_eq!(err.range, DecodedRange::new(ByteRange { start: 0, end: 2 }));
     Ok(())
 }
 

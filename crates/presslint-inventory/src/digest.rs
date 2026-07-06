@@ -14,12 +14,7 @@ pub fn vector_object_digest(
 ) -> [u8; 32] {
     let mut digest = StableDigest::new();
     digest.push_bytes(b"presslint.vector.v2");
-    digest.push_u32(page.0);
-    digest.push_u32(sequence);
-    digest.push_scope(scope);
-    digest.push_usize(event.index);
-    digest.push_range(event.record_range);
-    digest.push_range(event.operator_range);
+    push_event_header(&mut digest, page, sequence, scope, event);
     digest.push_u8(path_paint_tag(paint));
     for color in colors {
         digest.push_color_observation(color);
@@ -38,12 +33,7 @@ pub fn text_object_digest(
 ) -> [u8; 32] {
     let mut digest = StableDigest::new();
     digest.push_bytes(b"presslint.text.v2");
-    digest.push_u32(page.0);
-    digest.push_u32(sequence);
-    digest.push_scope(scope);
-    digest.push_usize(event.index);
-    digest.push_range(event.record_range);
-    digest.push_range(event.operator_range);
+    push_event_header(&mut digest, page, sequence, scope, event);
     digest.push_u8(text_show_operator_tag(operator));
     digest.push_text_rendering_mode(rendering_mode);
     for color in colors {
@@ -62,12 +52,7 @@ pub fn image_object_digest(
 ) -> [u8; 32] {
     let mut digest = StableDigest::new();
     digest.push_bytes(b"presslint.image.v2");
-    digest.push_u32(page.0);
-    digest.push_u32(sequence);
-    digest.push_scope(scope);
-    digest.push_usize(event.index);
-    digest.push_range(event.record_range);
-    digest.push_range(event.operator_range);
+    push_event_header(&mut digest, page, sequence, scope, event);
     digest.push_bytes(&name.0);
     for color in colors {
         digest.push_color_observation(color);
@@ -84,14 +69,30 @@ pub fn form_object_digest(
 ) -> [u8; 32] {
     let mut digest = StableDigest::new();
     digest.push_bytes(b"presslint.form.v1");
+    push_event_header(&mut digest, page, sequence, scope, event);
+    digest.push_bytes(&name.0);
+    digest.finish()
+}
+
+/// Push the identity header shared by every object digest: page, sequence,
+/// scope, record index, then the event's record and operator ranges.
+///
+/// The two paint ranges are decoded-buffer typed; the unwrap here is the
+/// explicit identity-only seam, so digest input order and values match the
+/// pre-newtype bytes exactly.
+fn push_event_header(
+    digest: &mut StableDigest,
+    page: PageIndex,
+    sequence: u32,
+    scope: &ContentScope,
+    event: &PaintOp,
+) {
     digest.push_u32(page.0);
     digest.push_u32(sequence);
     digest.push_scope(scope);
     digest.push_usize(event.index);
-    digest.push_range(event.record_range);
-    digest.push_range(event.operator_range);
-    digest.push_bytes(&name.0);
-    digest.finish()
+    digest.push_range(event.record_range.into_byte_range());
+    digest.push_range(event.operator_range.into_byte_range());
 }
 
 #[derive(Debug, Clone)]

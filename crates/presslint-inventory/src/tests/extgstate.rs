@@ -1,7 +1,7 @@
 use presslint_types::{ByteRange, ColorSpace, PdfName};
 
 use super::{json, walk};
-use crate::{GraphicsWalkErrorKind, PaintOpKind, PathPaintKind};
+use crate::{DecodedRange, GraphicsWalkErrorKind, PaintOpKind, PathPaintKind};
 
 #[test]
 fn gs_operator_emits_set_ext_g_state_event() -> Result<(), String> {
@@ -14,8 +14,14 @@ fn gs_operator_emits_set_ext_g_state_event() -> Result<(), String> {
         }
     );
     assert_eq!(events[0].index, 0);
-    assert_eq!(events[0].record_range, ByteRange { start: 0, end: 7 });
-    assert_eq!(events[0].operator_range, ByteRange { start: 5, end: 7 });
+    assert_eq!(
+        events[0].record_range,
+        DecodedRange::new(ByteRange { start: 0, end: 7 })
+    );
+    assert_eq!(
+        events[0].operator_range,
+        DecodedRange::new(ByteRange { start: 5, end: 7 })
+    );
     // `gs` only surfaces the invocation; the snapshot is left at the page default.
     assert_eq!(
         events[0].state.as_ref(),
@@ -83,7 +89,7 @@ fn malformed_gs_name_operand_returns_structured_error() -> Result<(), String> {
             operand_index: 0,
         }
     );
-    assert_eq!(err.range, ByteRange { start: 0, end: 2 });
+    assert_eq!(err.range, DecodedRange::new(ByteRange { start: 0, end: 2 }));
     Ok(())
 }
 

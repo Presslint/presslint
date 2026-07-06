@@ -9,6 +9,7 @@ use crate::operands::{
     checked_source, color_operands, concat_matrix, device_color, expect_operands, integer_operand,
     name_operand, numeric_operands,
 };
+use crate::provenance::DecodedRange;
 
 const IDENTITY_CTM: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
@@ -33,12 +34,12 @@ pub struct GraphicsColor {
     pub resource_name: Option<PdfName>,
     /// Spot colorant name for `Separation`/`DeviceN` colours.
     pub spot_name: Option<PdfName>,
-    /// Record byte range of the operator that set this colour.
+    /// Decoded-buffer record range of the operator that set this colour.
     ///
     /// `None` for the page-default/inherited colour; `Some(range)` once a
     /// colour operator in the walked stream established it. The range travels
     /// with the colour through `q`/`Q` save/restore.
-    pub source: Option<ByteRange>,
+    pub source: Option<DecodedRange>,
 }
 
 impl GraphicsColor {
@@ -72,7 +73,7 @@ impl GraphicsColor {
             space: self.space.clone(),
             components: self.components.clone(),
             spot_name: self.spot_name.clone(),
-            source: self.source,
+            source: self.source.map(DecodedRange::into_byte_range),
         }
     }
 }
@@ -312,7 +313,7 @@ pub enum PaintOpKind {
     NoOp,
 }
 
-/// Ordered graphics-state event tied to source byte provenance.
+/// Ordered graphics-state event tied to decoded-buffer byte provenance.
 ///
 /// `state` is shared so emitting an event is a refcount bump rather than a deep
 /// snapshot copy. `PaintOpKind` keeps serde on its own.
@@ -320,10 +321,10 @@ pub enum PaintOpKind {
 pub struct PaintOp {
     /// Zero-based operator-record index.
     pub index: usize,
-    /// Source range for the operator token.
-    pub operator_range: ByteRange,
-    /// Source range for operands plus operator.
-    pub record_range: ByteRange,
+    /// Decoded-buffer range for the operator token.
+    pub operator_range: DecodedRange,
+    /// Decoded-buffer range for operands plus operator.
+    pub record_range: DecodedRange,
     /// Semantic event for this operator.
     pub kind: PaintOpKind,
     /// Shared graphics-state snapshot after the operator was applied.
@@ -339,14 +340,14 @@ pub struct PaintOp {
 pub struct GraphicsWalkError {
     /// Error class.
     pub kind: GraphicsWalkErrorKind,
-    /// Source range to highlight for the failing operator record.
-    pub range: ByteRange,
+    /// Decoded-buffer range to highlight for the failing operator record.
+    pub range: DecodedRange,
 }
 
 impl GraphicsWalkError {
     /// Create a walker error.
     #[must_use]
-    pub const fn new(kind: GraphicsWalkErrorKind, range: ByteRange) -> Self {
+    pub const fn new(kind: GraphicsWalkErrorKind, range: DecodedRange) -> Self {
         Self { kind, range }
     }
 }
@@ -458,8 +459,8 @@ impl<'a> GraphicsStateWalker<'a> {
         let kind = self.event_kind(source, operator, record)?;
         Ok(PaintOp {
             index,
-            operator_range: record.operator.range,
-            record_range: record.range,
+            operator_range: DecodedRange::new(record.operator.range),
+            record_range: DecodedRange::new(record.range),
             kind,
             state: Rc::clone(&self.state),
         })
@@ -477,45 +478,25 @@ impl<'a> GraphicsStateWalker<'a> {
         operator: &[u8],
         record: &OperatorRecord,
     ) -> Option<Result<PaintOpKind, GraphicsWalkError>> {
-        Some(match operator {
-            b"G" => {
-                self.set_stroking_device_color(source, operator, record, ColorSpace::DeviceGray, 1)
+        use ColorSide::{Nonstroking, Stroking};
+        let (space, count, side) = match operator {
+            b"G" => (ColorSpace::DeviceGray, 1, Stroking),
+            b"g" => (ColorSpace::DeviceGray, 1, Nonstroking),
+            b"RG" => (ColorSpace::DeviceRgb, 3, Stroking),
+            b"rg" => (ColorSpace::DeviceRgb, 3, Nonstroking),
+            b"K" => (ColorSpace::DeviceCmyk, 4, Stroking),
+            b"k" => (ColorSpace::DeviceCmyk, 4, Nonstroking),
+            b"CS" => return Some(self.select_color_space(source, operator, record, Stroking)),
+            b"cs" => return Some(self.select_color_space(source, operator, record, Nonstroking)),
+            b"SC" | b"SCN" => {
+                return Some(self.set_color_value(source, operator, record, Stroking));
             }
-            b"g" => self.set_nonstroking_device_color(
-                source,
-                operator,
-                record,
-                ColorSpace::DeviceGray,
-                1,
-            ),
-            b"RG" => {
-                self.set_stroking_device_color(source, operator, record, ColorSpace::DeviceRgb, 3)
-            }
-            b"rg" => self.set_nonstroking_device_color(
-                source,
-                operator,
-                record,
-                ColorSpace::DeviceRgb,
-                3,
-            ),
-            b"K" => {
-                self.set_stroking_device_color(source, operator, record, ColorSpace::DeviceCmyk, 4)
-            }
-            b"k" => self.set_nonstroking_device_color(
-                source,
-                operator,
-                record,
-                ColorSpace::DeviceCmyk,
-                4,
-            ),
-            b"CS" => self.select_color_space(source, operator, record, ColorSide::Stroking),
-            b"cs" => self.select_color_space(source, operator, record, ColorSide::Nonstroking),
-            b"SC" | b"SCN" => self.set_color_value(source, operator, record, ColorSide::Stroking),
             b"sc" | b"scn" => {
-                self.set_color_value(source, operator, record, ColorSide::Nonstroking)
+                return Some(self.set_color_value(source, operator, record, Nonstroking));
             }
             _ => return None,
-        })
+        };
+        Some(self.set_device_color(source, operator, record, space, count, side))
     }
 
     fn event_kind(
@@ -538,7 +519,7 @@ impl<'a> GraphicsStateWalker<'a> {
                 let Some(previous) = self.stack.pop() else {
                     return Err(GraphicsWalkError::new(
                         GraphicsWalkErrorKind::GraphicsStateStackUnderflow,
-                        record.range,
+                        DecodedRange::new(record.range),
                     ));
                 };
                 self.state = previous;
@@ -599,30 +580,20 @@ impl<'a> GraphicsStateWalker<'a> {
         }
     }
 
-    fn set_stroking_device_color(
+    /// Handle the direct device-colour operators (`G`/`g`/`RG`/`rg`/`K`/`k`):
+    /// parse the components, stamp the record range as the colour source, and
+    /// apply the colour to the targeted side.
+    fn set_device_color(
         &mut self,
         source: &[u8],
         operator: &[u8],
         record: &OperatorRecord,
         space: ColorSpace,
         count: usize,
+        side: ColorSide,
     ) -> Result<PaintOpKind, GraphicsWalkError> {
         let color = sourced_device_color(source, operator, record, space, count)?;
-        self.state_mut().stroking_color = color.clone();
-        Ok(PaintOpKind::SetStrokingColor { color })
-    }
-
-    fn set_nonstroking_device_color(
-        &mut self,
-        source: &[u8],
-        operator: &[u8],
-        record: &OperatorRecord,
-        space: ColorSpace,
-        count: usize,
-    ) -> Result<PaintOpKind, GraphicsWalkError> {
-        let color = sourced_device_color(source, operator, record, space, count)?;
-        self.state_mut().nonstroking_color = color.clone();
-        Ok(PaintOpKind::SetNonstrokingColor { color })
+        Ok(self.apply_color(side, color))
     }
 
     /// Handle `cs`/`CS`: select the current colour space by resource name and
@@ -665,7 +636,7 @@ impl<'a> GraphicsStateWalker<'a> {
         if let Some(name) = pattern_name {
             color.resource_name = Some(name);
         }
-        color.source = Some(record.range);
+        color.source = Some(DecodedRange::new(record.range));
         Ok(self.apply_color(side, color))
     }
 
@@ -677,7 +648,7 @@ impl<'a> GraphicsStateWalker<'a> {
                 components: Vec::new(),
                 resource_name: Some(name.clone()),
                 spot_name: None,
-                source: Some(range),
+                source: Some(DecodedRange::new(range)),
             },
             |resource| resource_initial_color(resource, name.clone(), range),
         )
@@ -768,7 +739,7 @@ fn sourced_device_color(
     count: usize,
 ) -> Result<GraphicsColor, GraphicsWalkError> {
     let mut color = device_color(source, operator, record, space, count)?;
-    color.source = Some(record.range);
+    color.source = Some(DecodedRange::new(record.range));
     Ok(color)
 }
 
@@ -789,7 +760,7 @@ fn resource_initial_color(
         components: resource.initial_color(),
         resource_name: Some(name),
         spot_name: resource.spot_name(),
-        source: Some(range),
+        source: Some(DecodedRange::new(range)),
     }
 }
 

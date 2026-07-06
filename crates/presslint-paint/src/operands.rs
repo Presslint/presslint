@@ -1,6 +1,7 @@
 use presslint_syntax::OperatorRecord;
 use presslint_types::{ByteRange, ColorSpace, PdfName};
 
+use crate::provenance::DecodedRange;
 use crate::walker::{GraphicsColor, GraphicsWalkError, GraphicsWalkErrorKind};
 
 pub fn checked_source(
@@ -9,7 +10,10 @@ pub fn checked_source(
     error_range: ByteRange,
 ) -> Result<&[u8], GraphicsWalkError> {
     source.get(range.start..range.end).ok_or_else(|| {
-        GraphicsWalkError::new(GraphicsWalkErrorKind::InvalidSourceRange, error_range)
+        GraphicsWalkError::new(
+            GraphicsWalkErrorKind::InvalidSourceRange,
+            DecodedRange::new(error_range),
+        )
     })
 }
 
@@ -47,13 +51,7 @@ pub fn color_operands(
         let bytes = checked_source(source, operand.range, operand.range)?;
         if operand.tokens.len() == 1 && bytes.first() == Some(&b'/') {
             if bytes.len() <= 1 {
-                return Err(GraphicsWalkError::new(
-                    GraphicsWalkErrorKind::MalformedNameOperand {
-                        operator: operator.to_vec(),
-                        operand_index,
-                    },
-                    operand.range,
-                ));
+                return Err(malformed_name(operator, operand_index, operand.range));
             }
             pattern_name = Some(PdfName(bytes[1..].to_vec()));
             continue;
@@ -74,7 +72,17 @@ fn malformed_numeric(operator: &[u8], operand_index: usize, range: ByteRange) ->
             operator: operator.to_vec(),
             operand_index,
         },
-        range,
+        DecodedRange::new(range),
+    )
+}
+
+fn malformed_name(operator: &[u8], operand_index: usize, range: ByteRange) -> GraphicsWalkError {
+    GraphicsWalkError::new(
+        GraphicsWalkErrorKind::MalformedNameOperand {
+            operator: operator.to_vec(),
+            operand_index,
+        },
+        DecodedRange::new(range),
     )
 }
 
@@ -99,7 +107,7 @@ fn parse_finite_number(
                 operator: operator.to_vec(),
                 operand_index,
             },
-            operand.range,
+            DecodedRange::new(operand.range),
         ));
     }
     Ok(value)
@@ -120,7 +128,7 @@ pub fn expect_operands(
                 expected,
                 got,
             },
-            record.range,
+            DecodedRange::new(record.range),
         ))
     }
 }
@@ -155,7 +163,7 @@ pub fn integer_operand(
                 operator: operator.to_vec(),
                 operand_index: 0,
             },
-            record.operands[0].range,
+            DecodedRange::new(record.operands[0].range),
         ));
     }
     #[allow(clippy::cast_possible_truncation)]
@@ -170,23 +178,11 @@ pub fn name_operand(
     expect_operands(operator, record, 1)?;
     let operand = &record.operands[0];
     if operand.tokens.len() != 1 {
-        return Err(GraphicsWalkError::new(
-            GraphicsWalkErrorKind::MalformedNameOperand {
-                operator: operator.to_vec(),
-                operand_index: 0,
-            },
-            operand.range,
-        ));
+        return Err(malformed_name(operator, 0, operand.range));
     }
     let bytes = checked_source(source, operand.range, operand.range)?;
     if bytes.len() <= 1 || bytes[0] != b'/' {
-        return Err(GraphicsWalkError::new(
-            GraphicsWalkErrorKind::MalformedNameOperand {
-                operator: operator.to_vec(),
-                operand_index: 0,
-            },
-            operand.range,
-        ));
+        return Err(malformed_name(operator, 0, operand.range));
     }
     Ok(PdfName(bytes[1..].to_vec()))
 }
@@ -203,44 +199,13 @@ fn numeric_operands_vec(
         .iter()
         .enumerate()
         .map(|(operand_index, operand)| {
+            // Multi-token operands are malformed numerics even when their range
+            // does not address the source, so check before `checked_source`.
             if operand.tokens.len() != 1 {
-                return Err(GraphicsWalkError::new(
-                    GraphicsWalkErrorKind::MalformedNumericOperand {
-                        operator: operator.to_vec(),
-                        operand_index,
-                    },
-                    operand.range,
-                ));
+                return Err(malformed_numeric(operator, operand_index, operand.range));
             }
             let bytes = checked_source(source, operand.range, operand.range)?;
-            let Ok(text) = core::str::from_utf8(bytes) else {
-                return Err(GraphicsWalkError::new(
-                    GraphicsWalkErrorKind::MalformedNumericOperand {
-                        operator: operator.to_vec(),
-                        operand_index,
-                    },
-                    operand.range,
-                ));
-            };
-            let Ok(value) = text.parse::<f64>() else {
-                return Err(GraphicsWalkError::new(
-                    GraphicsWalkErrorKind::MalformedNumericOperand {
-                        operator: operator.to_vec(),
-                        operand_index,
-                    },
-                    operand.range,
-                ));
-            };
-            if !value.is_finite() {
-                return Err(GraphicsWalkError::new(
-                    GraphicsWalkErrorKind::NonFiniteNumericOperand {
-                        operator: operator.to_vec(),
-                        operand_index,
-                    },
-                    operand.range,
-                ));
-            }
-            Ok(value)
+            parse_finite_number(operator, operand_index, operand, bytes)
         })
         .collect()
 }

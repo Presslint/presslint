@@ -1,5 +1,25 @@
 # presslint-inventory Journal
 
+## T145 - Adopt typed decoded ranges at the paint seams (Phase 0a-6)
+
+- `presslint-paint` now types its provenance fields as `DecodedRange`
+  (offsets into the decoded content-stream buffer). Inventory unwraps
+  explicitly and identity-only at its seams: `Provenance.range` takes
+  `event.record_range.into_byte_range()` and the four digest functions unwrap
+  both event ranges before `push_range`, so digest input order and values are
+  unchanged.
+- The facade re-export adds `DecodedRange`/`SourceRange` so `PaintOp`'s public
+  fields stay coherent through this crate. Public serde shapes are untouched
+  (`serde_shape` tests pass unedited) and the golden bit-identity digests are
+  unchanged; tests were only mechanically updated to wrap range fixtures and
+  use the newtype's `start()`/`end()` accessors.
+- Ablation pass: the identical page/sequence/scope/index/range header pushed
+  by all four digest functions moved into one `push_event_header` helper, so
+  the typed-range unwrap seam lives in a single place with unchanged push
+  order (golden digests still pass). The duplicated tokenize/assemble
+  error-mapping in the test helpers (`tests.rs` and `bit_identity.rs`) is now
+  one shared `assembled_records` helper.
+
 ## T144 - Paint-op state is shared via `Rc` (Phase 0a-5)
 
 - Updated inventory tests that assert the default graphics-state snapshot to

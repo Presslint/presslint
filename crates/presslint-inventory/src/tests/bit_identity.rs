@@ -7,11 +7,10 @@
 //! pin the exact entry identities before those refactors, so digest movement
 //! fails loudly even when both paths still agree with each other.
 
-use presslint_syntax::{assemble_operators, tokenize};
 use presslint_types::{ByteRange, ColorSpace, ContentScope, ObjectKind, PageIndex, PdfName};
 
 use crate::{
-    ColorSpaceEnv, ColorSpaceResource, GraphicsStateWalker, GraphicsWalkError,
+    ColorSpaceEnv, ColorSpaceResource, DecodedRange, GraphicsStateWalker, GraphicsWalkError,
     GraphicsWalkErrorKind, Inventory, PaintOp, build_inventory,
     build_inventory_with_color_space_env, inventory_from_graphics_events,
 };
@@ -138,7 +137,7 @@ fn malformed_after_last_entry_surfaces_identical_error() -> Result<(), String> {
                 expected: 3,
                 got: 2,
             },
-            ByteRange { start: 8, end: 14 },
+            DecodedRange::new(ByteRange { start: 8, end: 14 }),
         )
     );
     Ok(())
@@ -151,7 +150,7 @@ pub(super) fn assert_streaming_equals_materialized(
     images: &[PdfName],
     forms: &[PdfName],
 ) -> Result<Inventory, GraphicsWalkError> {
-    let records = records(input)?;
+    let records = super::assembled_records(input)?;
     let streamed = build_inventory(input, &records, page, scope, images, forms);
     let events = walk_graphics_state_with_env(input, &records, ColorSpaceEnv::empty());
     compare_streaming_and_materialized(streamed, events, page, scope, images, forms)
@@ -165,7 +164,7 @@ fn assert_streaming_equals_materialized_with_env(
     forms: &[PdfName],
     color_space_env: ColorSpaceEnv<'_>,
 ) -> Result<Inventory, GraphicsWalkError> {
-    let records = records(input)?;
+    let records = super::assembled_records(input)?;
     let streamed = build_inventory_with_color_space_env(
         input,
         &records,
@@ -216,29 +215,6 @@ fn compare_streaming_and_materialized(
             Err(streamed_err)
         }
     }
-}
-
-fn records(input: &[u8]) -> Result<Vec<presslint_syntax::OperatorRecord>, GraphicsWalkError> {
-    let tokens = tokenize(input).map_err(|error| {
-        GraphicsWalkError::new(
-            crate::GraphicsWalkErrorKind::InvalidSourceRange,
-            error.range,
-        )
-    })?;
-    let assembled = assemble_operators(&tokens).map_err(|error| {
-        let range = match error {
-            presslint_syntax::AssembleError::InvalidTokenRange { range, .. }
-            | presslint_syntax::AssembleError::TrailingOperands { range, .. }
-            | presslint_syntax::AssembleError::UnmatchedArrayClose { range, .. }
-            | presslint_syntax::AssembleError::UnmatchedDictionaryClose { range, .. }
-            | presslint_syntax::AssembleError::MismatchedDelimiter { range, .. }
-            | presslint_syntax::AssembleError::UnterminatedCompositeOperand { range, .. }
-            | presslint_syntax::AssembleError::OperatorInsideCompositeOperand { range, .. }
-            | presslint_syntax::AssembleError::UnexpectedKeyword { range, .. } => range,
-        };
-        GraphicsWalkError::new(crate::GraphicsWalkErrorKind::InvalidSourceRange, range)
-    })?;
-    Ok(assembled.records)
 }
 
 fn walk_graphics_state_with_env(

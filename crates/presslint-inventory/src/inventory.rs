@@ -513,7 +513,9 @@ fn inventory_entry(
         provenance: Provenance {
             page,
             scope: scope.clone(),
-            range: Some(event.record_range),
+            // Explicit identity-only unwrap: `Provenance.range` is a public
+            // bare-`ByteRange` contract; the paint op's range is decoded-based.
+            range: Some(event.record_range.into_byte_range()),
         },
         bounds: None,
         colors,
