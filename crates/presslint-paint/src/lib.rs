@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 mod color_space_env;
+mod mutation_class;
 mod operands;
 mod paint_program;
 mod provenance;
@@ -19,6 +20,7 @@ mod walker;
 mod tests;
 
 pub use color_space_env::{ColorSpaceEnv, ColorSpaceResource};
+pub use mutation_class::MutationClass;
 pub use paint_program::{PaintOps, PaintProgram};
 pub use provenance::{DecodedRange, SourceRange};
 pub use walker::{

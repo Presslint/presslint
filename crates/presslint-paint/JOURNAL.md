@@ -1,5 +1,20 @@
 # presslint-paint Journal
 
+## T146 - MutationClass routing contract (Phase 0a-7)
+
+- Added the public `MutationClass` routing vocabulary for per-paint-act mutation
+  decisions: `PreserveBytes`, `SurgicalRewrite`, `AppearanceReplacement`, and
+  unit-only `UnsupportedSkip`. The enum is deliberately not serialized and has
+  no live producers or consumers yet.
+- The module rustdoc records the partial reconciliation with the existing
+  `EditCapability`, `MutationBoundary` / `SkipReason`, and write pipeline skip
+  taxonomies, including the Phase-4 target to centralize or intentionally split
+  the current write skip-reason mappings.
+- Added two `const fn` predicates with focused unit coverage:
+  `preserves_source_bytes` and `may_emit_replacement_bytes`. This is additive
+  only: no inventory capability production, action planning, write skip enums,
+  digest input, or JSON shape changed.
+
 ## T145 - Typed decoded/source provenance ranges (Phase 0a-6)
 
 - New `provenance.rs` defines two zero-cost newtypes over the shared

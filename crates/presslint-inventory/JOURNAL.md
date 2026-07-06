@@ -1,5 +1,11 @@
 # presslint-inventory Journal
 
+## T146 - Re-export paint mutation class
+
+- The inventory facade now re-exports `presslint_paint::MutationClass` alongside
+  the other paint types; no inventory records, capabilities, digests, or serde
+  shapes changed.
+
 ## T145 - Adopt typed decoded ranges at the paint seams (Phase 0a-6)
 
 - `presslint-paint` now types its provenance fields as `DecodedRange`

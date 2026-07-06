@@ -16,6 +16,7 @@ pub use inventory::{
 };
 pub use presslint_paint::{
     ColorSpaceEnv, ColorSpaceResource, DecodedRange, GraphicsColor, GraphicsStateSnapshot,
-    GraphicsStateWalker, GraphicsWalkError, GraphicsWalkErrorKind, PaintOp, PaintOpKind,
-    PathPaintKind, SourceRange, TextRenderingMode, TextShowOperator, walk_graphics_state,
+    GraphicsStateWalker, GraphicsWalkError, GraphicsWalkErrorKind, MutationClass, PaintOp,
+    PaintOpKind, PathPaintKind, SourceRange, TextRenderingMode, TextShowOperator,
+    walk_graphics_state,
 };

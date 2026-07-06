@@ -16,8 +16,8 @@ use serde::Deserialize;
 use serde::de::value::MapDeserializer;
 
 use crate::{
-    ColorSpaceEnv, DecodedRange, GraphicsColor, GraphicsWalkError, PaintOp, PaintProgram,
-    walk_graphics_state,
+    ColorSpaceEnv, DecodedRange, GraphicsColor, GraphicsWalkError, MutationClass, PaintOp,
+    PaintProgram, walk_graphics_state,
 };
 
 /// Tokenize + assemble a content stream into owned operator records for testing.
@@ -31,6 +31,22 @@ fn assemble(input: &[u8]) -> Result<Vec<OperatorRecord>, String> {
 /// way a caller that wants every yielded item would.
 fn raw_ops(program: PaintProgram<'_>) -> Vec<Result<PaintOp, GraphicsWalkError>> {
     program.into_iter().collect()
+}
+
+#[test]
+fn mutation_class_preserves_source_bytes_for_verbatim_routes() {
+    assert!(MutationClass::PreserveBytes.preserves_source_bytes());
+    assert!(!MutationClass::SurgicalRewrite.preserves_source_bytes());
+    assert!(!MutationClass::AppearanceReplacement.preserves_source_bytes());
+    assert!(MutationClass::UnsupportedSkip.preserves_source_bytes());
+}
+
+#[test]
+fn mutation_class_may_emit_replacement_bytes_for_rewrite_routes() {
+    assert!(!MutationClass::PreserveBytes.may_emit_replacement_bytes());
+    assert!(MutationClass::SurgicalRewrite.may_emit_replacement_bytes());
+    assert!(MutationClass::AppearanceReplacement.may_emit_replacement_bytes());
+    assert!(!MutationClass::UnsupportedSkip.may_emit_replacement_bytes());
 }
 
 #[test]
