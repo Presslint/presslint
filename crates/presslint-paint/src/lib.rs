@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+mod call_machine;
 mod color_space_env;
 mod mutation_class;
 mod operands;
@@ -19,6 +20,9 @@ mod walker;
 #[cfg(test)]
 mod tests;
 
+pub use call_machine::{
+    CallEvent, CallMachine, CallSite, FormResolver, PaintSubProgram, ResolveForm,
+};
 pub use color_space_env::{ColorSpaceEnv, ColorSpaceResource};
 pub use mutation_class::MutationClass;
 pub use paint_program::{PaintOps, PaintProgram};

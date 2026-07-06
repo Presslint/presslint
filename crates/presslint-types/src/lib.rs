@@ -65,6 +65,30 @@ pub enum ContentScope {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PdfName(pub Vec<u8>);
 
+/// One form invocation frame in a nested paint traversal.
+///
+/// `ordinal` is zero-based among form-classified `Do` invocations in the
+/// calling program, after image-vs-form classification. The `name` is the
+/// resource name used by that invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct InvocationFrame {
+    /// Zero-based form invocation position within the caller program.
+    pub ordinal: u32,
+    /// Resource name used to invoke the form.
+    pub name: PdfName,
+}
+
+/// Nested path from page-level content into form invocations.
+///
+/// An empty path means page-level content. This is shared provenance vocabulary
+/// for future inventory contracts, but it is not yet referenced by
+/// [`Provenance`], so existing serialized structs keep their prior shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct InvocationPath {
+    /// Ordered call frames from outermost to innermost form invocation.
+    pub frames: Vec<InvocationFrame>,
+}
+
 /// Axis-aligned bounds in default user space.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct BoundingBox {

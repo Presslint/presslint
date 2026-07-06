@@ -1,5 +1,12 @@
 # presslint-types Journal
 
+## T148 - Invocation path vocabulary
+
+- Added additive public `InvocationFrame` and `InvocationPath` types for future
+  form-call provenance. They derive the crate's standard serde/public-data
+  traits and are not yet referenced by `Provenance`, so existing serialized
+  structs keep their prior shape.
+
 ## Current State
 
 - Defines shared page, object identity, byte range, provenance, content scope,

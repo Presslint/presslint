@@ -1,5 +1,20 @@
 # presslint-paint Journal
 
+## T148 - Call/return traversal substrate (Phase 0b-2)
+
+- Added `call_machine.rs` with the pure borrowed call/return contract:
+  `PaintSubProgram`, `CallSite`, `ResolveForm`, `FormResolver`, `CallEvent`,
+  and `CallMachine`.
+- `CallMachine::walk` composes the existing replayable `PaintProgram` iterator,
+  classifies form `Do` calls with image-name precedence, assigns caller-local
+  form invocation ordinals, and traverses depth-first with an explicit stack.
+  The resolver owns all resource, budget, depth, and cycle policy.
+- Added synthetic preloaded-program coverage for repeated same-name ordinals,
+  nested path construction and return popping, resolver skip, image/form
+  conflicts, resolver error surfacing, and invocation-path JSON shape.
+- No production consumer changed in this slice; this is the traversal substrate
+  for later form-expansion migration.
+
 ## T146 - MutationClass routing contract (Phase 0a-7)
 
 - Added the public `MutationClass` routing vocabulary for per-paint-act mutation
