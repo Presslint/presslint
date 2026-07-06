@@ -1,5 +1,34 @@
 # presslint-inventory Journal
 
+## T153 - Entry identity v3: invocation-aware digests (versioned break)
+
+- VERSIONED IDENTITY BREAK. All four object-digest domain tags advance to
+  `presslint.{vector,text,image,form}.v3`, and the shared digest header now folds
+  the entry's invocation path: after the page, final sequence, and lexical scope
+  it pushes the invocation-path length, then each frame's ordinal and
+  resource-name bytes from the page inward, before the record index and ranges.
+  The per-kind ingredients (path-paint tag, text tags + rendering mode, image/form
+  name, byte-exact colour observations) and the hash function are unchanged. Every
+  persisted v2 digest therefore changes; the digest is an opaque positional handle
+  with no downstream interpreter, so selectors, actions, and write behaviour are
+  unaffected.
+- Distinct invocations of one shared form now receive distinct digests, and a
+  page-level entry folds an empty (length-0) path so page and form entries share
+  one uniform header.
+- New `expanded_entry_identity` builds a form-expanded entry's identity born-final:
+  it stamps the final page-global sequence and folds the invocation path into the
+  digest in a single construction (published as `provenance.invocation`), so an
+  entry's digest can no longer encode a sequence that contradicts its own field.
+  The existing single-stream builders keep their signatures and delegate with an
+  empty path and their local sequence; their digests move only by the tag bump and
+  the length-0 header.
+- Golden regeneration in this slice: the `bit_identity` corpus/resource locks and
+  the `vector_object_digest_is_locked` value were recomputed by running the
+  fixtures (cases and structure unchanged). Added tests: born-final path/digest
+  coherence (the folded path equals the published invocation and genuinely drives
+  the digest) and the page-level empty-path header case. Hand-set `serde_shape`
+  digest literals pin shape, not computation, and are untouched.
+
 ## T152 - Invocation provenance shape lock
 
 - Added a serde shape lock for an inventory entry whose provenance carries a

@@ -1,7 +1,7 @@
 use presslint_syntax::OperatorRecord;
 use presslint_types::{
-    BoundingBox, ColorObservation, ColorSpace, ColorUsage, ContentScope, EditCapability, ObjectId,
-    ObjectKind, PageIndex, PdfName, Provenance,
+    BoundingBox, ColorObservation, ColorSpace, ColorUsage, ContentScope, EditCapability,
+    InvocationPath, ObjectId, ObjectKind, PageIndex, PdfName, Provenance,
 };
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +12,11 @@ use presslint_paint::{
     ColorSpaceEnv, GraphicsStateSnapshot, GraphicsWalkError, PaintOp, PaintOpKind, PaintProgram,
     PathPaintKind, TextRenderingMode,
 };
+
+/// The empty invocation path folded into every single-stream (page or form)
+/// digest built through the public builders below. Form expansion supplies a
+/// non-empty path through [`expanded_entry_identity`] instead.
+const NO_INVOCATION: InvocationPath = InvocationPath { frames: Vec::new() };
 
 /// One queryable page object discovered by the inventory pass.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -389,7 +394,7 @@ fn vector_entry(
     if colors.is_empty() {
         return None;
     }
-    let digest = vector_object_digest(page, sequence, scope, event, paint, &colors);
+    let digest = vector_object_digest(page, sequence, scope, &NO_INVOCATION, event, paint, &colors);
     Some(inventory_entry(
         page,
         scope,
@@ -423,6 +428,7 @@ fn text_entry(
         page,
         sequence,
         scope,
+        &NO_INVOCATION,
         event,
         operator,
         rendering_mode,
@@ -458,7 +464,7 @@ fn image_entry(
 ) -> Option<InventoryEntry> {
     let name = matched_xobject(event, image_xobject_names)?;
     let colors = vec![image_color_observation()];
-    let digest = image_object_digest(page, sequence, scope, event, name, &colors);
+    let digest = image_object_digest(page, sequence, scope, &NO_INVOCATION, event, name, &colors);
     Some(inventory_entry(
         page,
         scope,
@@ -479,7 +485,7 @@ fn form_entry(
     sequence: u32,
 ) -> Option<InventoryEntry> {
     let name = matched_xobject(event, form_xobject_names)?;
-    let digest = form_object_digest(page, sequence, scope, event, name);
+    let digest = form_object_digest(page, sequence, scope, &NO_INVOCATION, event, name);
     Some(inventory_entry(
         page,
         scope,
@@ -521,6 +527,105 @@ fn inventory_entry(
         bounds: None,
         colors,
         capabilities,
+    }
+}
+
+/// Construct the born-final identity for a form-expanded entry.
+///
+/// The umbrella form-expansion adapter first classifies each form's paint ops
+/// through the single-stream builders above (empty path, form-local sequence) to
+/// obtain the kind, colours, scope, and capabilities, then calls this once per
+/// emitted entry to stamp the FINAL page-global `sequence` and to fold the
+/// invocation `path` into the digest. The identity is therefore computed a single
+/// time with the sequence the entry actually carries: the earlier defect where
+/// expansion rebased `id.sequence` AFTER the digest had already been computed
+/// from a contradictory form-local sequence is removed.
+///
+/// `path` is borrowed for the digest and cloned once into
+/// `provenance.invocation`, so that published field and the path folded into the
+/// digest are one and the same source. An empty (page-level) path yields `None`,
+/// matching the single-stream builders.
+#[must_use]
+pub fn expanded_entry_identity(
+    template: &InventoryEntry,
+    sequence: u32,
+    path: &InvocationPath,
+    event: &PaintOp,
+) -> InventoryEntry {
+    let digest = expanded_digest(template, sequence, path, event);
+    InventoryEntry {
+        id: ObjectId {
+            page: template.id.page,
+            sequence,
+            digest,
+        },
+        kind: template.kind,
+        provenance: Provenance {
+            page: template.provenance.page,
+            scope: template.provenance.scope.clone(),
+            range: template.provenance.range,
+            invocation: invocation_from_path(path),
+        },
+        bounds: template.bounds,
+        colors: template.colors.clone(),
+        capabilities: template.capabilities.clone(),
+    }
+}
+
+/// Recompute the digest a classified entry must carry for the final `sequence`
+/// and invocation `path`, dispatching on the entry kind and the paint op that
+/// produced it. The per-kind ingredients (paint kind, text operator + mode,
+/// resource name, byte-exact colour observations) match what the single-stream
+/// builder folded, so only the header's sequence and invocation-path bytes differ
+/// from the template digest.
+fn expanded_digest(
+    template: &InventoryEntry,
+    sequence: u32,
+    path: &InvocationPath,
+    event: &PaintOp,
+) -> [u8; 32] {
+    let page = template.id.page;
+    let scope = &template.provenance.scope;
+    match (template.kind, &event.kind) {
+        (ObjectKind::Vector, PaintOpKind::PathPaint { paint }) => {
+            vector_object_digest(page, sequence, scope, path, event, *paint, &template.colors)
+        }
+        (
+            ObjectKind::Text,
+            PaintOpKind::TextShow {
+                operator,
+                rendering_mode,
+            },
+        ) => text_object_digest(
+            page,
+            sequence,
+            scope,
+            path,
+            event,
+            *operator,
+            *rendering_mode,
+            &template.colors,
+        ),
+        (ObjectKind::Image, PaintOpKind::XObjectInvoke { name }) => {
+            image_object_digest(page, sequence, scope, path, event, name, &template.colors)
+        }
+        (ObjectKind::FormXObject, PaintOpKind::XObjectInvoke { name }) => {
+            form_object_digest(page, sequence, scope, path, event, name)
+        }
+        // A classified template always pairs with the op kind that produced it,
+        // so this arm is unreachable in practice; keep the template digest rather
+        // than panic in a library path.
+        _ => template.id.digest,
+    }
+}
+
+/// `None` for page-level (empty) paths, otherwise the owned invocation path
+/// published in `Provenance.invocation` and folded into the entry digest.
+fn invocation_from_path(path: &InvocationPath) -> Option<InvocationPath> {
+    if path.frames.is_empty() {
+        None
+    } else {
+        Some(path.clone())
     }
 }
 

@@ -12,7 +12,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
-use presslint_inventory::{Inventory, InventoryEntry, build_inventory_with_color_space_env};
+use presslint_inventory::{
+    Inventory, InventoryEntry, build_inventory_with_color_space_env, expanded_entry_identity,
+};
 use presslint_paint::{
     CallSite, ColorSpaceEnv, FormResolver, GraphicsWalkError, PaintSubProgram, ResolveForm,
     flat_call_events,
@@ -117,8 +119,10 @@ impl FormObjectKey {
 /// page declares no form `XObject` resources this reduces to the page-only path
 /// with an empty skip list, so pages without form invocations are byte-for-byte
 /// unchanged. Otherwise each page-level form invocation entry is followed by the
-/// form's own inventory entries, rebased onto page-global sequence values that
-/// continue after the page's sequence space.
+/// form's own inventory entries, whose identity is built born-final: the
+/// page-global sequence (continuing after the page's sequence space) and the
+/// invocation path are folded into the digest at construction, not rebased
+/// afterwards.
 ///
 /// Form `XObject` content keeps its OWN resource environment and must NOT
 /// inherit the page one, so each form walk resolves `cs`/`scn` against a LOCAL
@@ -451,15 +455,18 @@ impl MachineInventoryAdapter {
         else {
             return;
         };
-        let Some(entry) = inventory.entries.get(cursor) else {
+        let Some(template) = inventory.entries.get(cursor) else {
             return;
         };
-        if entry.provenance.range != range {
+        if template.provenance.range != range {
             return;
         }
-        let mut entry = entry.clone();
-        entry.id.sequence = self.next_sequence;
-        entry.provenance.invocation = Some(self.form_cursors[cursor_index].0.clone());
+        // Born-final identity: build the entry once with the FINAL page-global
+        // sequence and the machine's invocation `path` folded into the digest.
+        // `path` is the same object published as `provenance.invocation`, so the
+        // identity never carries a sequence or path that contradicts its digest
+        // (the deleted post-hoc `id.sequence` rebase).
+        let entry = expanded_entry_identity(template, self.next_sequence, path, op);
         self.next_sequence = self.next_sequence.saturating_add(1);
         self.entries.push(entry);
         self.form_cursors[cursor_index].1 += 1;

@@ -388,6 +388,27 @@ fn shared_form_invoked_twice_entries_carry_distinct_invocation_ordinals() {
 }
 
 #[test]
+fn form_expanded_identity_is_deterministic_and_unique_across_invocations() {
+    let page = page_with_xobjects_object("/A 4 0 R", 5);
+    let form_a = form_xobject(4, "", b"0 0 0 1 k\n0 0 10 10 re\nf");
+    let page_content = stream_object(5, "", b"/A Do\n/A Do");
+    let source = classic_pdf(&[CATALOG, PAGES, &page, &form_a, &page_content]);
+
+    let first = expand_first_page_with_context(&source, FormWalkContext::bounded_default());
+    let second = expand_first_page_with_context(&source, FormWalkContext::bounded_default());
+
+    // Determinism: the same input walked twice yields byte-identical identities,
+    // digests included.
+    assert_eq!(first.inventory.entries, second.inventory.entries);
+    // Uniqueness: the two invocations of the shared form now carry distinct
+    // digests (each folds its own invocation path and final sequence).
+    assert_ne!(
+        first.inventory.entries[1].id.digest,
+        first.inventory.entries[3].id.digest
+    );
+}
+
+#[test]
 fn nested_form_entries_carry_outer_and_inner_invocation_chains() {
     let page = page_with_xobjects_object("/A 4 0 R", 6);
     let form_a = form_xobject(4, "/B 5 0 R", b"0 0 0 1 k\n0 0 10 10 re\nf\n/B Do");

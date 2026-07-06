@@ -10,9 +10,9 @@ mod tests;
 pub use inventory::{
     Inventory, InventoryEntry, build_form_inventory, build_image_inventory, build_inventory,
     build_inventory_with_color_space_env, build_text_inventory, build_vector_inventory,
-    form_inventory_from_graphics_events, image_inventory_from_graphics_events,
-    inventory_from_graphics_events, text_inventory_from_graphics_events,
-    vector_inventory_from_graphics_events,
+    expanded_entry_identity, form_inventory_from_graphics_events,
+    image_inventory_from_graphics_events, inventory_from_graphics_events,
+    text_inventory_from_graphics_events, vector_inventory_from_graphics_events,
 };
 pub use presslint_paint::{
     ColorSpaceEnv, ColorSpaceResource, DecodedRange, GraphicsColor, GraphicsStateSnapshot,

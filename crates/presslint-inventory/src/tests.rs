@@ -1,6 +1,7 @@
 use presslint_syntax::{OperatorRecord, TokenRef, assemble_operators, tokenize};
 use presslint_types::{
-    ByteRange, ColorSpace, ColorUsage, ContentScope, EditCapability, ObjectKind, PageIndex, PdfName,
+    ByteRange, ColorSpace, ColorUsage, ContentScope, EditCapability, InvocationFrame,
+    InvocationPath, ObjectKind, PageIndex, PdfName,
 };
 
 mod bit_identity;
@@ -15,7 +16,7 @@ use super::{
     DecodedRange, GraphicsStateWalker, GraphicsWalkError, GraphicsWalkErrorKind, Inventory,
     PaintOpKind, PathPaintKind, TextRenderingMode, TextShowOperator, build_form_inventory,
     build_image_inventory, build_inventory, build_text_inventory, build_vector_inventory,
-    walk_graphics_state,
+    expanded_entry_identity, walk_graphics_state,
 };
 
 /// Tokenize + assemble a content stream, mapping any syntax error to the
@@ -759,9 +760,82 @@ fn vector_object_digest_is_locked() -> Result<(), String> {
     Ok(())
 }
 
-// Locks the `presslint.vector.v2` digest for `1 0 0 rg f` on page 2, sequence 0,
-// page scope, with the fill color source pointing at the `rg` record (0..8).
+fn paint_op(input: &[u8]) -> Result<super::PaintOp, String> {
+    walk(input)
+        .map_err(|error| format!("{error:?}"))?
+        .into_iter()
+        .find(|op| matches!(op.kind, PaintOpKind::PathPaint { .. }))
+        .ok_or_else(|| "missing paint op".to_string())
+}
+
+#[test]
+fn expanded_entry_identity_folds_the_published_invocation_path() -> Result<(), String> {
+    // A page vector entry (empty path) is the classification template; the paint
+    // op that produced it drives the born-final identity for a form invocation.
+    let template = vector_inventory(b"0.25 g f", &ContentScope::Page)?
+        .entries
+        .into_iter()
+        .next()
+        .ok_or("missing template entry")?;
+    let paint = paint_op(b"0.25 g f")?;
+
+    let path_a = InvocationPath {
+        frames: vec![InvocationFrame {
+            ordinal: 0,
+            name: PdfName(b"A".to_vec()),
+        }],
+    };
+    let path_b = InvocationPath {
+        frames: vec![InvocationFrame {
+            ordinal: 1,
+            name: PdfName(b"A".to_vec()),
+        }],
+    };
+
+    let entry_a = expanded_entry_identity(&template, 7, &path_a, &paint);
+    let entry_b = expanded_entry_identity(&template, 7, &path_b, &paint);
+
+    // The entry carries the FINAL page-global sequence, not the template's 0.
+    assert_eq!(entry_a.id.sequence, 7);
+    // Coherence: the published invocation is exactly the path folded into the
+    // digest, and rebuilding from that published path reproduces the digest.
+    assert_eq!(entry_a.provenance.invocation.as_ref(), Some(&path_a));
+    let published = entry_a
+        .provenance
+        .invocation
+        .as_ref()
+        .ok_or("expanded entry must publish its invocation")?;
+    let rebuilt = expanded_entry_identity(&template, 7, published, &paint);
+    assert_eq!(rebuilt.id.digest, entry_a.id.digest);
+    // The invocation path genuinely drives the digest: same template and
+    // sequence, ordinal 0 vs 1 in the path -> distinct digests.
+    assert_ne!(entry_a.id.digest, entry_b.id.digest);
+    Ok(())
+}
+
+#[test]
+fn page_entries_carry_the_empty_invocation_path_header() -> Result<(), String> {
+    // Page-level entries publish no invocation and fold a len-0 invocation path.
+    // Rebuilding the identity with an explicit empty path and the entry's own
+    // sequence reproduces the single-stream digest, proving page and form entries
+    // share one uniform v3 header.
+    let inventory = vector_inventory(b"0.25 g f", &ContentScope::Page)?;
+    let template = inventory.entries.first().ok_or("missing entry")?;
+    assert_eq!(template.provenance.invocation, None);
+
+    let paint = paint_op(b"0.25 g f")?;
+    let empty = InvocationPath { frames: Vec::new() };
+    let rebuilt = expanded_entry_identity(template, template.id.sequence, &empty, &paint);
+
+    assert_eq!(rebuilt.provenance.invocation, None);
+    assert_eq!(rebuilt.id.digest, template.id.digest);
+    Ok(())
+}
+
+// Locks the `presslint.vector.v3` digest for `1 0 0 rg f` on page 2, sequence 0,
+// page scope, empty invocation path, with the fill color source pointing at the
+// `rg` record (0..8).
 const VECTOR_DIGEST_RG_FILL: [u8; 32] = [
-    217, 142, 65, 91, 110, 170, 75, 230, 252, 240, 215, 175, 209, 215, 240, 59, 219, 114, 104, 58,
-    55, 44, 112, 184, 238, 244, 97, 190, 129, 253, 98, 6,
+    38, 11, 248, 78, 62, 195, 113, 80, 185, 223, 212, 133, 178, 52, 185, 189, 200, 102, 156, 100,
+    209, 107, 139, 107, 216, 17, 165, 217, 123, 27, 10, 152,
 ];

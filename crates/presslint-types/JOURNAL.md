@@ -1,5 +1,16 @@
 # presslint-types Journal
 
+## T153 - Declare ObjectId.digest identity (entry identity v3)
+
+- Documentation only, no shape change. `ObjectId.digest`'s doc comment now states
+  the identity is POSITIONAL within the page's paint order (not content-addressed)
+  and invocation-aware: the digest folds the page-global sequence, the lexical
+  scope, and — for form-painted content — the ordered form-invocation path (the
+  same chain published in `Provenance.invocation`). Distinct invocations of one
+  shared form receive distinct digests, and an edit that renumbers earlier paint
+  operations renumbers the digests that follow. The digest remains an opaque
+  handle; `ObjectId`/`Provenance`/`ContentScope` serde shapes are unchanged.
+
 ## T152 - Optional invocation provenance
 
 - Added additive `Provenance::invocation: Option<InvocationPath>` metadata with

@@ -15,14 +15,26 @@ pub struct PageIndex(pub u32);
 /// Stable identity for a marked page object.
 ///
 /// This is not a PDF indirect reference. It identifies the object as observed
-/// by the inventory pass: page, sequence, and a content-derived digest.
+/// by the inventory pass: page, sequence, and a positional, invocation-aware
+/// digest. The digest is not content-addressed — see [`ObjectId::digest`] for
+/// exactly what it folds and what edits change it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ObjectId {
     /// Page where the object was discovered.
     pub page: PageIndex,
     /// Deterministic sequence number within the page inventory.
     pub sequence: u32,
-    /// Digest of canonical object evidence.
+    /// Digest of the object's canonical evidence.
+    ///
+    /// This identity is POSITIONAL within the page's paint order, not
+    /// content-addressed: the digest folds the object's page-global sequence, its
+    /// lexical scope, and — for content painted through a form `XObject` — the
+    /// ordered form-invocation path (the same chain published in
+    /// [`Provenance::invocation`]). Two distinct invocations of one shared form
+    /// therefore receive distinct digests, and an edit that renumbers earlier
+    /// paint operations renumbers the digests that follow it. Treat the digest as
+    /// an opaque handle for the object AS OBSERVED at this position, not as a
+    /// stable content fingerprint that survives unrelated document edits.
     pub digest: [u8; 32],
 }
 
@@ -48,9 +60,10 @@ pub struct Provenance {
     /// object.
     ///
     /// `None` (or an empty path) means page-level content. `scope` remains the
-    /// lexical source scope of the innermost stream. This metadata is not part
-    /// of entry identity yet; a later identity-version change can fold it in
-    /// deliberately.
+    /// lexical source scope of the innermost stream. As of identity v3 this
+    /// path is part of entry identity: the same ordered chain published here is
+    /// folded into [`ObjectId::digest`], so distinct invocations of one shared
+    /// form receive distinct digests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation: Option<InvocationPath>,
 }
