@@ -1,5 +1,64 @@
 # presslint Journal
 
+## T151 - Ablation: fold the resolver's cycle index into the active stack
+
+- Behaviour-preserving cleanup of `form_expansion_machine.rs`. The resolver held
+  the active descent path twice: an `active` stack (`InvocationPath -> slot`) and
+  a parallel `visited: BTreeSet<FormObjectKey>` inserted/removed in lock-step with
+  it. `visited` was a pure derived index of `active`, so it is removed; active-path
+  cycle detection now scans the `active` stack directly (`active.iter().any(|(_, a)|
+  a.key == key)`). The stack is bounded by `max_depth` (default 8), so the scan is
+  cheap and drops one `BTreeSet` allocation per form-bearing page walk plus the
+  `std::collections::BTreeSet` import. No public surface, semantics, or golden
+  changed: the six T147 goldens (incl. the self-referential-cycle and
+  shared-form-twice locks) stay byte-untouched and green.
+
+## T151 - Flip to the Machine Path; Delete the Manual Recursion (Phase 0b-4b)
+
+- Form expansion now runs on the shared paint traversal machine; the manual
+  recursion is removed. `build_page_inventory_with_forms` (public signature
+  unchanged) is now the machine-driven entry in `form_expansion_machine.rs`,
+  re-exported through `form_inventory` so the umbrella consumers
+  (`pdf_inventory`, `document_inventory`) keep importing it from the same path.
+  The machine is the single source of traversal truth: the umbrella no longer
+  re-walks graphics state to pair invocation names.
+- Deleted the old path from `form_inventory.rs`: the `FormExpansion` struct with
+  `expand`/`consume_expansion_budget`/`decode_form`/skip helpers, and the
+  redundant `form_invocation_names` graphics-state re-walk. `form_inventory.rs`
+  now owns only the caller-facing types (`FormExpandedInventory`,
+  `SkippedFormInventory`, `SkippedFormInventoryReason`) and the bounded
+  `FormWalkContext`. The now-unused private `visited`/`FormObjectKey` state was
+  dropped from `FormWalkContext`; cycle keying lives solely in the resolver.
+  `FormWalkContext` semantics are unchanged (depth 8, budget 256,
+  consumed-pre-work-not-restored, active-path cycle key), now enforced only
+  through the resolver.
+- Retired the T150 differential scaffold coherently: `form_expansion_machine`
+  is no longer `#[cfg(test)]`-gated, and `tests/form_expansion_differential.rs`
+  is deleted (its six fixtures map one-to-one onto the six T147 goldens, so it
+  added no coverage the goldens lack once the old path it compared against is
+  gone). The `*_using(..., machine: bool)` fixture switch and the
+  `*_machine` helper variants in `tests/form_inventory.rs` are simplified back
+  to the single path.
+- PROOF OF IDENTITY: the T147 golden module passed byte-untouched (empty diff on
+  `form_inventory_golden.rs`, all six goldens green now driving the machine via
+  the public entry), and the broader `form_inventory` suite passed with no
+  expectation changes. Live check: `presslint audit --json` over a synthetic
+  form-heavy page (nested `/A -> /B` with CMYK-then-RGB fills) inventories
+  identically, surfacing both nested form invocations and the RGB fill inside
+  the nested form.
+- Bounded-traversal parity with the retired manual recursion: the machine's
+  `FormProgramArena` is a lazy `OnceLock` tree, not an eager reachability walk.
+  `build` seeds only the page's root form slots (a target clone, no structural
+  inspection); a form's content is decoded and its `/Resources` inspected exactly
+  once, the first time a permitted invocation resolves it in `resolve_form`
+  (after the cycle/depth/budget checks), and preparing a form materialises empty
+  child slots that are themselves inspected only if invoked. A declared-but-never-
+  invoked, over-budget, or over-depth form is never touched, so the flip keeps the
+  old lazy cost profile and drops `form_invocation_names`' redundant graphics-state
+  re-walk. The `shared_form_reached_by_two_non_cyclic_branches` golden confirms a
+  form reached by two branches still inventories identically under per-branch
+  preparation.
+
 ## T150 - Machine-Driven Form Expansion Parallel Proof (Phase 0b-4a)
 
 - Added a private parallel form-expansion adapter in `form_expansion_machine.rs`

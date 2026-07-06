@@ -1,11 +1,14 @@
-//! Parallel machine-driven Form `XObject` expansion adapter.
+//! Machine-driven Form `XObject` expansion: the production form-expansion path.
 //!
-//! This module is intentionally not the public entry point yet. It drives the
-//! paint call machine beside the existing recursive `FormExpansion` path so
-//! tests can prove bit-for-bit equality before the later flip.
+//! This module drives the shared paint call/return machine
+//! ([`presslint_paint::flat_call_events`]) to expand a page's Form `XObject`
+//! invocations. It owns the public entry [`build_page_inventory_with_forms`]
+//! (re-exported through [`crate::form_inventory`], which owns the caller-facing
+//! result and diagnostic types). The traversal is the single source of
+//! traversal truth: the umbrella no longer re-walks graphics state to pair
+//! invocation names.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
@@ -31,51 +34,29 @@ use crate::form_inventory::{
 use crate::page_content::{PageContentBytes, decode_content};
 use crate::pdf_inventory::PdfInventorySkip;
 
+/// Lazy tree of form sub-programs, rooted at the page's form resource slots.
+///
+/// The arena holds only the page-level slots up front: [`build`] clones the
+/// caller-supplied targets and inspects NOTHING. Each form's own content is
+/// decoded and its resources inspected on demand, the first time a permitted
+/// invocation actually resolves it (the `OnceLock` in [`PreparedFormObject`]),
+/// so a declared-but-never-invoked, over-budget, or over-depth form is never
+/// touched. Nested slots grow lazily the same way: preparing a form materialises
+/// empty child slots for its own declared form resources, and each is prepared
+/// only if it is in turn invoked and passes the resolver's cycle/depth/budget
+/// checks. This mirrors the bounded lazy semantics of the retired manual
+/// recursion — no eager structural walk of the declared form graph.
+///
+/// [`build`]: FormProgramArena::build
 struct FormProgramArena<'input> {
-    programs: Vec<PreparedFormObject<'input>>,
+    roots: Vec<PreparedFormObject<'input>>,
 }
 
-impl<'input> FormProgramArena<'input> {
-    fn build(
-        input: &'input [u8],
-        lookup: ObjectLookup<'input>,
-        targets: &[PageXObjectResourceTarget],
-    ) -> Self {
-        let mut arena = Self {
-            programs: Vec::new(),
-        };
-        let mut seen = BTreeSet::new();
-        for target in targets {
-            arena.insert_reachable(input, lookup, target, &mut seen);
+impl FormProgramArena<'_> {
+    fn build(targets: &[PageXObjectResourceTarget]) -> Self {
+        Self {
+            roots: targets.iter().map(PreparedFormObject::new).collect(),
         }
-        arena
-    }
-
-    fn insert_reachable(
-        &mut self,
-        input: &'input [u8],
-        lookup: ObjectLookup<'input>,
-        target: &PageXObjectResourceTarget,
-        seen: &mut BTreeSet<FormObjectKey>,
-    ) {
-        let key = FormObjectKey::from_target(target);
-        if !seen.insert(key) {
-            return;
-        }
-        let nested_targets =
-            inspect_form_xobject_resources(input, lookup, target.object_byte_offset).form_xobjects;
-        self.programs.push(PreparedFormObject {
-            key,
-            target: target.clone(),
-            program: OnceLock::new(),
-        });
-        for nested in nested_targets {
-            self.insert_reachable(input, lookup, &nested, seen);
-        }
-    }
-
-    fn get(&self, key: FormObjectKey) -> Option<&PreparedFormObject<'input>> {
-        self.programs.iter().find(|program| program.key == key)
     }
 }
 
@@ -83,6 +64,16 @@ struct PreparedFormObject<'input> {
     key: FormObjectKey,
     target: PageXObjectResourceTarget,
     program: OnceLock<PreparedFormProgram<'input>>,
+}
+
+impl PreparedFormObject<'_> {
+    fn new(target: &PageXObjectResourceTarget) -> Self {
+        Self {
+            key: FormObjectKey::from_target(target),
+            target: target.clone(),
+            program: OnceLock::new(),
+        }
+    }
 }
 
 enum PreparedFormProgram<'input> {
@@ -95,7 +86,7 @@ struct FormProgramData<'input> {
     records: Vec<OperatorRecord>,
     image_names: Vec<PdfName>,
     form_names: Vec<PdfName>,
-    form_targets: Vec<PageXObjectResourceTarget>,
+    nested: Vec<PreparedFormObject<'input>>,
     resource_skips: Vec<SkippedPageXObjectResource>,
     color_spaces: Vec<presslint_inventory::ColorSpaceResource>,
 }
@@ -117,8 +108,29 @@ impl FormObjectKey {
     }
 }
 
+/// Build a page's combined inventory with bounded Form `XObject` content
+/// expansion.
+///
+/// The page content is decoded, tokenized, assembled, and inventoried through
+/// the same page decode/tokenize/assemble path and
+/// [`presslint_inventory::build_inventory`] the page-only bridge used. When the
+/// page declares no form `XObject` resources this reduces to the page-only path
+/// with an empty skip list, so pages without form invocations are byte-for-byte
+/// unchanged. Otherwise each page-level form invocation entry is followed by the
+/// form's own inventory entries, rebased onto page-global sequence values that
+/// continue after the page's sequence space.
+///
+/// Form `XObject` content keeps its OWN resource environment and must NOT
+/// inherit the page one, so each form walk resolves `cs`/`scn` against a LOCAL
+/// env built from that form's own `/Resources /ColorSpace`.
+///
+/// # Errors
+///
+/// Returns [`InventoryPageSkip`] only for page-level failures (page decode,
+/// tokenize, assemble, or graphics walk). Per-form failures are collected as
+/// [`SkippedFormInventory`] and never fail the page.
 #[allow(clippy::too_many_arguments)]
-pub fn build_page_inventory_with_forms_machine(
+pub fn build_page_inventory_with_forms(
     input: &[u8],
     lookup: ObjectLookup<'_>,
     page: &presslint_pdf::DocumentPageContentExtentInspection,
@@ -164,7 +176,7 @@ pub fn build_page_inventory_with_forms_machine(
         });
     }
 
-    let arena = FormProgramArena::build(input, lookup, form_targets);
+    let arena = FormProgramArena::build(form_targets);
     let root = PaintSubProgram {
         source,
         records: &assembled.records,
@@ -179,10 +191,8 @@ pub fn build_page_inventory_with_forms_machine(
         input,
         lookup,
         max_decoded_stream_bytes,
-        page_form_targets: form_targets,
         page_index,
         context,
-        visited: BTreeSet::new(),
         active: Vec::new(),
         prepared_paths: Rc::clone(&prepared_paths),
         skipped: Vec::new(),
@@ -213,34 +223,34 @@ struct UmbrellaFormResolver<'arena, 'input> {
     input: &'input [u8],
     lookup: ObjectLookup<'input>,
     max_decoded_stream_bytes: usize,
-    page_form_targets: &'arena [PageXObjectResourceTarget],
     page_index: PageIndex,
     context: FormWalkContext,
-    visited: BTreeSet<FormObjectKey>,
-    active: Vec<(InvocationPath, FormObjectKey)>,
+    active: Vec<(InvocationPath, &'arena PreparedFormObject<'input>)>,
     prepared_paths: Rc<RefCell<Vec<(InvocationPath, Inventory)>>>,
     skipped: Vec<SkippedFormInventory>,
 }
 
-impl UmbrellaFormResolver<'_, '_> {
-    fn caller_targets(&self, path: &InvocationPath) -> &[PageXObjectResourceTarget] {
+impl<'arena, 'input> UmbrellaFormResolver<'arena, 'input> {
+    /// The form slots reachable from the program identified by `path`: the page's
+    /// root slots for the page itself, otherwise the caller form's own lazily
+    /// materialised child slots. The child slots live inside the caller's
+    /// `OnceLock`-prepared data, which is stable for `'arena`, so the borrow
+    /// outlives this call as the machine requires.
+    fn caller_slots(&self, path: &InvocationPath) -> &'arena [PreparedFormObject<'input>] {
         if path.frames.is_empty() {
-            return self.page_form_targets;
+            return &self.arena.roots;
         }
-        let Some(key) = self
+        let Some(caller) = self
             .active
             .iter()
-            .find_map(|(candidate, key)| (candidate == path).then_some(*key))
+            .find_map(|(candidate, slot)| (candidate == path).then_some(*slot))
         else {
             return &[];
         };
-        let Some(prepared) = self.arena.get(key) else {
+        let Some(PreparedFormProgram::Ready(data)) = caller.program.get() else {
             return &[];
         };
-        let Some(PreparedFormProgram::Ready(data)) = prepared.program.get() else {
-            return &[];
-        };
-        &data.form_targets
+        &data.nested
     }
 
     fn child_path(call: CallSite<'_>) -> InvocationPath {
@@ -281,20 +291,21 @@ impl<'arena> FormResolver<'arena> for UmbrellaFormResolver<'arena, '_> {
         &mut self,
         call: CallSite<'_>,
     ) -> Result<ResolveForm<'arena>, GraphicsWalkError> {
-        let Some(target) =
-            find_form_target(self.caller_targets(call.caller_path), call.name).cloned()
-        else {
+        let Some(slot) = find_slot(self.caller_slots(call.caller_path), call.name) else {
             return Ok(ResolveForm::Skip);
         };
-        let key = FormObjectKey::from_target(&target);
-        if self.visited.contains(&key) {
-            self.push_skip(call.name, &target, SkippedFormInventoryReason::Cycle);
+        let key = slot.key;
+        // Active-path cycle detection: the same form object (by key) is already
+        // on the descent stack. The stack is bounded by `max_depth`, so a linear
+        // scan is its own source of truth — no separate visited index.
+        if self.active.iter().any(|(_, active)| active.key == key) {
+            self.push_skip(call.name, &slot.target, SkippedFormInventoryReason::Cycle);
             return Ok(ResolveForm::Skip);
         }
         if self.active.len() >= self.context.max_depth {
             self.push_skip(
                 call.name,
-                &target,
+                &slot.target,
                 SkippedFormInventoryReason::MaxDepth {
                     max_depth: self.context.max_depth,
                 },
@@ -304,7 +315,7 @@ impl<'arena> FormResolver<'arena> for UmbrellaFormResolver<'arena, '_> {
         if self.context.remaining_expansions == 0 {
             self.push_skip(
                 call.name,
-                &target,
+                &slot.target,
                 SkippedFormInventoryReason::BudgetExhausted {
                     max_expansions: self.context.max_expansions,
                 },
@@ -313,21 +324,21 @@ impl<'arena> FormResolver<'arena> for UmbrellaFormResolver<'arena, '_> {
         }
         self.context.remaining_expansions -= 1;
 
-        let Some(prepared) = self.arena.get(key) else {
-            return Ok(ResolveForm::Skip);
-        };
-        let program = prepared.program.get_or_init(|| {
+        // The form's own content is decoded and its resources inspected here, the
+        // first time a permitted invocation reaches it — never for declared-but-
+        // uninvoked, over-budget, or over-depth forms.
+        let program = slot.program.get_or_init(|| {
             prepare_form_object(
                 self.input,
                 self.lookup,
-                &prepared.target,
+                &slot.target,
                 self.max_decoded_stream_bytes,
             )
         });
         let data = match program {
             PreparedFormProgram::Ready(data) => data,
             PreparedFormProgram::ContentSkipped(skip) => {
-                self.push_content_skip(call.name, &target, skip.clone());
+                self.push_content_skip(call.name, &slot.target, skip.clone());
                 return Ok(ResolveForm::Skip);
             }
         };
@@ -335,7 +346,7 @@ impl<'arena> FormResolver<'arena> for UmbrellaFormResolver<'arena, '_> {
         for skip in &data.resource_skips {
             self.push_skip(
                 call.name,
-                &target,
+                &slot.target,
                 SkippedFormInventoryReason::Resource { skip: skip.clone() },
             );
         }
@@ -355,9 +366,9 @@ impl<'arena> FormResolver<'arena> for UmbrellaFormResolver<'arena, '_> {
             Err(error) => {
                 self.push_content_skip(
                     call.name,
-                    &target,
+                    &slot.target,
                     PdfInventorySkip::GraphicsWalkFailed {
-                        object_byte_offset: target.object_byte_offset,
+                        object_byte_offset: slot.target.object_byte_offset,
                         error,
                     },
                 );
@@ -368,8 +379,7 @@ impl<'arena> FormResolver<'arena> for UmbrellaFormResolver<'arena, '_> {
         self.prepared_paths
             .borrow_mut()
             .push((child_path.clone(), inventory));
-        self.visited.insert(key);
-        self.active.push((child_path, key));
+        self.active.push((child_path, slot));
         Ok(ResolveForm::Descend(PaintSubProgram {
             source: data.content.as_slice(),
             records: &data.records,
@@ -386,8 +396,7 @@ impl<'arena> FormResolver<'arena> for UmbrellaFormResolver<'arena, '_> {
             .iter()
             .rposition(|(candidate, _)| candidate == path)
         {
-            let (_, key) = self.active.remove(index);
-            self.visited.remove(&key);
+            self.active.remove(index);
         }
     }
 }
@@ -524,22 +533,30 @@ fn prepare_form_object<'input>(
     let color_spaces = color_space_env_resources(
         &inspect_form_color_space_resources(input, lookup, target.object_byte_offset).color_spaces,
     );
+    // Materialise empty child slots for this form's own declared form resources.
+    // They are inspected/decoded only if a nested invocation in turn reaches
+    // them, keeping the whole descent lazy and bounded.
+    let nested = form_resources
+        .form_xobjects
+        .iter()
+        .map(PreparedFormObject::new)
+        .collect();
     PreparedFormProgram::Ready(FormProgramData {
         content,
         records: assembled.records,
         image_names: inventory_names(&form_resources.image_xobject_names),
         form_names: inventory_names(&form_resources.form_xobject_names),
-        form_targets: form_resources.form_xobjects,
+        nested,
         resource_skips,
         color_spaces,
     })
 }
 
-fn find_form_target<'a>(
-    targets: &'a [PageXObjectResourceTarget],
+fn find_slot<'a, 'input>(
+    slots: &'a [PreparedFormObject<'input>],
     name: &PdfName,
-) -> Option<&'a PageXObjectResourceTarget> {
-    targets.iter().find(|target| target.name.0 == name.0)
+) -> Option<&'a PreparedFormObject<'input>> {
+    slots.iter().find(|slot| slot.target.name.0 == name.0)
 }
 
 const fn is_form_resource_coverage_skip(skip: &SkippedPageXObjectResource) -> bool {

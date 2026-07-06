@@ -16,7 +16,6 @@
 
 mod color_audit;
 mod document_inventory;
-#[cfg(test)]
 mod form_expansion_machine;
 mod form_inventory;
 mod page_content;
