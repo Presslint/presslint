@@ -1,5 +1,18 @@
 # presslint-paint Journal
 
+## T154 - Split the paint test module (Phase 1-0, tests-only)
+
+- Verbatim mechanical split of the 985-line `tests.rs` into a thin aggregator
+  (shared `assemble`/`name`/`page_program`/`form_program` builders + the
+  dependency-free `mini_json` serializer) plus focused submodules under
+  `src/tests/`: `walker.rs`, `paint_program.rs`, `provenance.rs`,
+  `mutation_class.rs`, `call_machine.rs`. Same 23 tests, same names, no
+  assertion or production change; every file well under the file-size gate.
+- Ablation: lifted the embedded `mini_json` serializer out of the aggregator
+  into its own `src/tests/mini_json.rs` submodule (same `tests::mini_json`
+  module path and `pub(super)` visibility), so the aggregator is genuinely thin
+  (441 -> 73 lines). Pure relocation, behavior identical, still 23 green tests.
+
 ## T150 - Form Resolver Return Hook (Phase 0b-4a)
 
 - `FormResolver` now has a default no-op `on_return(&InvocationPath)` hook.
