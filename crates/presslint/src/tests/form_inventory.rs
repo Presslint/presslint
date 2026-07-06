@@ -9,9 +9,9 @@ use presslint_types::PageIndex;
 
 use crate::document_inventory::inventory_names;
 use crate::{
-    ColorSpace, ContentScope, FormExpandedInventory, FormWalkContext, ObjectKind, PdfInventorySkip,
-    PdfName, SkippedFormInventoryReason, build_classic_pdf_inventory,
-    build_page_inventory_with_forms, build_pdf_inventory,
+    ColorSpace, ContentScope, FormExpandedInventory, FormWalkContext, InvocationFrame,
+    InvocationPath, ObjectKind, PdfInventorySkip, PdfName, SkippedFormInventoryReason,
+    build_classic_pdf_inventory, build_page_inventory_with_forms, build_pdf_inventory,
 };
 
 const MAX: usize = 4096;
@@ -362,6 +362,58 @@ fn nested_form_entries_carry_invoking_page_index() {
 }
 
 #[test]
+fn shared_form_invoked_twice_entries_carry_distinct_invocation_ordinals() {
+    let page = page_with_xobjects_object("/A 4 0 R", 5);
+    let form_a = form_xobject(4, "", b"0 0 0 1 k\n0 0 10 10 re\nf");
+    let page_content = stream_object(5, "", b"/A Do\n/A Do");
+    let source = classic_pdf(&[CATALOG, PAGES, &page, &form_a, &page_content]);
+
+    let expanded = expand_first_page_with_context(&source, FormWalkContext::bounded_default());
+
+    assert_eq!(expanded.inventory.entries.len(), 4);
+    assert_eq!(expanded.inventory.entries[0].provenance.invocation, None);
+    assert_eq!(
+        expanded.inventory.entries[1].provenance.invocation,
+        Some(invocation_path(&[(0, b"A")]))
+    );
+    assert_eq!(expanded.inventory.entries[2].provenance.invocation, None);
+    assert_eq!(
+        expanded.inventory.entries[3].provenance.invocation,
+        Some(invocation_path(&[(1, b"A")]))
+    );
+    assert_eq!(
+        expanded.inventory.entries[1].provenance.scope,
+        expanded.inventory.entries[3].provenance.scope
+    );
+}
+
+#[test]
+fn nested_form_entries_carry_outer_and_inner_invocation_chains() {
+    let page = page_with_xobjects_object("/A 4 0 R", 6);
+    let form_a = form_xobject(4, "/B 5 0 R", b"0 0 0 1 k\n0 0 10 10 re\nf\n/B Do");
+    let form_b = form_xobject(5, "", b"1 0 0 rg\n0 0 50 50 re\nf");
+    let page_content = stream_object(6, "", b"/A Do");
+    let source = classic_pdf(&[CATALOG, PAGES, &page, &form_a, &form_b, &page_content]);
+
+    let expanded = expand_first_page_with_context(&source, FormWalkContext::bounded_default());
+
+    assert_eq!(expanded.inventory.entries.len(), 4);
+    assert_eq!(expanded.inventory.entries[0].provenance.invocation, None);
+    assert_eq!(
+        expanded.inventory.entries[1].provenance.invocation,
+        Some(invocation_path(&[(0, b"A")]))
+    );
+    assert_eq!(
+        expanded.inventory.entries[2].provenance.invocation,
+        Some(invocation_path(&[(0, b"A")]))
+    );
+    assert_eq!(
+        expanded.inventory.entries[3].provenance.invocation,
+        Some(invocation_path(&[(0, b"A"), (0, b"B")]))
+    );
+}
+
+#[test]
 fn form_cycle_a_b_a_terminates_with_cycle_skip() {
     let page = page_with_xobjects_object("/A 4 0 R", 6);
     let form_a = form_xobject(4, "/B 5 0 R", b"0 0 0 1 k\n0 0 10 10 re\nf\n/B Do");
@@ -378,6 +430,18 @@ fn form_cycle_a_b_a_terminates_with_cycle_skip() {
         SkippedFormInventoryReason::Cycle
     );
     assert_eq!(expanded.form_skipped[0].name, PdfName(b"A".to_vec()));
+}
+
+fn invocation_path(frames: &[(u32, &[u8])]) -> InvocationPath {
+    InvocationPath {
+        frames: frames
+            .iter()
+            .map(|(ordinal, name)| InvocationFrame {
+                ordinal: *ordinal,
+                name: PdfName((*name).to_vec()),
+            })
+            .collect(),
+    }
 }
 
 #[test]

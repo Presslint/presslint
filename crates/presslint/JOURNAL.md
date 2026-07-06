@@ -1,5 +1,12 @@
 # presslint Journal
 
+## T152 - Populate form invocation provenance
+
+- The machine-driven form expansion adapter now stamps form-expanded inventory
+  entries with the machine's `InvocationPath` at the same point it rebases
+  page-global sequence numbers. Page-level entries remain `None`; identity and
+  golden digest behavior are unchanged.
+
 ## T151 - Ablation: fold the resolver's cycle index into the active stack
 
 - Behaviour-preserving cleanup of `form_expansion_machine.rs`. The resolver held

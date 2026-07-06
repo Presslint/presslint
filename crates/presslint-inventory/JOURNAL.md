@@ -1,5 +1,11 @@
 # presslint-inventory Journal
 
+## T152 - Invocation provenance shape lock
+
+- Added a serde shape lock for an inventory entry whose provenance carries a
+  non-empty invocation path. Existing `None`-case JSON expectations stay
+  unchanged and exercise default deserialization for older shapes.
+
 ## T146 - Re-export paint mutation class
 
 - The inventory facade now re-exports `presslint_paint::MutationClass` alongside

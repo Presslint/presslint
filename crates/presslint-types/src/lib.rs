@@ -44,6 +44,15 @@ pub struct Provenance {
     pub scope: ContentScope,
     /// Byte range in the decoded content stream when available.
     pub range: Option<ByteRange>,
+    /// Ordered form-invocation path for the paint instance that produced this
+    /// object.
+    ///
+    /// `None` (or an empty path) means page-level content. `scope` remains the
+    /// lexical source scope of the innermost stream. This metadata is not part
+    /// of entry identity yet; a later identity-version change can fold it in
+    /// deliberately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation: Option<InvocationPath>,
 }
 
 /// Content scope where an inventory object was discovered.
@@ -81,8 +90,8 @@ pub struct InvocationFrame {
 /// Nested path from page-level content into form invocations.
 ///
 /// An empty path means page-level content. This is shared provenance vocabulary
-/// for future inventory contracts, but it is not yet referenced by
-/// [`Provenance`], so existing serialized structs keep their prior shape.
+/// for inventory contracts; [`Provenance`] carries it as optional metadata so
+/// page-level and older serialized structs keep their prior shape.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct InvocationPath {
     /// Ordered call frames from outermost to innermost form invocation.

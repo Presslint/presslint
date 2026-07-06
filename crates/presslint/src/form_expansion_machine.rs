@@ -459,6 +459,7 @@ impl MachineInventoryAdapter {
         }
         let mut entry = entry.clone();
         entry.id.sequence = self.next_sequence;
+        entry.provenance.invocation = Some(self.form_cursors[cursor_index].0.clone());
         self.next_sequence = self.next_sequence.saturating_add(1);
         self.entries.push(entry);
         self.form_cursors[cursor_index].1 += 1;

@@ -61,6 +61,7 @@ fn entry(
             page: PageIndex(page),
             scope: ContentScope::Page,
             range: None,
+            invocation: None,
         },
         bounds: None,
         colors,

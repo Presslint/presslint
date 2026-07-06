@@ -516,6 +516,7 @@ fn inventory_entry(
             // Explicit identity-only unwrap: `Provenance.range` is a public
             // bare-`ByteRange` contract; the paint op's range is decoded-based.
             range: Some(event.record_range.into_byte_range()),
+            invocation: None,
         },
         bounds: None,
         colors,

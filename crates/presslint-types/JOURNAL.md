@@ -1,5 +1,13 @@
 # presslint-types Journal
 
+## T152 - Optional invocation provenance
+
+- Added additive `Provenance::invocation: Option<InvocationPath>` metadata with
+  serde defaulting and `skip_serializing_if`, so page-level and older serialized
+  records keep their prior shape. `scope` remains the lexical source scope; the
+  invocation path records which form paint instance produced an entry and is not
+  part of entry identity yet.
+
 ## T148 - Invocation path vocabulary
 
 - Added additive public `InvocationFrame` and `InvocationPath` types for future

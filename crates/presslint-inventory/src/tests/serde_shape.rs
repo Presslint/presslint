@@ -2,7 +2,7 @@ use std::fmt;
 
 use presslint_types::{
     BoundingBox, ByteRange, ColorObservation, ColorSpace, ColorUsage, ContentScope, EditCapability,
-    ObjectId, ObjectKind, PageIndex, PdfName, Provenance,
+    InvocationFrame, InvocationPath, ObjectId, ObjectKind, PageIndex, PdfName, Provenance,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -32,6 +32,19 @@ fn inventory_has_stable_json_shape() -> Result<(), JsonError> {
     assert_json_round_trip(&inventory_fixture(), inventory_fixture_json())
 }
 
+#[test]
+fn inventory_entry_with_invocation_has_stable_json_shape() -> Result<(), JsonError> {
+    let mut entry = bounded_vector_entry();
+    entry.provenance.invocation = Some(InvocationPath {
+        frames: vec![InvocationFrame {
+            ordinal: 0,
+            name: PdfName(b"Fm".to_vec()),
+        }],
+    });
+
+    assert_json_round_trip(&entry, bounded_vector_entry_with_invocation_json())
+}
+
 fn inventory_fixture() -> Inventory {
     Inventory {
         entries: vec![
@@ -50,6 +63,7 @@ fn bounded_vector_entry() -> InventoryEntry {
             page: PageIndex(1),
             scope: ContentScope::Page,
             range: Some(ByteRange { start: 20, end: 31 }),
+            invocation: None,
         },
         bounds: Some(BoundingBox {
             x_min: 10.25,
@@ -81,6 +95,7 @@ fn sourced_text_entry() -> InventoryEntry {
                 name: PdfName(b"FmText".to_vec()),
             },
             range: Some(ByteRange { start: 40, end: 52 }),
+            invocation: None,
         },
         bounds: None,
         colors: vec![
@@ -114,6 +129,7 @@ fn read_only_form_entry() -> InventoryEntry {
             page: PageIndex(1),
             scope: ContentScope::AnnotationAppearance,
             range: Some(ByteRange { start: 60, end: 68 }),
+            invocation: None,
         },
         bounds: None,
         colors: Vec::new(),
@@ -155,6 +171,56 @@ fn bounded_vector_entry_json() -> Json {
                 ("page", Json::U32(1)),
                 ("scope", Json::object([("kind", Json::string("page"))])),
                 ("range", byte_range_json(20, 31)),
+            ]),
+        ),
+        (
+            "bounds",
+            Json::object([
+                ("x_min", Json::F64(10.25)),
+                ("y_min", Json::F64(20.5)),
+                ("x_max", Json::F64(110.75)),
+                ("y_max", Json::F64(220.125)),
+            ]),
+        ),
+        (
+            "colors",
+            Json::array([Json::object([
+                ("usage", Json::string("stroke")),
+                ("space", Json::string("device_cmyk")),
+                (
+                    "components",
+                    Json::array([
+                        Json::F64(0.1),
+                        Json::F64(0.2),
+                        Json::F64(0.3),
+                        Json::F64(0.4),
+                    ]),
+                ),
+                ("spot_name", Json::Null),
+                ("source", byte_range_json(3, 18)),
+            ])]),
+        ),
+        (
+            "capabilities",
+            Json::array([
+                Json::string("rewrite_color_operand"),
+                Json::string("adjust_stroke_width"),
+            ]),
+        ),
+    ])
+}
+
+fn bounded_vector_entry_with_invocation_json() -> Json {
+    Json::object([
+        ("id", object_id_json(1, 0)),
+        ("kind", Json::string("vector")),
+        (
+            "provenance",
+            Json::object([
+                ("page", Json::U32(1)),
+                ("scope", Json::object([("kind", Json::string("page"))])),
+                ("range", byte_range_json(20, 31)),
+                ("invocation", invocation_path_json(0, b"Fm")),
             ]),
         ),
         (
@@ -287,4 +353,14 @@ fn byte_range_json(start: u32, end: u32) -> Json {
 
 fn pdf_name_json(bytes: &[u8]) -> Json {
     Json::array(bytes.iter().copied().map(|byte| Json::U32(u32::from(byte))))
+}
+
+fn invocation_path_json(ordinal: u32, name: &[u8]) -> Json {
+    Json::object([(
+        "frames",
+        Json::array([Json::object([
+            ("ordinal", Json::U32(ordinal)),
+            ("name", pdf_name_json(name)),
+        ])]),
+    )])
 }

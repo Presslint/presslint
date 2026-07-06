@@ -453,6 +453,7 @@ fn inventory_entry(scope: ContentScope, colors: Vec<ColorObservation>) -> Invent
             page: PageIndex(0),
             scope,
             range: None,
+            invocation: None,
         },
         bounds: None,
         colors,

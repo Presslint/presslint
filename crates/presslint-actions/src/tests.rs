@@ -44,6 +44,7 @@ fn entry(
             page: PageIndex(0),
             scope: ContentScope::Page,
             range: None,
+            invocation: None,
         },
         bounds: None,
         colors: Vec::new(),
