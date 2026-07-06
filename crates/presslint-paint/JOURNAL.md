@@ -1,5 +1,41 @@
 # presslint-paint Journal
 
+## T149 - Exact depth-first flat projection (Phase 0b-3)
+
+- New `flat_projection.rs` adds `flat_call_events(root, resolver, sink)` plus the
+  borrowed `FlatPaintOp { path: &InvocationPath, op: &PaintOp }` stream item,
+  re-exported from the crate root. The driver composes `CallMachine::walk` (no
+  duplicated traversal) and re-presents its depth-first visitor stream as ONE
+  flat, fused, path-annotated stream in the umbrella's emission order: caller ops
+  in program order, and a `Descend`-resolved form call's callee ops delivered
+  immediately after that invocation op (recursively, depth-first) before the
+  caller's next op; a `Skip`/refused descent yields no callee ops; every `Ok`
+  item carries its `InvocationPath` (empty for root ops).
+- Streaming and allocation-light by construction: items are handed to the sink as
+  they are visited (no materialized `Vec`), and the invocation path is yielded by
+  reference — no per-op deep path clone. The interleaving is a pure function of
+  `(root, resolver decisions)` with no hash-map iteration order.
+- Error/fuse semantics mirror `PaintOps`: a walk error in any program (root or
+  callee) or a resolver error is delivered as the FINAL sink call wrapped in
+  `Err`, after which nothing more is delivered; there is no resumption in the
+  caller after a callee error, matching the umbrella's short-circuit on a
+  decode/walk failure inside a form expansion.
+- SEQUENCE NUMBERS ARE OUT OF SCOPE and the module doc says so: this slice
+  reproduces POSITIONAL order only. Today's umbrella gives page entries their
+  walk-local sequence and seeds expanded (form) entries a continuation at
+  `page_inventory.len()` in splice order, so positional order and sequence
+  numbering diverge by design; sequence assignment stays an inventory/adapter
+  concern in the umbrella (pinned by its form-expanded goldens) until a later
+  slice.
+- Five synthetic tests (colocated in `flat_projection.rs`, reusing the shared
+  `tests.rs` program builders): order equivalence over two call sites with a
+  nested descent, skip yields no callee ops while the caller continues, double
+  invocation of one form yields the callee twice under paths `[(0,F)]`/`[(1,F)]`,
+  a callee walk error fuses the stream (the post-descent caller op does not
+  stream), and a no-form root degenerates element-by-element to the plain
+  `PaintProgram` op stream. No consumer changed: inventory and the umbrella
+  compile and pass untouched.
+
 ## T148 - Call/return traversal substrate (Phase 0b-2)
 
 - Added `call_machine.rs` with the pure borrowed call/return contract:

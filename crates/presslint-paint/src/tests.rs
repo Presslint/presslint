@@ -24,7 +24,7 @@ use crate::{
 };
 
 /// Tokenize + assemble a content stream into owned operator records for testing.
-fn assemble(input: &[u8]) -> Result<Vec<OperatorRecord>, String> {
+pub fn assemble(input: &[u8]) -> Result<Vec<OperatorRecord>, String> {
     let tokens = tokenize(input).map_err(|error| format!("{error:?}"))?;
     let assembled = assemble_operators(&tokens).map_err(|error| format!("{error:?}"))?;
     Ok(assembled.records)
@@ -36,11 +36,11 @@ fn raw_ops(program: PaintProgram<'_>) -> Vec<Result<PaintOp, GraphicsWalkError>>
     program.into_iter().collect()
 }
 
-fn name(value: &[u8]) -> PdfName {
+pub fn name(value: &[u8]) -> PdfName {
     PdfName(value.to_vec())
 }
 
-fn page_program<'a>(
+pub fn page_program<'a>(
     source: &'a [u8],
     records: &'a [OperatorRecord],
     images: &'a [PdfName],
@@ -56,7 +56,7 @@ fn page_program<'a>(
     }
 }
 
-fn form_program<'a>(
+pub fn form_program<'a>(
     source: &'a [u8],
     records: &'a [OperatorRecord],
     images: &'a [PdfName],

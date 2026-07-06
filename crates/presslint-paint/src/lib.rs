@@ -11,6 +11,7 @@
 
 mod call_machine;
 mod color_space_env;
+mod flat_projection;
 mod mutation_class;
 mod operands;
 mod paint_program;
@@ -24,6 +25,7 @@ pub use call_machine::{
     CallEvent, CallMachine, CallSite, FormResolver, PaintSubProgram, ResolveForm,
 };
 pub use color_space_env::{ColorSpaceEnv, ColorSpaceResource};
+pub use flat_projection::{FlatPaintOp, flat_call_events};
 pub use mutation_class::MutationClass;
 pub use paint_program::{PaintOps, PaintProgram};
 pub use provenance::{DecodedRange, SourceRange};
