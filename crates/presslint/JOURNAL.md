@@ -1,5 +1,43 @@
 # presslint Journal
 
+## T147 - Form-Expanded Inventory Golden Oracle (Phase 0b-1)
+
+- New tests-only module `src/tests/form_inventory_golden.rs`: a golden lock for
+  the form-expanded inventory path (`build_page_inventory_with_forms`) ahead of
+  upcoming internal refactors that will migrate the manual `FormExpansion`
+  recursion onto a paint-side call/return machine. Mirroring the
+  `presslint-inventory` bit-identity lock, each fixture pins as inline consts
+  the full ordered entry identity — `id.sequence` AND `id.digest` per entry —
+  plus the kind vector, the `provenance.scope` vector, and the ordered
+  `(name, reason)` skip list; comparisons are plain Rust values, no new
+  dependency.
+- Six fixtures over the existing synthetic classic-xref builders: (1) one form
+  invoked TWICE by the page — pins today's flat-model fact that expansion
+  rebases `id.sequence` onto the page-global space but never recomputes
+  `id.digest` (computed in the form's own walk from its form-local sequence),
+  so double invocations share IDENTICAL digests under DIFFERENT sequences; a
+  future, deliberate invocation-identity change must move this golden visibly;
+  (2) nested form — pins depth-first emission (callee entries immediately after
+  their invocation entry, one monotonic sequence space seeded at the page
+  inventory length) and the collapsed innermost-name scope; (3) self-referential
+  form — pins the `Cycle` skip with no entries from the refused descent;
+  (4) depth chain under `FormWalkContext::new(2)` — pins the `MaxDepth` skip;
+  (5) shared form under `with_budget(8, 3)` — pins the `BudgetExhausted` skip
+  and the exact interleaving `[page inv, A inv, C vector, page inv, B inv]`
+  with sequences `[0, 2, 3, 1, 4]`; (6) image/form name conflict — pins that
+  image classification wins, the invocation is an Image entry, and no form
+  expansion or skip happens.
+- Zero production changes: the only non-golden edits are in
+  `src/tests/form_inventory.rs` — `pub(super)` visibility on existing fixture
+  helpers (`classic_pdf`, `stream_object`, object-builder helpers,
+  `expand_first_page_with_context`) so the golden module reuses known-good
+  fixtures instead of duplicating them, plus a shared
+  `expand_first_page_with_extra_images` variant (an appended image-name list)
+  so the name-conflict golden reuses the one pipeline definition instead of
+  duplicating it — plus registering the module in `src/tests.rs`.
+- No hot-path interaction: fixtures are hundreds-of-bytes synthetic PDFs and
+  the golden comparison is O(entries); no benchmark required.
+
 ## T138 - Form-Scope Resource Colour-Space Tracking Wiring (F4-6 slice 1b)
 
 - `FormExpansion::expand` now inspects each target form's OWN

@@ -17,7 +17,7 @@ use crate::{
 const MAX: usize = 4096;
 
 /// Build a classic-xref PDF from object bodies numbered `1..=objects.len()`.
-fn classic_pdf(objects: &[&[u8]]) -> Vec<u8> {
+pub(super) fn classic_pdf(objects: &[&[u8]]) -> Vec<u8> {
     let mut source = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::with_capacity(objects.len());
     for object in objects {
@@ -42,7 +42,7 @@ fn classic_pdf(objects: &[&[u8]]) -> Vec<u8> {
 }
 
 /// Build one `N 0 obj` stream object whose `/Length` matches `data` exactly.
-fn stream_object(number: u32, dict_extra: &str, data: &[u8]) -> Vec<u8> {
+pub(super) fn stream_object(number: u32, dict_extra: &str, data: &[u8]) -> Vec<u8> {
     let mut object = format!(
         "{number} 0 obj\n<< /Length {}{} >>\nstream\n",
         data.len(),
@@ -54,18 +54,18 @@ fn stream_object(number: u32, dict_extra: &str, data: &[u8]) -> Vec<u8> {
     object
 }
 
-const CATALOG: &[u8] = b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
-const PAGES: &[u8] = b"2 0 obj\n<< /Type /Pages /Kids [ 3 0 R ] /Count 1 >>\nendobj\n";
-const PAGE_WITH_FORM: &[u8] = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Fm 4 0 R >> >> /Contents 5 0 R >>\nendobj\n";
+pub(super) const CATALOG: &[u8] = b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+pub(super) const PAGES: &[u8] = b"2 0 obj\n<< /Type /Pages /Kids [ 3 0 R ] /Count 1 >>\nendobj\n";
+pub(super) const PAGE_WITH_FORM: &[u8] = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Fm 4 0 R >> >> /Contents 5 0 R >>\nendobj\n";
 
-fn page_with_xobjects_object(xobjects: &str, contents: u32) -> Vec<u8> {
+pub(super) fn page_with_xobjects_object(xobjects: &str, contents: u32) -> Vec<u8> {
     format!(
         "3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /XObject << {xobjects} >> >> /Contents {contents} 0 R >>\nendobj\n"
     )
     .into_bytes()
 }
 
-fn form_xobject(number: u32, xobjects: &str, content: &[u8]) -> Vec<u8> {
+pub(super) fn form_xobject(number: u32, xobjects: &str, content: &[u8]) -> Vec<u8> {
     let resources = if xobjects.is_empty() {
         String::new()
     } else {
@@ -97,9 +97,20 @@ fn expand_first_page(source: &[u8]) -> FormExpandedInventory {
     expand_first_page_with_context(source, FormWalkContext::one_level())
 }
 
-fn expand_first_page_with_context(
+pub(super) fn expand_first_page_with_context(
     source: &[u8],
     context: FormWalkContext,
+) -> FormExpandedInventory {
+    expand_first_page_with_extra_images(source, context, &[])
+}
+
+/// Same pipeline, with `extra_image_names` appended to the page's image-name
+/// list — lets a test force an image/form name conflict that a single
+/// `/XObject` dictionary cannot produce naturally.
+pub(super) fn expand_first_page_with_extra_images(
+    source: &[u8],
+    context: FormWalkContext,
+    extra_image_names: &[PdfName],
 ) -> FormExpandedInventory {
     let access = inspect_document_access(source).expect("document access");
     let lookup = match &access.backend {
@@ -119,7 +130,8 @@ fn expand_first_page_with_context(
         .expect("page xobject resources");
     let page = &extents.pages[0];
     let page_resources = &resources.pages[0];
-    let image_names = inventory_names(&page_resources.image_xobject_names);
+    let mut image_names = inventory_names(&page_resources.image_xobject_names);
+    image_names.extend_from_slice(extra_image_names);
     let form_names = inventory_names(&page_resources.form_xobject_names);
     build_page_inventory_with_forms(
         source,
