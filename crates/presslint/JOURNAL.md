@@ -1,5 +1,20 @@
 # presslint Journal
 
+## T164 - Default colour-space audit findings
+
+- Added additive `ColorUsageAudit.default_color_space_findings` with serde
+  `default` and `skip_serializing_if = "Vec::is_empty"`. Empty reports keep the
+  old JSON shape; old JSON deserializes with an empty vector.
+- Added `DefaultColorSpaceFinding` and `DefaultColorSpaceFindingSource` at the
+  umbrella crate root. Findings report page-scope `/DefaultGray`,
+  `/DefaultRGB`, and `/DefaultCMYK` declarations only when the replacement is
+  non-trivial and the same page has matching `Device*` colour observations.
+- Malformed present default entries now surface as
+  `CoverageGapKind::DefaultColorSpaceSkipped`; pass-level inspection failure
+  surfaces as `DefaultColorSpaceInspectionError`. The audit does not apply
+  defaults to `ColorObservation.space`, run ICC/profile parsing, or mutate PDF
+  bytes.
+
 ## T163 - OutputIntent eligibility audit/report
 
 - Added `OutputIntentEligibility` plus umbrella helpers

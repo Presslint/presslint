@@ -5,9 +5,11 @@
 //! and reports what the engine observed: deterministic document-level and
 //! per-page counts by [`ColorSpace`], [`ColorUsage`], and [`ObjectKind`],
 //! deduplicated spot-colorant names, explicit `DeviceRGB` findings, per-page
-//! declared graphics-state findings from the classified page `/ExtGState`
-//! resources (see `graphics_state_findings`), and a list of coverage gaps where
-//! the current engine could not fully classify color or graphics state.
+//! declared default colour-space findings from classified page `/ColorSpace`
+//! defaults, per-page declared graphics-state findings from the classified page
+//! `/ExtGState` resources (see `graphics_state_findings`), and a list of
+//! coverage gaps where the current engine could not fully classify color or
+//! graphics state.
 //!
 //! This is CHK2: a descriptive audit, not a print-safety verdict. It does NOT
 //! compute ink limits / TAC, does NOT run ICC transforms, resolve alternate
@@ -34,6 +36,9 @@ use presslint_types::{ColorObservation, ColorSpace, ColorUsage, ObjectId, Object
 use serde::{Deserialize, Serialize};
 
 use crate::color_environment::{OutputIntentEligibility, evaluate_pdf_output_intent_eligibility};
+use crate::default_color_space_findings::{
+    DefaultColorSpaceFinding, DefaultColorSpaceScan, scan_document_default_color_spaces,
+};
 use crate::graphics_state_findings::{
     GraphicsStateFinding, GraphicsStateScan, scan_document_graphics_state,
 };
@@ -166,6 +171,14 @@ pub enum CoverageGapKind {
     /// begin, so whether any page declares overprint/transparency-relevant
     /// graphics state is unknown.
     ExtGStateResourceInspectionError,
+    /// The document-level page default colour-space inspection could not begin,
+    /// so whether any page declares `/DefaultGray`, `/DefaultRGB`, or
+    /// `/DefaultCMYK` is unknown.
+    DefaultColorSpaceInspectionError,
+    /// A present page-scope default colour-space entry could not be classified,
+    /// so the audit cannot report whether that default is a non-trivial
+    /// replacement.
+    DefaultColorSpaceSkipped,
     /// A page `/ExtGState` resource was skipped in a way the graphics-state
     /// finding derivation cannot see (a duplicate or non-dictionary
     /// `/ExtGState`, an unscannable dictionary, a `/Resources` resolution
@@ -239,6 +252,16 @@ pub struct ColorUsageAudit {
     /// reports, so existing audit JSON shapes are unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub graphics_state_findings: Vec<GraphicsStateFinding>,
+    /// Page-scope declared default colour-space findings in document page
+    /// order, then `/DefaultGray`, `/DefaultRGB`, `/DefaultCMYK` key order.
+    ///
+    /// These report that direct device-family colour observations on a page may
+    /// be governed by a declared default colour-space environment. They do not
+    /// alter `ColorObservation.space`, run colour conversion, or retain ICC
+    /// profile bytes. The field is additive: an empty vec is omitted from
+    /// serialization and absent in older reports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_color_space_findings: Vec<DefaultColorSpaceFinding>,
     /// Optional report-only output-intent eligibility result.
     ///
     /// This is populated only when a caller supplies an explicit
@@ -285,12 +308,20 @@ pub fn audit_color_usage(
     max_decoded_stream_bytes: usize,
 ) -> Result<ColorUsageAudit, PdfInventoryError> {
     let inventory = build_pdf_inventory(input, max_decoded_stream_bytes)?;
-    // Graphics-state findings need document access the owned inventory does not
+    // Resource findings need document access the owned inventory does not
     // carry, so they are derived here in the outer composing function (the same
-    // dictionary-only inspection the bridges already ran) and folded into the
-    // pure build. `build_color_usage_audit` itself stays pure over its input.
+    // dictionary-only inspection family the bridges already run) and folded
+    // into the pure build. `build_color_usage_audit` itself stays pure over its
+    // input.
+    let scan = scan_inventory(&inventory);
     let graphics_state = scan_document_graphics_state(input);
-    Ok(build_audit(inventory, graphics_state))
+    let default_color_spaces = scan_document_default_color_spaces(input, &scan);
+    Ok(build_audit(
+        inventory,
+        scan,
+        graphics_state,
+        default_color_spaces,
+    ))
 }
 
 /// Run color-usage audit and attach output-intent eligibility for `policy`.
@@ -331,7 +362,13 @@ pub fn audit_color_usage_with_output_intent_policy(
 #[cfg(test)]
 #[must_use]
 pub fn build_color_usage_audit(inventory: PdfInventory) -> ColorUsageAudit {
-    build_audit(inventory, GraphicsStateScan::default())
+    let scan = scan_inventory(&inventory);
+    build_audit(
+        inventory,
+        scan,
+        GraphicsStateScan::default(),
+        DefaultColorSpaceScan::default(),
+    )
 }
 
 /// Fold the inventory scan and the graphics-state pass into one report.
@@ -339,9 +376,14 @@ pub fn build_color_usage_audit(inventory: PdfInventory) -> ColorUsageAudit {
 /// `ExtGState` coverage gaps append after the inventory-scan gaps (they are
 /// produced by a separate document pass), and the status verdict is computed
 /// over the combined gap list.
-fn build_audit(inventory: PdfInventory, graphics_state: GraphicsStateScan) -> ColorUsageAudit {
-    let scan = scan_inventory(&inventory);
+fn build_audit(
+    inventory: PdfInventory,
+    scan: Scan,
+    graphics_state: GraphicsStateScan,
+    default_color_spaces: DefaultColorSpaceScan,
+) -> ColorUsageAudit {
     let mut coverage_gaps = scan.coverage_gaps;
+    coverage_gaps.extend(default_color_spaces.coverage_gaps);
     coverage_gaps.extend(graphics_state.coverage_gaps);
     let status = if coverage_gaps.is_empty() {
         ColorAuditStatus::Complete
@@ -355,6 +397,7 @@ fn build_audit(inventory: PdfInventory, graphics_state: GraphicsStateScan) -> Co
         spot_names: scan.spot_names.into_iter().collect(),
         rgb_findings: scan.rgb_findings,
         graphics_state_findings: graphics_state.findings,
+        default_color_space_findings: default_color_spaces.findings,
         output_intent_eligibility: None,
         coverage_gaps,
         inventory,
@@ -362,12 +405,45 @@ fn build_audit(inventory: PdfInventory, graphics_state: GraphicsStateScan) -> Co
 }
 
 /// Intermediate scan output, before the owned inventory is folded back in.
-struct Scan {
+pub struct Scan {
     document: SummaryAccumulator,
     pages: Vec<PageColorUsage>,
     spot_names: BTreeSet<presslint_types::PdfName>,
     rgb_findings: Vec<RgbFinding>,
     coverage_gaps: Vec<CoverageGap>,
+}
+
+impl Scan {
+    pub fn has_device_observations(&self) -> bool {
+        self.pages.iter().any(|usage| {
+            usage
+                .summary
+                .color_space_counts
+                .iter()
+                .any(|count| is_device_space(&count.color_space) && count.count > 0)
+        })
+    }
+
+    pub fn count_page_observations(&self, page: PageIndex, space: &ColorSpace) -> usize {
+        self.pages
+            .iter()
+            .find(|usage| usage.page == page)
+            .and_then(|usage| {
+                usage
+                    .summary
+                    .color_space_counts
+                    .iter()
+                    .find(|count| &count.color_space == space)
+            })
+            .map_or(0, |count| count.count)
+    }
+}
+
+const fn is_device_space(space: &ColorSpace) -> bool {
+    matches!(
+        space,
+        ColorSpace::DeviceGray | ColorSpace::DeviceRgb | ColorSpace::DeviceCmyk
+    )
 }
 
 /// Scan pages and entries in lockstep, matching the `preflight.rs` cursor
@@ -404,7 +480,7 @@ fn scan_inventory(inventory: &PdfInventory) -> Scan {
         // that simply declares no `/Resources` or no `/ColorSpace` dictionary
         // has no colour to miss and is not a gap.
         for skip in &page.color_space_resource_skipped {
-            if is_unclassified_color_space_skip(&skip.reason) {
+            if is_unclassified_color_space_skip(skip) {
                 coverage_gaps.push(page_gap(
                     CoverageGapKind::ColorSpaceResourceSkipped,
                     page.page_index,
@@ -613,12 +689,13 @@ const fn is_unclassified_resource_skip(
 /// resources to classify. Every other skip concerns a colour space that is
 /// present but could not be resolved or is deferred to a later slice, which does
 /// hide colour.
-const fn is_unclassified_color_space_skip(
-    reason: &presslint_pdf::SkippedColorSpaceResourceReason,
-) -> bool {
+fn is_unclassified_color_space_skip(skip: &presslint_pdf::SkippedColorSpaceResource) -> bool {
     use presslint_pdf::SkippedColorSpaceResourceReason as Reason;
     use presslint_pdf::SkippedPageXObjectResourceReason as ResourcesReason;
-    match reason {
+    if is_default_color_space_resource_name(skip.resource_name.as_ref()) {
+        return false;
+    }
+    match &skip.reason {
         Reason::MissingColorSpaceResources | Reason::MissingColorSpace => false,
         Reason::Resources { resources_reason } => !matches!(
             resources_reason,
@@ -626,6 +703,13 @@ const fn is_unclassified_color_space_skip(
         ),
         _ => true,
     }
+}
+
+fn is_default_color_space_resource_name(name: Option<&presslint_pdf::PdfName>) -> bool {
+    matches!(
+        name.map(|name| name.0.as_slice()),
+        Some(b"DefaultGray" | b"DefaultRGB" | b"DefaultCMYK")
+    )
 }
 
 /// Build a page-anchored coverage gap with no object detail.

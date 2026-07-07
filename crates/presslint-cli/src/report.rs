@@ -186,7 +186,8 @@ pub fn render_convert_human(
     render_warnings(out, warnings)
 }
 
-fn render_audit_human(
+/// Render the human audit report to an arbitrary writer.
+pub fn render_audit_human(
     out: &mut dyn Write,
     audit: &ColorUsageAudit,
     max_decoded_stream_bytes: usize,
@@ -202,6 +203,12 @@ fn render_audit_human(
     writeln!(out, "  status: {:?}", audit.status).map_err(stderr_error)?;
     writeln!(out, "  pages: {}", audit.pages.len()).map_err(stderr_error)?;
     writeln!(out, "  rgb findings: {}", audit.rgb_findings.len()).map_err(stderr_error)?;
+    writeln!(
+        out,
+        "  default color-space findings: {}",
+        audit.default_color_space_findings.len()
+    )
+    .map_err(stderr_error)?;
     writeln!(out, "  spot names: {}", audit.spot_names.len()).map_err(stderr_error)?;
     writeln!(out, "  coverage gaps: {}", audit.coverage_gaps.len()).map_err(stderr_error)?;
     render_warnings(out, warnings)

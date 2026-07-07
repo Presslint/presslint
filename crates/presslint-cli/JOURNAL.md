@@ -1,5 +1,12 @@
 # presslint-cli Journal
 
+## T164: audit report default colour-space count
+
+- Human `presslint audit` output now includes the
+  `default color-space findings` count from `ColorUsageAudit`.
+- JSON output remains the wrapped library report; the library field is omitted
+  when empty and present only when the audit emits findings.
+
 ## T132: thin convert and audit CLI
 
 - Added the `presslint` binary with two commands:

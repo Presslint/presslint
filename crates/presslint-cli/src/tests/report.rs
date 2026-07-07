@@ -9,7 +9,7 @@ use presslint_write::{
 };
 use serde_json::Value;
 
-use crate::report::{RunReport, convert_warnings, render_convert_human};
+use crate::report::{RunReport, convert_warnings, render_audit_human, render_convert_human};
 
 #[test]
 fn convert_report_warns_on_zero_conversion_and_skips() {
@@ -129,6 +129,17 @@ fn json_audit_report_wraps_library_output_and_reports_decode_cap() {
     assert!(result["library_output"].get("inventory").is_some());
 }
 
+#[test]
+fn human_audit_report_surfaces_default_color_space_count() {
+    let audit = synthetic_audit();
+    let mut rendered = Vec::new();
+
+    render_audit_human(&mut rendered, &audit, 512 * 1024 * 1024, &[]).unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+
+    assert!(rendered.contains("default color-space findings: 0"));
+}
+
 fn synthetic_audit() -> ColorUsageAudit {
     ColorUsageAudit {
         status: ColorAuditStatus::Complete,
@@ -140,6 +151,7 @@ fn synthetic_audit() -> ColorUsageAudit {
         spot_names: Vec::new(),
         rgb_findings: Vec::new(),
         graphics_state_findings: Vec::new(),
+        default_color_space_findings: Vec::new(),
         output_intent_eligibility: None,
         coverage_gaps: Vec::new(),
         inventory: PdfInventory {

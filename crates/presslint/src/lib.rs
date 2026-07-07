@@ -16,6 +16,7 @@
 
 mod color_audit;
 mod color_environment;
+mod default_color_space_findings;
 mod document_inventory;
 mod form_expansion_machine;
 mod form_inventory;
@@ -36,6 +37,7 @@ pub use color_environment::{
     OutputIntentEligibility, evaluate_pdf_output_intent_eligibility,
     observed_output_intents_from_pdf, resolve_output_intent_eligibility,
 };
+pub use default_color_space_findings::{DefaultColorSpaceFinding, DefaultColorSpaceFindingSource};
 pub use document_inventory::{
     ClassicPdfInventory, ClassicPdfInventoryError, ClassicPdfInventoryPage,
     ClassicPdfInventoryPageResult, ClassicPdfInventoryRejection, ClassicPdfInventorySkip,
