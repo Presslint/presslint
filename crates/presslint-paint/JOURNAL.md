@@ -1,5 +1,16 @@
 # presslint-paint Journal
 
+## T162 - Preserve full spot colorant lists
+
+- `GraphicsColor` now carries additive `spot_names: Vec<PdfName>` alongside the
+  legacy first `spot_name`. Resource color selection copies the complete
+  `ColorSpaceResource::spot_names` list for `Separation`/`DeviceN`; direct
+  device colors and unresolved resource names keep an empty list and unchanged
+  JSON.
+- `GraphicsColor::observation` forwards both fields so inventory observations
+  retain all DeviceN colorants without evaluating tint transforms or alternate
+  spaces.
+
 ## T156 - ExtGState env + snapshot classification (Phase 1-2)
 
 - New `extgstate_env.rs`: per-parameter classification `GsParam<T>` (`Default` /

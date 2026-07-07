@@ -1,5 +1,13 @@
 # presslint Journal
 
+## T162 - Audit full DeviceN colorant names
+
+- `ColorUsageAudit.spot_names` now collects every name in a `Separation` or
+  `DeviceN` observation's additive `spot_names` list, falling back to legacy
+  `spot_name` when the list is empty for old/deserialized observations.
+- The public audit surface is unchanged: `spot_names` remains one
+  deduplicated, raw-byte-sorted `Vec<PdfName>`.
+
 ## T161a - OutputIntent Observation Bridge
 
 - Added `observed_output_intents_from_pdf`, the umbrella-only bridge from

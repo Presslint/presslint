@@ -34,7 +34,7 @@ pub struct ColorSpaceResource {
 }
 
 impl ColorSpaceResource {
-    /// The colorant name reported for `Separation`/`DeviceN` observations.
+    /// The legacy first colorant name reported for `Separation`/`DeviceN`.
     ///
     /// `Separation` has exactly one colorant; `DeviceN` may have several and the
     /// first is reported (a single-name field cannot carry them all). Other
@@ -44,6 +44,15 @@ impl ColorSpaceResource {
         match self.space {
             ColorSpace::Separation | ColorSpace::DeviceN => self.spot_names.first().cloned(),
             _ => None,
+        }
+    }
+
+    /// The complete colorant list reported for `Separation`/`DeviceN`.
+    #[must_use]
+    pub fn spot_names(&self) -> Vec<PdfName> {
+        match self.space {
+            ColorSpace::Separation | ColorSpace::DeviceN => self.spot_names.clone(),
+            _ => Vec::new(),
         }
     }
 

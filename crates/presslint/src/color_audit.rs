@@ -450,25 +450,31 @@ fn scan_entry(
     for observation in &entry.colors {
         page_summary.add_observation(observation);
         document.add_observation(observation);
-        collect_spot_name(observation, spot_names);
+        collect_spot_names(observation, spot_names);
         classify_observation(entry_index, entry, observation, rgb_findings, coverage_gaps);
     }
 }
 
-/// Collect a spot-colorant name conservatively: only when the observation space
-/// is `Separation` or `DeviceN` and a name is present. The `BTreeSet` both
+/// Collect spot-colorant names conservatively: only when the observation space
+/// is `Separation` or `DeviceN` and names are present. The `BTreeSet` both
 /// deduplicates and orders by raw `PdfName` bytes.
-fn collect_spot_name(
+fn collect_spot_names(
     observation: &ColorObservation,
     spot_names: &mut BTreeSet<presslint_types::PdfName>,
 ) {
-    if matches!(
+    if !matches!(
         observation.space,
         ColorSpace::Separation | ColorSpace::DeviceN
     ) {
+        return;
+    }
+
+    if observation.spot_names.is_empty() {
         if let Some(name) = &observation.spot_name {
             spot_names.insert(name.clone());
         }
+    } else {
+        spot_names.extend(observation.spot_names.iter().cloned());
     }
 }
 

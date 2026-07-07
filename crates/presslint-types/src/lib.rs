@@ -179,8 +179,11 @@ pub struct ColorObservation {
     pub space: ColorSpace,
     /// Components in source-space order.
     pub components: Vec<f64>,
-    /// Spot colorant name for `Separation` / `DeviceN` observations.
+    /// Legacy first spot colorant name for `Separation` / `DeviceN` observations.
     pub spot_name: Option<PdfName>,
+    /// Complete spot colorant names for `Separation` / `DeviceN` observations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spot_names: Vec<PdfName>,
     /// Byte range of the content-stream operator that established this color.
     ///
     /// `Some(range)` points at the color-setting operator's record (e.g. the

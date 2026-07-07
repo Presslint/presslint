@@ -1,5 +1,14 @@
 # presslint-types Journal
 
+## T162 - Additive multi-colorant observations
+
+- `ColorObservation` gains additive `spot_names: Vec<PdfName>` for complete
+  `Separation`/`DeviceN` colorant reporting. The legacy `spot_name` field stays
+  unchanged as the first colorant compatibility field.
+- `spot_names` uses serde `default` and `skip_serializing_if = "Vec::is_empty"`:
+  old observation JSON still deserializes and non-spot observations keep their
+  prior JSON shape.
+
 ## T153 - Declare ObjectId.digest identity (entry identity v3)
 
 - Documentation only, no shape change. `ObjectId.digest`'s doc comment now states

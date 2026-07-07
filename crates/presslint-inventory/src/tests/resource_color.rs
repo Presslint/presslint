@@ -73,6 +73,7 @@ fn icc_based_n4_scn_is_reported_as_icc_never_cmyk() -> Result<(), String> {
     assert_ne!(color.space, ColorSpace::DeviceCmyk);
     assert_eq!(color.components, vec![0.1, 0.2, 0.3, 0.4]);
     assert_eq!(color.spot_name, None);
+    assert!(color.spot_names.is_empty());
     assert!(color.source.is_some());
     Ok(())
 }
@@ -87,11 +88,12 @@ fn separation_scn_populates_spot_name() -> Result<(), String> {
     assert_eq!(color.space, ColorSpace::Separation);
     assert_eq!(color.components, vec![0.5]);
     assert_eq!(color.spot_name, Some(name(b"PANTONE")));
+    assert_eq!(color.spot_names, vec![name(b"PANTONE")]);
     Ok(())
 }
 
 #[test]
-fn device_n_scn_reports_first_colorant() -> Result<(), String> {
+fn device_n_scn_reports_all_colorants_and_legacy_first_colorant() -> Result<(), String> {
     let inventory = inventory_with_env(
         b"/CS2 cs 0.1 0.2 scn 0 0 1 1 re f",
         &[device_n(b"CS2", &[b"Cut", b"Varnish"])],
@@ -100,6 +102,26 @@ fn device_n_scn_reports_first_colorant() -> Result<(), String> {
     assert_eq!(color.space, ColorSpace::DeviceN);
     assert_eq!(color.components, vec![0.1, 0.2]);
     assert_eq!(color.spot_name, Some(name(b"Cut")));
+    assert_eq!(color.spot_names, vec![name(b"Cut"), name(b"Varnish")]);
+    Ok(())
+}
+
+#[test]
+fn device_n_second_colorant_does_not_change_identity_v3() -> Result<(), String> {
+    let first = inventory_with_env(
+        b"/CS2 cs 0.1 0.2 scn 0 0 1 1 re f",
+        &[device_n(b"CS2", &[b"Cut", b"Varnish"])],
+    )?;
+    let second = inventory_with_env(
+        b"/CS2 cs 0.1 0.2 scn 0 0 1 1 re f",
+        &[device_n(b"CS2", &[b"Cut", b"White"])],
+    )?;
+
+    assert_ne!(
+        first.entries[0].colors[0].spot_names,
+        second.entries[0].colors[0].spot_names
+    );
+    assert_eq!(first.entries[0].id.digest, second.entries[0].id.digest);
     Ok(())
 }
 
@@ -122,6 +144,7 @@ fn separation_initial_colour_is_full_tint() -> Result<(), String> {
     assert_eq!(color.space, ColorSpace::Separation);
     assert_eq!(color.components, vec![1.0]);
     assert_eq!(color.spot_name, Some(name(b"Spot")));
+    assert_eq!(color.spot_names, vec![name(b"Spot")]);
     Ok(())
 }
 

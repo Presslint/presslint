@@ -182,6 +182,7 @@ fn path_paint_event_carries_post_operator_snapshot_and_provenance() -> Result<()
             components: vec![0.25],
             resource_name: None,
             spot_name: None,
+            spot_names: Vec::new(),
             source: Some(DecodedRange::new(ByteRange { start: 0, end: 6 })),
         }
     );

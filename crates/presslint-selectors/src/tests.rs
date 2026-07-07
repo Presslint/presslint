@@ -437,6 +437,7 @@ fn color_observation_with(
         space,
         components,
         spot_name: None,
+        spot_names: Vec::new(),
         source: None,
     }
 }

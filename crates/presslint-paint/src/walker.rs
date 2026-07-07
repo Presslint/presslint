@@ -20,8 +20,9 @@ const IDENTITY_CTM: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 /// (`g`/`rg`/`k`) exactly as before AND colours set through resource colour
 /// spaces (`cs`/`CS` + `sc`/`scn`/`SC`/`SCN`). For a resource colour, `space` is
 /// the REAL source family (`IccBased`/`Separation`/`DeviceN`), never collapsed
-/// to a device space; `resource_name` is the `/CS…` selector and `spot_name` is
-/// the colorant for `Separation`/`DeviceN`.
+/// to a device space; `resource_name` is the `/CS…` selector, `spot_name` is
+/// the legacy first colorant, and `spot_names` is the complete colorant list
+/// for `Separation`/`DeviceN`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphicsColor {
     /// Source colour space observed by the operator stream.
@@ -33,8 +34,11 @@ pub struct GraphicsColor {
     /// `None` for direct device operators and the page-default colour;
     /// `Some(name)` once `cs`/`CS` selected a resource colour space.
     pub resource_name: Option<PdfName>,
-    /// Spot colorant name for `Separation`/`DeviceN` colours.
+    /// Legacy first spot colorant name for `Separation`/`DeviceN` colours.
     pub spot_name: Option<PdfName>,
+    /// Complete spot colorant names for `Separation`/`DeviceN` colours.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spot_names: Vec<PdfName>,
     /// Decoded-buffer record range of the operator that set this colour.
     ///
     /// `None` for the page-default/inherited colour; `Some(range)` once a
@@ -57,6 +61,7 @@ impl GraphicsColor {
             components,
             resource_name: None,
             spot_name: None,
+            spot_names: Vec::new(),
             source: None,
         }
     }
@@ -74,6 +79,7 @@ impl GraphicsColor {
             space: self.space.clone(),
             components: self.components.clone(),
             spot_name: self.spot_name.clone(),
+            spot_names: self.spot_names.clone(),
             source: self.source.map(DecodedRange::into_byte_range),
         }
     }
@@ -666,6 +672,7 @@ impl<'a> GraphicsStateWalker<'a> {
                 components: Vec::new(),
                 resource_name: Some(name.clone()),
                 spot_name: None,
+                spot_names: Vec::new(),
                 source: Some(DecodedRange::new(range)),
             },
             |resource| resource_initial_color(resource, name.clone(), range),
@@ -806,6 +813,7 @@ fn resource_initial_color(
         components: resource.initial_color(),
         resource_name: Some(name),
         spot_name: resource.spot_name(),
+        spot_names: resource.spot_names(),
         source: Some(DecodedRange::new(range)),
     }
 }

@@ -4,7 +4,7 @@ use presslint_types::{
     BoundingBox, ByteRange, ColorObservation, ColorSpace, ColorUsage, ContentScope, EditCapability,
     InvocationFrame, InvocationPath, ObjectId, ObjectKind, PageIndex, PdfName, Provenance,
 };
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::Inventory;
 use super::json::{Json, JsonError, JsonSerializer};
@@ -45,6 +45,100 @@ fn inventory_entry_with_invocation_has_stable_json_shape() -> Result<(), JsonErr
     assert_json_round_trip(&entry, bounded_vector_entry_with_invocation_json())
 }
 
+#[test]
+fn old_color_observation_json_without_spot_names_deserializes() -> Result<(), JsonError> {
+    let decoded = ColorObservation::deserialize(Json::object([
+        ("usage", Json::string("fill")),
+        ("space", Json::string("separation")),
+        ("components", Json::array([Json::F64(0.5)])),
+        ("spot_name", pdf_name_json(b"Spot")),
+        ("source", Json::Null),
+    ]))?;
+
+    assert_eq!(decoded.usage, ColorUsage::Fill);
+    assert_eq!(decoded.space, ColorSpace::Separation);
+    assert_eq!(decoded.components, vec![0.5]);
+    assert_eq!(decoded.spot_name, Some(PdfName(b"Spot".to_vec())));
+    assert!(decoded.spot_names.is_empty());
+    assert_eq!(decoded.source, None);
+    Ok(())
+}
+
+#[test]
+fn non_spot_color_observation_omits_spot_names() -> Result<(), JsonError> {
+    let observation = ColorObservation {
+        usage: ColorUsage::Image,
+        space: ColorSpace::DeviceCmyk,
+        components: vec![0.0, 0.0, 0.0, 1.0],
+        spot_name: None,
+        spot_names: Vec::new(),
+        source: None,
+    };
+
+    assert_json_round_trip(
+        &observation,
+        Json::object([
+            ("usage", Json::string("image")),
+            ("space", Json::string("device_cmyk")),
+            (
+                "components",
+                Json::array([
+                    Json::F64(0.0),
+                    Json::F64(0.0),
+                    Json::F64(0.0),
+                    Json::F64(1.0),
+                ]),
+            ),
+            ("spot_name", Json::Null),
+            ("source", Json::Null),
+        ]),
+    )
+}
+
+#[test]
+fn spot_color_observations_serialize_full_spot_names_when_present() -> Result<(), JsonError> {
+    assert_json_round_trip(
+        &ColorObservation {
+            usage: ColorUsage::Fill,
+            space: ColorSpace::Separation,
+            components: vec![0.5],
+            spot_name: Some(PdfName(b"Spot".to_vec())),
+            spot_names: vec![PdfName(b"Spot".to_vec())],
+            source: None,
+        },
+        Json::object([
+            ("usage", Json::string("fill")),
+            ("space", Json::string("separation")),
+            ("components", Json::array([Json::F64(0.5)])),
+            ("spot_name", pdf_name_json(b"Spot")),
+            ("spot_names", Json::array([pdf_name_json(b"Spot")])),
+            ("source", Json::Null),
+        ]),
+    )?;
+
+    assert_json_round_trip(
+        &ColorObservation {
+            usage: ColorUsage::Fill,
+            space: ColorSpace::DeviceN,
+            components: vec![0.2, 0.8],
+            spot_name: Some(PdfName(b"Cut".to_vec())),
+            spot_names: vec![PdfName(b"Cut".to_vec()), PdfName(b"Varnish".to_vec())],
+            source: None,
+        },
+        Json::object([
+            ("usage", Json::string("fill")),
+            ("space", Json::string("device_n")),
+            ("components", Json::array([Json::F64(0.2), Json::F64(0.8)])),
+            ("spot_name", pdf_name_json(b"Cut")),
+            (
+                "spot_names",
+                Json::array([pdf_name_json(b"Cut"), pdf_name_json(b"Varnish")]),
+            ),
+            ("source", Json::Null),
+        ]),
+    )
+}
+
 fn inventory_fixture() -> Inventory {
     Inventory {
         entries: vec![
@@ -76,6 +170,7 @@ fn bounded_vector_entry() -> InventoryEntry {
             space: ColorSpace::DeviceCmyk,
             components: vec![0.1, 0.2, 0.3, 0.4],
             spot_name: None,
+            spot_names: Vec::new(),
             source: Some(ByteRange { start: 3, end: 18 }),
         }],
         capabilities: vec![
@@ -104,6 +199,7 @@ fn sourced_text_entry() -> InventoryEntry {
                 space: ColorSpace::Resource(PdfName(b"BrandSpot".to_vec())),
                 components: vec![0.65],
                 spot_name: Some(PdfName(b"BrandSpot".to_vec())),
+                spot_names: Vec::new(),
                 source: Some(ByteRange { start: 32, end: 39 }),
             },
             ColorObservation {
@@ -111,6 +207,7 @@ fn sourced_text_entry() -> InventoryEntry {
                 space: ColorSpace::Lab,
                 components: vec![50.0, -2.5, 3.25],
                 spot_name: None,
+                spot_names: Vec::new(),
                 source: None,
             },
         ],

@@ -34,6 +34,7 @@ fn graphics_color_with_decoded_source_keeps_the_prior_json_shape()
         components: vec![0.0, 0.0, 0.0, 1.0],
         resource_name: None,
         spot_name: None,
+        spot_names: Vec::new(),
         source: Some(DecodedRange::new(ByteRange { start: 3, end: 18 })),
     };
 

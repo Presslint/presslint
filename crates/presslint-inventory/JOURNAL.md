@@ -1,5 +1,18 @@
 # presslint-inventory Journal
 
+## T162 - Multi-colorant observation propagation
+
+- Inventory observations now preserve full `Separation`/`DeviceN` colorant
+  lists from the paint resource environment while keeping `spot_name` as the
+  legacy first-name field. Synthesized image observations carry empty
+  `spot_names`.
+- Entry identity intentionally remains byte-compatible with identity v3:
+  digest inputs still include only legacy `spot_name`. A regression test pins
+  that changing a second DeviceN colorant changes the observation but not the
+  digest; including second+ colorants is left to a future identity-v4 decision.
+- Serde shape tests cover old JSON without `spot_names`, non-spot observations
+  omitting the field, and explicit Separation/DeviceN multi-name shapes.
+
 ## T153 - Entry identity v3: invocation-aware digests (versioned break)
 
 - VERSIONED IDENTITY BREAK. All four object-digest domain tags advance to

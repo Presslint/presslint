@@ -40,6 +40,7 @@ fn observation(usage: ColorUsage, space: ColorSpace) -> ColorObservation {
         space,
         components: Vec::new(),
         spot_name: None,
+        spot_names: Vec::new(),
         source: None,
     }
 }

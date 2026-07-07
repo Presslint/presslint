@@ -78,6 +78,7 @@ fn fill_color_with_source(space: ColorSpace, source: Option<ByteRange>) -> Color
         space,
         components: Vec::new(),
         spot_name: None,
+        spot_names: Vec::new(),
         source,
     }
 }

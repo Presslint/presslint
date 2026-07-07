@@ -199,6 +199,9 @@ impl StableDigest {
             }
             None => self.push_u8(0),
         }
+        // Compatibility: identity v3 deliberately ignores the additive
+        // `spot_names` list and continues to hash only legacy `spot_name`.
+        // Including second+ DeviceN colorants is a future identity-v4 choice.
         match color.source {
             Some(range) => {
                 self.push_u8(1);

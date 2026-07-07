@@ -41,6 +41,7 @@ fn observation(usage: ColorUsage, space: ColorSpace) -> ColorObservation {
         space,
         components: Vec::new(),
         spot_name: None,
+        spot_names: Vec::new(),
         source: None,
     }
 }
@@ -51,6 +52,18 @@ fn spot_observation(space: ColorSpace, name: &[u8]) -> ColorObservation {
         space,
         components: Vec::new(),
         spot_name: Some(PdfName(name.to_vec())),
+        spot_names: Vec::new(),
+        source: None,
+    }
+}
+
+fn multi_spot_observation(space: ColorSpace, names: &[&[u8]]) -> ColorObservation {
+    ColorObservation {
+        usage: ColorUsage::Fill,
+        space,
+        components: Vec::new(),
+        spot_name: names.first().map(|name| PdfName((*name).to_vec())),
+        spot_names: names.iter().map(|name| PdfName((*name).to_vec())).collect(),
         source: None,
     }
 }
@@ -318,7 +331,8 @@ fn per_page_and_document_counts_are_deterministic() {
 fn spot_names_are_deduplicated_and_sorted_by_raw_bytes() {
     // Separation/DeviceN observations contribute spot names; duplicates collapse
     // and the result is sorted by raw name bytes. A DeviceCMYK observation that
-    // (defensively) carries a stray spot name must be ignored.
+    // (defensively) carries a stray spot name must be ignored. Empty
+    // `spot_names` falls back to legacy `spot_name` for old observations.
     let inventory = synthetic_inventory(
         vec![
             entry(
@@ -335,7 +349,7 @@ fn spot_names_are_deduplicated_and_sorted_by_raw_bytes() {
                 1,
                 ObjectKind::Vector,
                 vec![
-                    spot_observation(ColorSpace::Separation, b"All"),
+                    multi_spot_observation(ColorSpace::DeviceN, &[b"Cut", b"Varnish", b"All"]),
                     spot_observation(ColorSpace::Separation, b"Cut"),
                     // Not Separation/DeviceN: this spot name must be dropped.
                     ColorObservation {
@@ -343,6 +357,7 @@ fn spot_names_are_deduplicated_and_sorted_by_raw_bytes() {
                         space: ColorSpace::DeviceCmyk,
                         components: Vec::new(),
                         spot_name: Some(PdfName(b"AAAA".to_vec())),
+                        spot_names: Vec::new(),
                         source: None,
                     },
                 ],
@@ -358,7 +373,10 @@ fn spot_names_are_deduplicated_and_sorted_by_raw_bytes() {
         .iter()
         .map(|name| name.0.as_slice())
         .collect();
-    assert_eq!(names, vec![&b"All"[..], b"Cut", b"Pantone 300 C"]);
+    assert_eq!(
+        names,
+        vec![&b"All"[..], b"Cut", b"Pantone 300 C", b"Varnish"]
+    );
 }
 
 #[test]
