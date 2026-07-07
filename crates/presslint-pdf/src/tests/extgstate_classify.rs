@@ -82,6 +82,22 @@ fn classifies_only_bm_multiply_and_leaves_other_params_unset() {
 }
 
 #[test]
+fn classifies_bm_compatible_as_normal_equivalent() {
+    let resource = classify_direct(b"<< /GS << /BM /Compatible >> >>");
+
+    assert_eq!(
+        resource.blend_mode,
+        ExtGStateParamClass::Set {
+            value: ExtGStateBlendMode::Normal {
+                raw_name: PdfName(b"Compatible".to_vec()),
+            },
+        }
+    );
+    assert!(!resource.is_transparency_active());
+    assert!(!resource.has_unresolved_or_unclassified_safety_param());
+}
+
+#[test]
 fn classifies_alpha_exact_one_as_opaque_and_other_numbers_non_opaque() {
     let opaque = classify_direct(b"<< /GS << /CA 1.0 >> >>");
     let non_opaque = classify_direct(b"<< /GS << /CA 0.5 >> >>");
@@ -134,4 +150,41 @@ fn extra_key_marks_unclassified_keys_but_keeps_safety_params() {
             },
         }
     );
+}
+
+#[test]
+fn safety_predicates_mark_active_overprint_without_defaulting_op() {
+    let resource = classify_direct(b"<< /GS << /OP true >> >>");
+
+    assert!(resource.is_overprint_active());
+    assert!(!resource.is_transparency_active());
+    assert!(!resource.has_unresolved_or_unclassified_safety_param());
+}
+
+#[test]
+fn safety_predicates_mark_non_normal_blend_as_transparency() {
+    let resource = classify_direct(b"<< /GS << /BM /Multiply >> >>");
+
+    assert!(!resource.is_overprint_active());
+    assert!(resource.is_transparency_active());
+    assert!(!resource.has_unresolved_or_unclassified_safety_param());
+}
+
+#[test]
+fn harmless_unclassified_keys_do_not_make_safety_unknown() {
+    let resource = classify_direct(b"<< /GS << /LW 2 /LC 1 >> >>");
+
+    assert!(resource.has_unclassified_keys);
+    assert!(!resource.is_overprint_active());
+    assert!(!resource.is_transparency_active());
+    assert!(!resource.has_unresolved_or_unclassified_safety_param());
+}
+
+#[test]
+fn malformed_or_unknown_safety_params_are_unclassified() {
+    let malformed = classify_direct(b"<< /GS << /OP /yes >> >>");
+    let unknown_blend = classify_direct(b"<< /GS << /BM [/Normal /Multiply] >> >>");
+
+    assert!(malformed.has_unresolved_or_unclassified_safety_param());
+    assert!(unknown_blend.has_unresolved_or_unclassified_safety_param());
 }

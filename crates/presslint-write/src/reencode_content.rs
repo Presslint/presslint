@@ -214,13 +214,13 @@ const fn map_skip_reason(reason: PipelineSkipReason) -> ReencodePageSkipReason {
         PipelineSkipReason::MultipleContentStreams { count } => {
             ReencodePageSkipReason::MultipleContentStreams { count }
         }
-        // `ExtGStatePresent` is UNREACHABLE here: the re-encode caller passes no
-        // preflight hook (its delegated no-op preflight never poisons a page), so
-        // the variant is never produced; the arm exists only for exhaustiveness and
-        // folds into `NoContentStream` for totality.
+        // ExtGState preflight variants are UNREACHABLE here: the re-encode caller
+        // passes no preflight hook, so these variants are never produced. The arm
+        // exists only for exhaustiveness and folds into `NoContentStream`.
         PipelineSkipReason::NoContentStream
         | PipelineSkipReason::Unchanged
-        | PipelineSkipReason::ExtGStatePresent => ReencodePageSkipReason::NoContentStream,
+        | PipelineSkipReason::ExtGStatePresent
+        | PipelineSkipReason::ExtGStateUnsafe { .. } => ReencodePageSkipReason::NoContentStream,
         PipelineSkipReason::CompressedContentObject {
             object_stream_number,
             index_within_object_stream,

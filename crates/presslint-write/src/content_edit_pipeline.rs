@@ -20,11 +20,14 @@ use presslint_actions::{
 use presslint_pdf::{
     ContentStreamDataExtentInspection, ContentStreamFilterClassification, DictionaryEntrySpan,
     DictionaryValueKind, DocumentAccessBackend, DocumentAccessError, DocumentAccessRejection,
-    DocumentPageContentExtentInspection, DocumentPageContentExtentResult, FlateDecodeParameters,
-    FlateDecodeParametersResolution, IndirectObjectEditDecision, IndirectObjectEditDisposition,
-    IndirectRef, ObjectLookup, classify_content_stream_filter, content_stream_data_slice,
-    decide_indirect_object_edit, decode_flate_stream, encode_flate_stream, inspect_document_access,
-    inspect_document_page_content_extents_with_lookup, inspect_indirect_object_dictionary,
+    DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
+    DocumentPageExtGStateResourcesInspection, DocumentPageExtGStateResourcesInspectionError,
+    FlateDecodeParameters, FlateDecodeParametersResolution, IndirectObjectEditDecision,
+    IndirectObjectEditDisposition, IndirectRef, ObjectLookup, PageExtGStateResourcesInspection,
+    classify_content_stream_filter, content_stream_data_slice, decide_indirect_object_edit,
+    decode_flate_stream, encode_flate_stream, inspect_document_access,
+    inspect_document_page_content_extents_with_lookup,
+    inspect_document_page_extgstate_resources_with_lookup, inspect_indirect_object_dictionary,
     resolve_flate_decode_parameters,
 };
 use presslint_syntax::{serialize_tokens_unmodified, tokenize};
@@ -120,7 +123,19 @@ pub enum PipelineSkipReason {
     /// A page-level preflight hook poisoned the WHOLE page: one or more of its
     /// decodable content streams contains a `gs` (`ExtGState` set) operator, so the
     /// page is left byte-verbatim (the interim overprint/transparency guard, T140).
+    #[allow(dead_code)]
     ExtGStatePresent,
+    /// A page-level preflight hook found active or unknowable `ExtGState` safety
+    /// parameters in `gs` resources used by the page content. Deprecated
+    /// `ExtGStatePresent` is retained for compatibility but the converter now
+    /// emits this precision reason.
+    ExtGStateUnsafe {
+        overprint: bool,
+        transparency: bool,
+        unresolved: bool,
+        unclassified: bool,
+        gs_count: u32,
+    },
     Unchanged,
 }
 
@@ -217,7 +232,9 @@ where
         input,
         pages,
         mode,
-        None::<&fn(PageIndex, &[Vec<u8>]) -> PagePreflight>,
+        None::<
+            &fn(PageIndex, Option<&PageExtGStateResourcesInspection>, &[Vec<u8>]) -> PagePreflight,
+        >,
         edit,
     )
 }
@@ -249,7 +266,7 @@ pub fn edit_page_content_incremental_indexed_with_preflight<P, F>(
     edit: F,
 ) -> Result<EditPageContentOutput, EditPageContentError>
 where
-    P: Fn(PageIndex, &[Vec<u8>]) -> PagePreflight,
+    P: Fn(PageIndex, Option<&PageExtGStateResourcesInspection>, &[Vec<u8>]) -> PagePreflight,
     F: Fn(PageIndex, &[u8]) -> EditedContent,
 {
     edit_page_content_incremental_indexed_inner(input, pages, mode, Some(&preflight), edit)
@@ -263,7 +280,7 @@ fn edit_page_content_incremental_indexed_inner<P, F>(
     edit: F,
 ) -> Result<EditPageContentOutput, EditPageContentError>
 where
-    P: Fn(PageIndex, &[Vec<u8>]) -> PagePreflight,
+    P: Fn(PageIndex, Option<&PageExtGStateResourcesInspection>, &[Vec<u8>]) -> PagePreflight,
     F: Fn(PageIndex, &[u8]) -> EditedContent,
 {
     let access = inspect_document_access(input).map_err(|error| EditPageContentError::Open {
@@ -281,10 +298,15 @@ where
             reason: DocumentAccessRejection::PageTreeLeaves { error: error.error },
         }),
     })?;
-
     let page_count = document.pages.len();
     let selected = select_indices(pages, page_count)?;
     let owners = content_object_owners(&document.pages);
+    let extgstate_document = inspect_extgstate_document_for_preflight(
+        input,
+        lookup,
+        access.page_tree_root.object_byte_offset,
+        preflight.is_some(),
+    );
 
     let mut edited = Vec::new();
     let mut skipped = Vec::new();
@@ -304,9 +326,21 @@ where
             }),
             PageStreamsPlan::Streams(outcomes) => {
                 if let Some(preflight) = &preflight {
-                    if let Some(skip) =
-                        run_page_preflight(input, page_index_of(page), &outcomes, *preflight)
-                    {
+                    let extgstate_page =
+                        match extgstate_page_for_preflight(&extgstate_document, index) {
+                            Ok(page) => page,
+                            Err(reason) => {
+                                skipped.push(whole_page_skip(page_index_of(page), reason));
+                                continue;
+                            }
+                        };
+                    if let Some(skip) = run_page_preflight(
+                        input,
+                        page_index_of(page),
+                        extgstate_page,
+                        &outcomes,
+                        *preflight,
+                    ) {
                         skipped.push(skip);
                         continue;
                     }
@@ -346,18 +380,7 @@ where
     // edits are identical.
     merge_duplicate_dirty_objects(&mut dirty_objects);
 
-    let bytes = if dirty_objects.is_empty() {
-        write_incremental_revision(input, &[]).map_err(|error| EditPageContentError::Write {
-            error: Box::new(error),
-        })?
-    } else {
-        let plan = IncrementalRevisionPlan { dirty_objects };
-        write_incremental_revision_plan(input, &plan).map_err(|error| {
-            EditPageContentError::Plan {
-                error: Box::new(error),
-            }
-        })?
-    };
+    let bytes = write_dirty_objects(input, dirty_objects)?;
 
     edited.sort_by_key(|report| (report.page_index.0, report.stream_ordinal));
 
@@ -368,14 +391,77 @@ where
     })
 }
 
+fn write_dirty_objects(
+    input: &[u8],
+    dirty_objects: Vec<PlannedDirtyObject>,
+) -> Result<Vec<u8>, EditPageContentError> {
+    if dirty_objects.is_empty() {
+        return write_incremental_revision(input, &[]).map_err(|error| {
+            EditPageContentError::Write {
+                error: Box::new(error),
+            }
+        });
+    }
+    let plan = IncrementalRevisionPlan { dirty_objects };
+    write_incremental_revision_plan(input, &plan).map_err(|error| EditPageContentError::Plan {
+        error: Box::new(error),
+    })
+}
+
+type ExtGStateDocumentPreflight = Option<
+    Result<DocumentPageExtGStateResourcesInspection, DocumentPageExtGStateResourcesInspectionError>,
+>;
+
+fn inspect_extgstate_document_for_preflight(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    root_node_object_offset: usize,
+    enabled: bool,
+) -> ExtGStateDocumentPreflight {
+    enabled.then(|| {
+        inspect_document_page_extgstate_resources_with_lookup(
+            input,
+            lookup,
+            root_node_object_offset,
+        )
+    })
+}
+
+fn extgstate_page_for_preflight(
+    document: &ExtGStateDocumentPreflight,
+    index: usize,
+) -> Result<Option<&PageExtGStateResourcesInspection>, PipelineSkipReason> {
+    match document {
+        Some(Ok(document)) => Ok(document.pages.get(index)),
+        Some(Err(_)) => Err(PipelineSkipReason::ExtGStateUnsafe {
+            overprint: false,
+            transparency: false,
+            unresolved: true,
+            unclassified: true,
+            gs_count: 0,
+        }),
+        None => Ok(None),
+    }
+}
+
+const fn whole_page_skip(page_index: PageIndex, reason: PipelineSkipReason) -> PipelinePageSkip {
+    PipelinePageSkip {
+        page_index,
+        stream_ordinal: 0,
+        content_object: None,
+        reason,
+    }
+}
+
 fn run_page_preflight<P>(
     input: &[u8],
     page_index: PageIndex,
+    extgstate_page: Option<&PageExtGStateResourcesInspection>,
     outcomes: &[StreamOutcome<'_>],
     preflight: &P,
 ) -> Option<PipelinePageSkip>
 where
-    P: Fn(PageIndex, &[Vec<u8>]) -> PagePreflight,
+    P: Fn(PageIndex, Option<&PageExtGStateResourcesInspection>, &[Vec<u8>]) -> PagePreflight,
 {
     // PAGE-LEVEL PREFLIGHT: decode this page's located (editable) streams ONCE
     // and let the hook poison the whole page before any dirty object is emitted.
@@ -388,7 +474,8 @@ where
             StreamOutcome::Skip { .. } => None,
         })
         .collect();
-    if let PagePreflight::SkipPage(reason) = preflight(page_index, &decoded_streams) {
+    if let PagePreflight::SkipPage(reason) = preflight(page_index, extgstate_page, &decoded_streams)
+    {
         Some(PipelinePageSkip {
             page_index,
             stream_ordinal: 0,

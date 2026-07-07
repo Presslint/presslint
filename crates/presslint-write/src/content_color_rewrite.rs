@@ -283,12 +283,13 @@ const fn map_skip_reason(reason: PipelineSkipReason) -> ContentColorRewriteSkipR
             occurrences,
             disposition,
         },
-        // `Unchanged` = no matching operators. `ExtGStatePresent` is UNREACHABLE
-        // here: this caller drives `edit_page_content_incremental`, whose delegated
-        // no-op preflight never poisons a page, so the variant is never produced;
-        // the arm exists only for match exhaustiveness and folds into the same
-        // no-matching-operators reason for totality.
-        PipelineSkipReason::Unchanged | PipelineSkipReason::ExtGStatePresent => {
+        // `Unchanged` = no matching operators. ExtGState preflight variants are
+        // UNREACHABLE here: this caller drives `edit_page_content_incremental`,
+        // whose delegated no-op preflight never poisons a page. The arm exists
+        // only for exhaustiveness and folds into the same reason for totality.
+        PipelineSkipReason::Unchanged
+        | PipelineSkipReason::ExtGStatePresent
+        | PipelineSkipReason::ExtGStateUnsafe { .. } => {
             ContentColorRewriteSkipReason::NoMatchingOperators
         }
     }

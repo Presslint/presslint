@@ -4,6 +4,20 @@ Older accumulated journal history lives in [JOURNAL-archive-2.md](JOURNAL-archiv
 
 ## Current State
 
+### T159 - ExtGState Safety Predicates
+
+- Added small predicate helpers on `ClassifiedExtGStateResource` for the Phase-1
+  safety decisions: active overprint, active transparency, and malformed/unknown
+  safety parameters. These helpers preserve the classifier's written-value model:
+  `op` is not defaulted from `OP`, while `OP` true alone is overprint-active.
+- Harmless unclassified dictionary keys such as `/LW` remain report metadata
+  only; they do not make the safety predicate unknown when all seven safety
+  parameters are unset or default.
+- `/BM /Compatible` is classified as normal-equivalent while preserving the raw
+  name, so the precision guard does not skip a page for that safe blend mode.
+- The helpers are additive and read-only. The existing audit umbrella derivation
+  still has not been refactored onto these predicates; that remains a follow-up.
+
 ### T155 - ExtGState Resource Inspector (Phase 1-1)
 
 - Added read-only page and form `/Resources /ExtGState` inspectors. Page scope

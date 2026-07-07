@@ -15,6 +15,29 @@ conversion (F4-2), generalised to MULTI-LINK source-space routing (F4-5) and, as
 of T136, to MULTI-content-stream pages (each content-stream OBJECT edited
 independently).
 
+## T159 - Precision ExtGState Guard for Device-Colour Conversion
+
+`convert_content_colors_incremental` now uses the page `/ExtGState` resource
+inspector plus decoded-stream `gs` scanning instead of the coarse textual
+presence guard. A selected page is skipped with
+`ExtGStateUnsafe { overprint, transparency, unresolved, unclassified, gs_count }`
+only when a used `gs` resource activates overprint/transparency or is unknowable.
+Declared-but-unused resources and harmless resources with only non-safety keys
+such as `/LW` no longer block conversion.
+
+The guard remains page-granular because page content streams share graphics
+state; an unsafe `gs` in one stream skips the whole page. The deprecated
+`ExtGStatePresent` reason remains in public enums for compatibility but is no
+longer produced by the converter. Known residual: transparency groups (`/Group`)
+can still make conversion unsafe without `gs`; that is intentionally left for a
+later graphics-state slice.
+
+Copy/performance note: the shared edit pipeline only performs the page
+`/ExtGState` resource inspection for callers that opt into preflight; rewrite
+and reencode callers do not pay it. The converter then scans already-decoded
+preflight streams for selected pages only. No stream bytes or PDF bodies are
+retained by the guard.
+
 ## T140 - Interim ExtGState Guard for Device-Colour Conversion
 
 `convert_content_colors_incremental` now performs an opt-in page preflight before

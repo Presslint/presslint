@@ -41,6 +41,41 @@ pub struct ClassifiedExtGStateResource {
     pub has_unclassified_keys: bool,
 }
 
+impl ClassifiedExtGStateResource {
+    /// True when `OP` or `op` is explicitly `true`, or when `OPM` is set to any
+    /// value. This deliberately does not apply the PDF `op`-defaults-to-`OP`
+    /// rule; callers only use values written in this resource.
+    #[must_use]
+    pub const fn is_overprint_active(&self) -> bool {
+        param_bool_true(&self.op_stroking)
+            || param_bool_true(&self.op_nonstroking)
+            || matches!(self.overprint_mode, ExtGStateParamClass::Set { .. })
+    }
+
+    /// True when alpha, blend mode, or soft mask parameters activate
+    /// non-default transparency behaviour.
+    #[must_use]
+    pub const fn is_transparency_active(&self) -> bool {
+        param_alpha_non_opaque(&self.stroking_alpha)
+            || param_alpha_non_opaque(&self.nonstroking_alpha)
+            || param_blend_mode_non_normal(&self.blend_mode)
+            || param_soft_mask_present(&self.soft_mask)
+    }
+
+    /// True when any Phase-1 safety parameter is present but malformed or
+    /// classified into an unknown/unsupported safety value.
+    #[must_use]
+    pub const fn has_unresolved_or_unclassified_safety_param(&self) -> bool {
+        param_malformed(&self.op_stroking)
+            || param_malformed(&self.op_nonstroking)
+            || param_opm_unknown(&self.overprint_mode)
+            || param_malformed(&self.stroking_alpha)
+            || param_malformed(&self.nonstroking_alpha)
+            || param_blend_mode_unclassified(&self.blend_mode)
+            || param_malformed(&self.soft_mask)
+    }
+}
+
 /// Per-parameter classification. `Unset` means the key is absent; no PDF
 /// default or inherited graphics-state value has been invented.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -94,7 +129,8 @@ pub enum ExtGStateAlpha {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "blend_mode", rename_all = "snake_case")]
 pub enum ExtGStateBlendMode {
-    /// `/Normal` blend mode.
+    /// `/Normal` blend mode, or `/Compatible` which PDF renderers treat as
+    /// equivalent to `/Normal`.
     Normal {
         /// Raw name bytes without the leading slash.
         raw_name: PdfName,
@@ -121,6 +157,61 @@ pub enum ExtGStateSoftMask {
     None,
     /// Any other value shape is a present soft mask for this Phase-1 report.
     Present,
+}
+
+const fn param_bool_true(param: &ExtGStateParamClass<bool>) -> bool {
+    matches!(param, ExtGStateParamClass::Set { value: true })
+}
+
+const fn param_malformed<T>(param: &ExtGStateParamClass<T>) -> bool {
+    matches!(param, ExtGStateParamClass::Malformed { .. })
+}
+
+const fn param_opm_unknown(param: &ExtGStateParamClass<ExtGStateOverprintMode>) -> bool {
+    matches!(
+        param,
+        ExtGStateParamClass::Malformed { .. }
+            | ExtGStateParamClass::Set {
+                value: ExtGStateOverprintMode::Other { .. },
+            }
+    )
+}
+
+const fn param_alpha_non_opaque(param: &ExtGStateParamClass<ExtGStateAlpha>) -> bool {
+    matches!(
+        param,
+        ExtGStateParamClass::Set {
+            value: ExtGStateAlpha::NonOpaque { .. },
+        }
+    )
+}
+
+const fn param_blend_mode_non_normal(param: &ExtGStateParamClass<ExtGStateBlendMode>) -> bool {
+    matches!(
+        param,
+        ExtGStateParamClass::Set {
+            value: ExtGStateBlendMode::NonNormal { .. },
+        }
+    )
+}
+
+const fn param_blend_mode_unclassified(param: &ExtGStateParamClass<ExtGStateBlendMode>) -> bool {
+    matches!(
+        param,
+        ExtGStateParamClass::Malformed { .. }
+            | ExtGStateParamClass::Set {
+                value: ExtGStateBlendMode::Array | ExtGStateBlendMode::Other { .. },
+            }
+    )
+}
+
+const fn param_soft_mask_present(param: &ExtGStateParamClass<ExtGStateSoftMask>) -> bool {
+    matches!(
+        param,
+        ExtGStateParamClass::Set {
+            value: ExtGStateSoftMask::Present,
+        }
+    )
 }
 
 /// One page- or form-local `/ExtGState` resource diagnostic.
@@ -483,7 +574,7 @@ fn classify_blend_mode(
         DictionaryValueKind::Name => {
             let raw_name =
                 PdfName(input[entry.value_range.start + 1..entry.value_range.end].to_vec());
-            if raw_name.0 == b"Normal" {
+            if raw_name.0 == b"Normal" || raw_name.0 == b"Compatible" {
                 ExtGStateBlendMode::Normal { raw_name }
             } else {
                 ExtGStateBlendMode::NonNormal { raw_name }

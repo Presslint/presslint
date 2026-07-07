@@ -44,7 +44,7 @@ use crate::{
         PipelineSkipReason, edit_page_content_incremental_indexed_with_preflight,
     },
     content_stream_plan::StreamMode,
-    extgstate_guard::has_extgstate,
+    extgstate_page_guard::extgstate_page_skip_reason,
     link_routing::{DeviceLinkInput, LinkConversionCounts, LinkRouting, build_link_routing},
     pdf_number_serialize::serialize_color_component,
     selector_match::{
@@ -173,11 +173,23 @@ pub enum ConvertPageSkipReason {
         /// Disposition returned by the ownership decision.
         disposition: IndirectObjectEditDisposition,
     },
-    /// One or more of the page's decodable content streams contains a `gs`
-    /// (`ExtGState` set) operator, so the converter — which is overprint/transparency
-    /// blind — left the WHOLE page byte-verbatim rather than risk a silent
-    /// under-overprint colour change. Interim guard; see [`crate::extgstate_guard`].
+    /// Deprecated compatibility variant from the coarse T140 guard. Retained for
+    /// consumers, but the converter now emits [`Self::ExtGStateUnsafe`].
     ExtGStatePresent,
+    /// A used `gs` resource activated overprint/transparency, named an
+    /// unresolved resource, or carried malformed/unknown safety parameters.
+    ExtGStateUnsafe {
+        /// True when `OP`/`op` is true or `OPM` is set.
+        overprint: bool,
+        /// True when alpha, blend mode, or soft mask activates transparency.
+        transparency: bool,
+        /// True when a `gs` name is missing from classified resources.
+        unresolved: bool,
+        /// True when a `gs` operand or safety parameter is malformed/unknown.
+        unclassified: bool,
+        /// Number of `gs` operators seen in the page's decoded streams.
+        gs_count: u32,
+    },
 }
 
 /// Output of a successful [`convert_content_colors_incremental`] call.
@@ -375,16 +387,12 @@ pub fn convert_content_colors_incremental(
         input,
         &request.pages,
         StreamMode::MultiStream,
-        // INTERIM ExtGState GUARD (T140): the converter is overprint/transparency
-        // blind, so a page ANY of whose decodable streams sets an ExtGState via `gs`
-        // is poisoned WHOLE and left byte-verbatim (ISO 32000 §7.8.2: page streams
-        // share graphics state), reported once as `ExtGStatePresent`.
-        |_page, decoded_streams| {
-            if decoded_streams.iter().any(|stream| has_extgstate(stream)) {
-                PagePreflight::SkipPage(PipelineSkipReason::ExtGStatePresent)
-            } else {
-                PagePreflight::Continue
-            }
+        // Page streams share graphics state, so any unsafe `gs` activation
+        // poisons the whole page. Harmless declared or unused resources do not
+        // block conversion.
+        |_page, extgstate_page, decoded_streams| {
+            extgstate_page_skip_reason(extgstate_page, decoded_streams)
+                .map_or(PagePreflight::Continue, PagePreflight::SkipPage)
         },
         |page_index, decoded| {
             match convert_decoded(
@@ -758,6 +766,19 @@ const fn map_skip_reason(reason: PipelineSkipReason) -> ConvertPageSkipReason {
             disposition,
         },
         PipelineSkipReason::ExtGStatePresent => ConvertPageSkipReason::ExtGStatePresent,
+        PipelineSkipReason::ExtGStateUnsafe {
+            overprint,
+            transparency,
+            unresolved,
+            unclassified,
+            gs_count,
+        } => ConvertPageSkipReason::ExtGStateUnsafe {
+            overprint,
+            transparency,
+            unresolved,
+            unclassified,
+            gs_count,
+        },
     }
 }
 
