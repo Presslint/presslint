@@ -24,6 +24,7 @@ mod content_stream_extent;
 mod content_stream_filter;
 mod content_stream_slice;
 mod decode_parms;
+mod default_color_spaces;
 mod dictionary_entries;
 mod dictionary_extent;
 mod document_access;
@@ -43,6 +44,7 @@ mod object_lookup;
 mod object_resolver;
 mod object_stream;
 mod object_stream_objects;
+mod output_intents;
 mod page_boxes;
 mod page_color_space_classify;
 mod page_color_space_resources;
@@ -110,6 +112,13 @@ pub use content_stream_slice::{
 pub use decode_parms::{
     DecodeParmsParameter, FlateDecodeParametersResolution, FlateDecodeParametersResolutionError,
     FlateDecodeParametersResolutionRejection, resolve_flate_decode_parameters,
+};
+pub use default_color_spaces::{
+    DefaultColorSpaceFact, DefaultColorSpaceKind, DocumentPageDefaultColorSpacesInspection,
+    DocumentPageDefaultColorSpacesInspectionError, FormDefaultColorSpacesInspection,
+    PageDefaultColorSpacesInspection, SkippedDefaultColorSpace, SkippedDefaultColorSpaceReason,
+    inspect_document_page_default_color_spaces,
+    inspect_document_page_default_color_spaces_with_lookup, inspect_form_default_color_spaces,
 };
 pub use dictionary_entries::{
     DictionaryEntryByteRange, DictionaryEntryInspection, DictionaryEntryInspectionError,
@@ -197,15 +206,20 @@ pub use object_stream_objects::{
     ExtractedObjectStreamMember, ObjectStreamMemberExtractionError,
     ObjectStreamMemberExtractionRejection, extract_object_stream_member,
 };
+pub use output_intents::{
+    DestOutputProfileFact, OutputIntentArrayEntryKind, OutputIntentsInspection,
+    OutputIntentsInspectionError, PdfOutputIntentFact, PdfOutputIntentSubtype, SkippedOutputIntent,
+    SkippedOutputIntentReason, inspect_catalog_output_intents, inspect_document_output_intents,
+};
 pub use page_boxes::{
     DocumentPageBoxesInspection, PageBoxInspectionError, PageBoxKind, PageBoxSource,
     PageBoxesInspection, PageRectangle, ResolvedPageBox, SkippedPageBox, SkippedPageBoxReason,
     inspect_document_page_boxes,
 };
 pub use page_color_space_resources::{
-    ClassifiedColorSpaceResource, ColorSpaceFamily, DocumentPageColorSpaceResourcesInspection,
-    DocumentPageColorSpaceResourcesInspectionError, PageColorSpaceResourcesInspection,
-    SkippedColorSpaceResource, SkippedColorSpaceResourceReason,
+    ClassifiedColorSpaceDefinition, ClassifiedColorSpaceResource, ColorSpaceFamily,
+    DocumentPageColorSpaceResourcesInspection, DocumentPageColorSpaceResourcesInspectionError,
+    PageColorSpaceResourcesInspection, SkippedColorSpaceResource, SkippedColorSpaceResourceReason,
     inspect_document_page_color_space_resources,
     inspect_document_page_color_space_resources_with_lookup,
 };

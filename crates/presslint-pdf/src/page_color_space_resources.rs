@@ -38,6 +38,24 @@ pub enum ColorSpaceFamily {
     DeviceN,
 }
 
+/// Classified colour-space definition without a selecting resource name.
+///
+/// This is the shared structural payload used by named `/Resources
+/// /ColorSpace` entries and by default device colour-space environment facts.
+/// It stores only shallow family data and never retains PDF bytes, stream
+/// bodies, tint transforms, ICC payloads, or decoded data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassifiedColorSpaceDefinition {
+    /// Structural colour-space family.
+    pub family: ColorSpaceFamily,
+    /// Shallow component count when known.
+    pub component_count: Option<usize>,
+    /// Spot colorant names for `Separation` (one) or `DeviceN` (many).
+    pub spot_names: Vec<PdfName>,
+    /// Alternate colour space recorded as a fact for `Separation`/`DeviceN`.
+    pub alternate_space: Option<ColorSpaceFamily>,
+}
+
 /// One classified `/Resources /ColorSpace` entry.
 ///
 /// Stores only the resource name, the structural family, an optional shallow
@@ -57,6 +75,19 @@ pub struct ClassifiedColorSpaceResource {
     pub spot_names: Vec<PdfName>,
     /// Alternate colour space recorded as a fact for `Separation`/`DeviceN`.
     pub alternate_space: Option<ColorSpaceFamily>,
+}
+
+impl ClassifiedColorSpaceResource {
+    /// Return the colour-space definition without its selecting resource name.
+    #[must_use]
+    pub fn definition(&self) -> ClassifiedColorSpaceDefinition {
+        ClassifiedColorSpaceDefinition {
+            family: self.family,
+            component_count: self.component_count,
+            spot_names: self.spot_names.clone(),
+            alternate_space: self.alternate_space,
+        }
+    }
 }
 
 /// Per-document page `/Resources /ColorSpace` classification report.

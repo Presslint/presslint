@@ -18,7 +18,10 @@ use crate::{
     inspect_indirect_object_dictionary, inspect_indirect_object_header, parse_indirect_reference,
 };
 
-use super::{ClassifiedColorSpaceResource, ColorSpaceFamily, SkippedColorSpaceResourceReason};
+use super::{
+    ClassifiedColorSpaceDefinition, ClassifiedColorSpaceResource, ColorSpaceFamily,
+    SkippedColorSpaceResourceReason,
+};
 
 /// Classify one `/ColorSpace` dictionary entry into a structural family.
 pub fn classify_color_space_entry(
@@ -27,20 +30,34 @@ pub fn classify_color_space_entry(
     name: &PdfName,
     entry: DictionaryEntrySpan,
 ) -> Result<ClassifiedColorSpaceResource, SkippedColorSpaceResourceReason> {
+    let definition = classify_color_space_definition_entry(input, lookup, entry)?;
+    Ok(ClassifiedColorSpaceResource {
+        name: name.clone(),
+        family: definition.family,
+        component_count: definition.component_count,
+        spot_names: definition.spot_names,
+        alternate_space: definition.alternate_space,
+    })
+}
+
+/// Classify one colour-space definition entry into a structural definition,
+/// without assigning or implying a selectable resource name.
+pub fn classify_color_space_definition_entry(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    entry: DictionaryEntrySpan,
+) -> Result<ClassifiedColorSpaceDefinition, SkippedColorSpaceResourceReason> {
     match entry.value_kind {
-        DictionaryValueKind::Name => classify_name_family(
-            &input[entry.value_range.start..entry.value_range.end],
-            name.clone(),
-        ),
-        DictionaryValueKind::Array => {
-            classify_array(input, lookup, name.clone(), entry.value_range.start)
+        DictionaryValueKind::Name => {
+            classify_name_family(&input[entry.value_range.start..entry.value_range.end])
         }
+        DictionaryValueKind::Array => classify_array(input, lookup, entry.value_range.start),
         DictionaryValueKind::IndirectReferenceLike => {
             let reference = parse_indirect_reference(input, entry.value_range.start)
                 .map_err(|_| SkippedColorSpaceResourceReason::MalformedColorSpaceOperand)?;
             let (_, object_byte_offset) = resolve_reference(lookup, reference.reference)
                 .map_err(|error| unresolved_reference(&error))?;
-            classify_indirect_definition(input, lookup, name.clone(), object_byte_offset)
+            classify_indirect_definition(input, lookup, object_byte_offset)
         }
         _ => Err(SkippedColorSpaceResourceReason::MalformedColorSpaceOperand),
     }
@@ -51,9 +68,8 @@ pub fn classify_color_space_entry(
 fn classify_indirect_definition(
     input: &[u8],
     lookup: ObjectLookup<'_>,
-    name: PdfName,
     object_byte_offset: usize,
-) -> Result<ClassifiedColorSpaceResource, SkippedColorSpaceResourceReason> {
+) -> Result<ClassifiedColorSpaceDefinition, SkippedColorSpaceResourceReason> {
     let header = inspect_indirect_object_header(input, object_byte_offset)
         .map_err(|_| SkippedColorSpaceResourceReason::MalformedColorSpaceOperand)?;
     let token = inspect_indirect_object_body_token(input, header.after_obj_keyword_offset)
@@ -61,10 +77,10 @@ fn classify_indirect_definition(
     match token.token_kind {
         IndirectObjectBodyLeadingTokenKind::Name => {
             let end = skip_name(input, token.first_token_byte_offset, input.len());
-            classify_name_family(&input[token.first_token_byte_offset..end], name)
+            classify_name_family(&input[token.first_token_byte_offset..end])
         }
         IndirectObjectBodyLeadingTokenKind::ArrayOpen => {
-            classify_array(input, lookup, name, token.first_token_byte_offset)
+            classify_array(input, lookup, token.first_token_byte_offset)
         }
         _ => Err(SkippedColorSpaceResourceReason::MalformedColorSpaceOperand),
     }
@@ -73,8 +89,7 @@ fn classify_indirect_definition(
 /// Classify a bare colour-space name (device families; anything else skips).
 fn classify_name_family(
     name_bytes: &[u8],
-    name: PdfName,
-) -> Result<ClassifiedColorSpaceResource, SkippedColorSpaceResourceReason> {
+) -> Result<ClassifiedColorSpaceDefinition, SkippedColorSpaceResourceReason> {
     let family = match name_bytes {
         b"/DeviceGray" | b"/G" => (ColorSpaceFamily::DeviceGray, 1usize),
         b"/DeviceRGB" | b"/RGB" => (ColorSpaceFamily::DeviceRgb, 3),
@@ -86,8 +101,7 @@ fn classify_name_family(
             });
         }
     };
-    Ok(ClassifiedColorSpaceResource {
-        name,
+    Ok(ClassifiedColorSpaceDefinition {
         family: family.0,
         component_count: Some(family.1),
         spot_names: Vec::new(),
@@ -99,9 +113,8 @@ fn classify_name_family(
 fn classify_array(
     input: &[u8],
     lookup: ObjectLookup<'_>,
-    name: PdfName,
     open_offset: usize,
-) -> Result<ClassifiedColorSpaceResource, SkippedColorSpaceResourceReason> {
+) -> Result<ClassifiedColorSpaceDefinition, SkippedColorSpaceResourceReason> {
     let elements = array_elements(input, open_offset)?;
     let Some(head) = elements.first() else {
         return Err(SkippedColorSpaceResourceReason::MalformedColorSpaceOperand);
@@ -110,16 +123,16 @@ fn classify_array(
         return Err(SkippedColorSpaceResourceReason::MalformedColorSpaceOperand);
     };
     match &input[head.start..head.end] {
-        b"/ICCBased" => classify_icc_based(input, lookup, name, &elements),
-        b"/Separation" => classify_separation(input, lookup, name, &elements),
-        b"/DeviceN" => classify_device_n(input, lookup, name, &elements),
+        b"/ICCBased" => classify_icc_based(input, lookup, &elements),
+        b"/Separation" => classify_separation(input, lookup, &elements),
+        b"/DeviceN" => classify_device_n(input, lookup, &elements),
         b"/Indexed" | b"/I" => Err(SkippedColorSpaceResourceReason::UnsupportedIndexedColor),
         b"/Pattern" => Err(SkippedColorSpaceResourceReason::UnsupportedPatternColor),
         b"/Lab" | b"/CalGray" | b"/CalRGB" => {
             Err(SkippedColorSpaceResourceReason::UnsupportedLabOrCalSpace)
         }
         b"/DeviceGray" | b"/DeviceRGB" | b"/DeviceCMYK" => {
-            classify_name_family(&input[head.start..head.end], name)
+            classify_name_family(&input[head.start..head.end])
         }
         other => Err(SkippedColorSpaceResourceReason::UnknownColorSpaceName {
             name: other.to_vec(),
@@ -130,9 +143,8 @@ fn classify_array(
 fn classify_icc_based(
     input: &[u8],
     lookup: ObjectLookup<'_>,
-    name: PdfName,
     elements: &[ArrayElement],
-) -> Result<ClassifiedColorSpaceResource, SkippedColorSpaceResourceReason> {
+) -> Result<ClassifiedColorSpaceDefinition, SkippedColorSpaceResourceReason> {
     let Some(stream) = elements.get(1) else {
         return Err(SkippedColorSpaceResourceReason::MalformedColorSpaceOperand);
     };
@@ -145,8 +157,7 @@ fn classify_icc_based(
         .map_err(|_| SkippedColorSpaceResourceReason::MalformedColorSpaceOperand)?;
     let component_count = dictionary_usize(input, &dictionary.entries, b"/N");
     let alternate_space = dictionary_alternate(input, lookup, &dictionary.entries);
-    Ok(ClassifiedColorSpaceResource {
-        name,
+    Ok(ClassifiedColorSpaceDefinition {
         family: ColorSpaceFamily::IccBased,
         component_count,
         spot_names: Vec::new(),
@@ -157,9 +168,8 @@ fn classify_icc_based(
 fn classify_separation(
     input: &[u8],
     lookup: ObjectLookup<'_>,
-    name: PdfName,
     elements: &[ArrayElement],
-) -> Result<ClassifiedColorSpaceResource, SkippedColorSpaceResourceReason> {
+) -> Result<ClassifiedColorSpaceDefinition, SkippedColorSpaceResourceReason> {
     let Some(colorant) = elements.get(1) else {
         return Err(SkippedColorSpaceResourceReason::MalformedColorSpaceOperand);
     };
@@ -170,8 +180,7 @@ fn classify_separation(
     let alternate_space = elements
         .get(2)
         .and_then(|element| classify_element_family(input, lookup, element));
-    Ok(ClassifiedColorSpaceResource {
-        name,
+    Ok(ClassifiedColorSpaceDefinition {
         family: ColorSpaceFamily::Separation,
         component_count: Some(1),
         spot_names: vec![spot],
@@ -182,9 +191,8 @@ fn classify_separation(
 fn classify_device_n(
     input: &[u8],
     lookup: ObjectLookup<'_>,
-    name: PdfName,
     elements: &[ArrayElement],
-) -> Result<ClassifiedColorSpaceResource, SkippedColorSpaceResourceReason> {
+) -> Result<ClassifiedColorSpaceDefinition, SkippedColorSpaceResourceReason> {
     let Some(names) = elements.get(1) else {
         return Err(SkippedColorSpaceResourceReason::MalformedColorSpaceOperand);
     };
@@ -206,8 +214,7 @@ fn classify_device_n(
         .get(2)
         .and_then(|element| classify_element_family(input, lookup, element));
     let component_count = Some(spot_names.len());
-    Ok(ClassifiedColorSpaceResource {
-        name,
+    Ok(ClassifiedColorSpaceDefinition {
         family: ColorSpaceFamily::DeviceN,
         component_count,
         spot_names,

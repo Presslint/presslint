@@ -15,6 +15,7 @@
 //! ```
 
 mod color_audit;
+mod color_environment;
 mod document_inventory;
 mod form_expansion_machine;
 mod form_inventory;
@@ -30,6 +31,7 @@ pub use color_audit::{
     ColorAuditStatus, ColorSpaceCount, ColorUsageAudit, ColorUsageCount, ColorUsageSummary,
     CoverageGap, CoverageGapKind, ObjectKindCount, PageColorUsage, RgbFinding, audit_color_usage,
 };
+pub use color_environment::observed_output_intents_from_pdf;
 pub use document_inventory::{
     ClassicPdfInventory, ClassicPdfInventoryError, ClassicPdfInventoryPage,
     ClassicPdfInventoryPageResult, ClassicPdfInventoryRejection, ClassicPdfInventorySkip,

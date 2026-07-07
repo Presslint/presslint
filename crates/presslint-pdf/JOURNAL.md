@@ -4,6 +4,18 @@ Older accumulated journal history lives in [JOURNAL-archive-2.md](JOURNAL-archiv
 
 ## Current State
 
+### T161a - Colour Environment Descriptor Facts
+
+- Added companion, read-only default colour-space inspectors for page and form
+  scopes. Page facts use inherited effective `/Resources`; form facts read only
+  the form object's own `/Resources`. Defaults are reported separately from
+  selectable `/ColorSpace` names.
+- Added a catalog `/OutputIntents` observer that records supported `/S`,
+  simple ASCII `/OutputConditionIdentifier`, and structural
+  `/DestOutputProfile` presence/reference without reading profile streams.
+- Refactored the colour-space classifier to expose a name-free
+  `ClassifiedColorSpaceDefinition` shared by named resources and defaults.
+
 ### T160 - Transparency Group Inspectors
 
 - Added shallow page/form `/Group` classifiers for Phase-1 safety: recognise

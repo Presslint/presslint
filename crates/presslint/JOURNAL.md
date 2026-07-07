@@ -1,5 +1,14 @@
 # presslint Journal
 
+## T161a - OutputIntent Observation Bridge
+
+- Added `observed_output_intents_from_pdf`, the umbrella-only bridge from
+  neutral `presslint-pdf` output-intent facts into
+  `presslint-color::ObservedOutputIntent`.
+- Keeps crate boundaries intact: PDF observation remains in `presslint-pdf`,
+  color policy stays in `presslint-color`, and unsupported PDF-side entries
+  remain structured PDF diagnostics rather than color-layer inputs.
+
 ## T160 - Transparency Group Audit Findings
 
 - `GraphicsStateFindingSource` gains additive page/form transparency-group
