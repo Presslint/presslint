@@ -28,10 +28,14 @@ mod preflight;
 pub use presslint_types::*;
 
 pub use color_audit::{
-    ColorAuditStatus, ColorSpaceCount, ColorUsageAudit, ColorUsageCount, ColorUsageSummary,
-    CoverageGap, CoverageGapKind, ObjectKindCount, PageColorUsage, RgbFinding, audit_color_usage,
+    ColorAuditStatus, ColorSpaceCount, ColorUsageAudit, ColorUsageAuditWithPolicyError,
+    ColorUsageCount, ColorUsageSummary, CoverageGap, CoverageGapKind, ObjectKindCount,
+    PageColorUsage, RgbFinding, audit_color_usage, audit_color_usage_with_output_intent_policy,
 };
-pub use color_environment::observed_output_intents_from_pdf;
+pub use color_environment::{
+    OutputIntentEligibility, evaluate_pdf_output_intent_eligibility,
+    observed_output_intents_from_pdf, resolve_output_intent_eligibility,
+};
 pub use document_inventory::{
     ClassicPdfInventory, ClassicPdfInventoryError, ClassicPdfInventoryPage,
     ClassicPdfInventoryPageResult, ClassicPdfInventoryRejection, ClassicPdfInventorySkip,

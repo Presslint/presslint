@@ -9,6 +9,10 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use serde_harness::{TestSerdeValue, from_serde_value, serde_value};
 
+use presslint_color::{
+    NamedOutputCondition, OutputIntentPolicy, OutputIntentSubtype, OutputIntentTarget,
+};
+
 use super::form_inventory::{CATALOG, PAGES, classic_pdf, stream_object};
 use super::single_page_pdf;
 use crate::color_audit::build_color_usage_audit;
@@ -20,6 +24,7 @@ use crate::{
     ObjectKind, PageColorUsage, PageIndex, PdfInventory, PdfInventoryError, PdfInventoryPage,
     PdfInventoryPageResult, PdfInventorySkip, PdfName, Provenance, RgbFinding,
     SkippedFormInventory, SkippedFormInventoryReason, audit_color_usage,
+    audit_color_usage_with_output_intent_policy,
 };
 
 const CMYK_FILL_CONTENT: &[u8] = b"q\n0 0 0 1 k\n12 12 80 80 re\nf\nQ";
@@ -562,13 +567,8 @@ fn rgb_page_through_pdf_reports_finding_and_stays_complete() -> Result<(), PdfIn
 }
 
 // --- graphics-state findings (page-scope declared `/ExtGState` state) ---
-
-/// CMYK-only content that never invokes `gs`, so graphics-state cases add no
-/// colour findings or gaps and prove the DECLARED-in-resources semantics.
 const CMYK_CONTENT_NO_GS: &[u8] = b"0 0 0 1 k\n12 12 80 80 re\nf";
 
-/// A single-page classic PDF whose page carries `resources` as its literal
-/// `/Resources` dictionary body and one raw content stream.
 fn page_with_resources_pdf(resources: &str, content: &[u8]) -> Vec<u8> {
     let page = format!(
         "3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << {resources} >> /Contents 4 0 R >>\nendobj\n"
@@ -578,10 +578,31 @@ fn page_with_resources_pdf(resources: &str, content: &[u8]) -> Vec<u8> {
     classic_pdf(&[CATALOG, PAGES, &page, &content_object])
 }
 
-/// A single-page classic PDF whose `/Resources /ExtGState` dictionary body is
-/// `dict` (same fixture shape as the `extgstate_wiring` tests).
 fn page_with_extgstate_pdf(dict: &str, content: &[u8]) -> Vec<u8> {
     page_with_resources_pdf(&format!("/ExtGState << {dict} >>"), content)
+}
+
+fn output_intent_pdf(identifier: &str) -> Vec<u8> {
+    let catalog = format!(
+        "1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OutputIntents [ << /S /GTS_PDFX /OutputConditionIdentifier {identifier} >> ] >>\nendobj\n"
+    )
+    .into_bytes();
+    let page =
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << >> /Contents 4 0 R >>\nendobj\n";
+    let content_object = stream_object(4, "", b"q\nQ");
+    classic_pdf(&[&catalog, PAGES, page, &content_object])
+}
+
+fn fogra51_policy() -> OutputIntentPolicy {
+    OutputIntentPolicy::EnsureTarget {
+        target: OutputIntentTarget::NamedCondition {
+            condition: NamedOutputCondition {
+                subtype: OutputIntentSubtype::GtsPdfx,
+                output_condition_identifier: "FOGRA51".to_string(),
+                registry_name: "https://example.test/registry".to_string(),
+            },
+        },
+    }
 }
 
 // The four flags mirror the pinned finding shape positionally
@@ -618,6 +639,12 @@ fn group_finding(transparency: bool, unclassified: bool) -> GraphicsStateFinding
 fn audit_extgstate_page(dict: &str) -> Result<ColorUsageAudit, String> {
     audit_color_usage(&page_with_extgstate_pdf(dict, CMYK_CONTENT_NO_GS), 1024)
         .map_err(|error| format!("{error:?}"))
+}
+
+fn has_eligibility_field(fields: &[(String, TestSerdeValue)]) -> bool {
+    fields
+        .iter()
+        .any(|(key, _)| key == "output_intent_eligibility")
 }
 
 #[test]
@@ -881,6 +908,35 @@ fn all_default_or_absent_extgstate_produces_no_finding() -> Result<(), String> {
     assert_eq!(absent.status, ColorAuditStatus::Complete);
     assert!(absent.graphics_state_findings.is_empty());
     assert!(absent.coverage_gaps.is_empty());
+    Ok(())
+}
+
+#[test]
+fn output_intent_eligibility_field_is_optional_and_policy_gated() -> Result<(), String> {
+    let audit = audit_color_usage(&single_page_pdf(b"", b"q\nQ"), 1024)
+        .map_err(|error| format!("{error:?}"))?;
+    assert!(audit.output_intent_eligibility.is_none());
+    let value = serde_value(&audit).map_err(|error| error.to_string())?;
+    let TestSerdeValue::Map(fields) = &value else {
+        return Err("audit should serialize as a map".to_string());
+    };
+    assert!(!has_eligibility_field(fields));
+    let decoded: ColorUsageAudit = from_serde_value(value).map_err(|error| error.to_string())?;
+    assert!(decoded.output_intent_eligibility.is_none());
+
+    let audit = audit_color_usage_with_output_intent_policy(
+        &output_intent_pdf("(FOGRA51)"),
+        1024,
+        &fogra51_policy(),
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    assert!(audit.output_intent_eligibility.is_some());
+    let value = serde_value(&audit).map_err(|error| error.to_string())?;
+    let TestSerdeValue::Map(fields) = &value else {
+        return Err("audit should serialize as a map".to_string());
+    };
+    assert!(has_eligibility_field(fields));
+    round_trip(&audit)?;
     Ok(())
 }
 

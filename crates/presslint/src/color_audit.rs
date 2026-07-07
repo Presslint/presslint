@@ -33,6 +33,7 @@ use presslint_inventory::InventoryEntry;
 use presslint_types::{ColorObservation, ColorSpace, ColorUsage, ObjectId, ObjectKind, PageIndex};
 use serde::{Deserialize, Serialize};
 
+use crate::color_environment::{OutputIntentEligibility, evaluate_pdf_output_intent_eligibility};
 use crate::graphics_state_findings::{
     GraphicsStateFinding, GraphicsStateScan, scan_document_graphics_state,
 };
@@ -238,11 +239,34 @@ pub struct ColorUsageAudit {
     /// reports, so existing audit JSON shapes are unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub graphics_state_findings: Vec<GraphicsStateFinding>,
+    /// Optional report-only output-intent eligibility result.
+    ///
+    /// This is populated only when a caller supplies an explicit
+    /// `OutputIntentPolicy`. The default audit path leaves it absent, preserving
+    /// existing JSON shapes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_intent_eligibility: Option<OutputIntentEligibility>,
     /// Coverage gaps in document order: the inventory-scan gaps first, then any
     /// graphics-state inspection gaps (page order, document-level last).
     pub coverage_gaps: Vec<CoverageGap>,
     /// Neutral inventory the audit ran over, owned by the report.
     pub inventory: PdfInventory,
+}
+
+/// Error returned by the policy-aware color audit entry point.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+pub enum ColorUsageAuditWithPolicyError {
+    /// The normal color inventory/audit path failed.
+    ColorUsage {
+        /// Delegated inventory/audit failure.
+        error: PdfInventoryError,
+    },
+    /// Catalog output-intent inspection failed before policy resolution.
+    OutputIntent {
+        /// Delegated output-intent inspection failure.
+        error: presslint_pdf::OutputIntentsInspectionError,
+    },
 }
 
 /// Run the read-only document color-usage audit over PDF bytes.
@@ -267,6 +291,29 @@ pub fn audit_color_usage(
     // pure build. `build_color_usage_audit` itself stays pure over its input.
     let graphics_state = scan_document_graphics_state(input);
     Ok(build_audit(inventory, graphics_state))
+}
+
+/// Run color-usage audit and attach output-intent eligibility for `policy`.
+///
+/// This is a report-only composition of the normal audit with catalog
+/// output-intent observation. It performs no conversion and writes no PDF bytes.
+///
+/// # Errors
+///
+/// Returns the normal color-audit failure or the catalog output-intent
+/// inspection failure, depending on which read-only pass failed.
+pub fn audit_color_usage_with_output_intent_policy(
+    input: &[u8],
+    max_decoded_stream_bytes: usize,
+    policy: &presslint_color::OutputIntentPolicy,
+) -> Result<ColorUsageAudit, ColorUsageAuditWithPolicyError> {
+    let mut audit = audit_color_usage(input, max_decoded_stream_bytes)
+        .map_err(|error| ColorUsageAuditWithPolicyError::ColorUsage { error })?;
+    audit.output_intent_eligibility = Some(
+        evaluate_pdf_output_intent_eligibility(input, policy)
+            .map_err(|error| ColorUsageAuditWithPolicyError::OutputIntent { error })?,
+    );
+    Ok(audit)
 }
 
 /// Analyze an owned neutral inventory and assemble the read-only audit.
@@ -308,6 +355,7 @@ fn build_audit(inventory: PdfInventory, graphics_state: GraphicsStateScan) -> Co
         spot_names: scan.spot_names.into_iter().collect(),
         rgb_findings: scan.rgb_findings,
         graphics_state_findings: graphics_state.findings,
+        output_intent_eligibility: None,
         coverage_gaps,
         inventory,
     }

@@ -1,5 +1,16 @@
 # presslint Journal
 
+## T163 - OutputIntent eligibility audit/report
+
+- Added `OutputIntentEligibility` plus umbrella helpers
+  `resolve_output_intent_eligibility` and
+  `evaluate_pdf_output_intent_eligibility`, keeping PDF catalog observation in
+  `presslint-pdf` and color-policy resolution in `presslint-color`.
+- Added `audit_color_usage_with_output_intent_policy`, which attaches optional
+  `ColorUsageAudit.output_intent_eligibility` when a caller supplies an
+  `OutputIntentPolicy`. The existing `audit_color_usage` path leaves the field
+  absent via serde `default` and `skip_serializing_if`.
+
 ## T162 - Audit full DeviceN colorant names
 
 - `ColorUsageAudit.spot_names` now collects every name in a `Separation` or
