@@ -8,14 +8,16 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use serde_harness::{TestSerdeValue, from_serde_value, serde_value};
 
-use super::form_inventory::{CATALOG, PAGES, classic_pdf, stream_object};
+use super::form_inventory::{
+    CATALOG, PAGES, classic_pdf, page_with_xobjects_object, stream_object,
+};
 use crate::color_audit::build_color_usage_audit;
 use crate::inventory::Inventory;
 use crate::pdf::DefaultColorSpaceKind;
 use crate::{
     ColorAuditStatus, ColorSpace, ColorUsageAudit, ColorUsageSummary, DefaultColorSpaceFinding,
-    DefaultColorSpaceFindingSource, ObjectKind, PageColorUsage, PageIndex, PdfInventory,
-    PdfInventoryPage, PdfInventoryPageResult, PdfName, audit_color_usage,
+    DefaultColorSpaceFindingSource, InvocationFrame, InvocationPath, ObjectKind, PageColorUsage,
+    PageIndex, PdfInventory, PdfInventoryPage, PdfInventoryPageResult, PdfName, audit_color_usage,
 };
 
 const RGB_FILL: &[u8] = b"q\n0 0 1 rg\n12 12 80 80 re\nf\nQ";
@@ -46,6 +48,28 @@ fn page_without_color_space_resources(content: &[u8]) -> Vec<u8> {
         b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << >> /Contents 4 0 R >>\nendobj\n";
     let content_object = stream_object(4, "", content);
     classic_pdf(&[CATALOG, PAGES, page, &content_object])
+}
+
+fn form_xobject_with_resources(number: u32, resources: &str, content: &[u8]) -> Vec<u8> {
+    stream_object(
+        number,
+        &format!(
+            " /Type /XObject /Subtype /Form /BBox [ 0 0 100 100 ] /Resources << {resources} >>"
+        ),
+        content,
+    )
+}
+
+fn invocation_path(frames: &[(u32, &[u8])]) -> InvocationPath {
+    InvocationPath {
+        frames: frames
+            .iter()
+            .map(|(ordinal, name)| InvocationFrame {
+                ordinal: *ordinal,
+                name: PdfName((*name).to_vec()),
+            })
+            .collect(),
+    }
 }
 
 fn empty_audit() -> ColorUsageAudit {
@@ -110,6 +134,8 @@ fn non_trivial_default_rgb_with_matching_device_rgb_emits_one_finding() -> Resul
             replacement_component_count: Some(3),
             replacement_spot_names: Vec::new(),
             matching_device_observation_count: 1,
+            form_name: None,
+            invocation: None,
         }]
     );
     assert_eq!(
@@ -206,6 +232,8 @@ fn default_color_space_finding_serde_shape_is_pinned() -> Result<(), String> {
         replacement_component_count: Some(2),
         replacement_spot_names: vec![PdfName(b"Cyan".to_vec()), PdfName(b"Spot".to_vec())],
         matching_device_observation_count: 4,
+        form_name: None,
+        invocation: None,
     };
 
     let value = serde_value(&finding).map_err(|error| error.to_string())?;
@@ -288,5 +316,184 @@ fn audit_without_default_findings_omits_field_and_old_json_deserializes() -> Res
     let decoded: ColorUsageAudit = from_serde_value(value).map_err(|error| error.to_string())?;
     assert!(decoded.default_color_space_findings.is_empty());
     assert_eq!(decoded, audit);
+    Ok(())
+}
+
+#[test]
+fn root_form_default_rgb_with_matching_form_rgb_emits_form_finding() -> Result<(), String> {
+    let page = page_with_xobjects_object("/Fm 4 0 R", 5);
+    let form = form_xobject_with_resources(
+        4,
+        "/ColorSpace << /DefaultRGB [ /ICCBased 6 0 R ] >>",
+        RGB_FILL,
+    );
+    let page_content = stream_object(5, "", b"/Fm Do");
+    let icc_profile = stream_object(6, " /N 3", b"");
+    let source = classic_pdf(&[CATALOG, PAGES, &page, &form, &page_content, &icc_profile]);
+
+    let audit = audit_color_usage(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(audit.status, ColorAuditStatus::Complete);
+    assert_eq!(
+        audit.default_color_space_findings,
+        vec![DefaultColorSpaceFinding {
+            page: PageIndex(0),
+            source: DefaultColorSpaceFindingSource::FormDefaultColorSpace,
+            default: DefaultColorSpaceKind::DefaultRgb,
+            device_space: ColorSpace::DeviceRgb,
+            replacement_space: ColorSpace::IccBased,
+            replacement_component_count: Some(3),
+            replacement_spot_names: Vec::new(),
+            matching_device_observation_count: 1,
+            form_name: Some(PdfName(b"Fm".to_vec())),
+            invocation: Some(invocation_path(&[(0, b"Fm")])),
+        }]
+    );
+    let Some(form_entry) = audit
+        .inventory
+        .inventory
+        .entries
+        .iter()
+        .find(|entry| entry.provenance.invocation.is_some())
+    else {
+        return Err("missing form entry".to_string());
+    };
+    assert_eq!(form_entry.colors[0].space, ColorSpace::DeviceRgb);
+    Ok(())
+}
+
+#[test]
+fn page_direct_rgb_does_not_trigger_root_form_default_finding() -> Result<(), String> {
+    let page = page_with_xobjects_object("/Fm 4 0 R", 5);
+    let form = form_xobject_with_resources(
+        4,
+        "/ColorSpace << /DefaultRGB [ /ICCBased 6 0 R ] >>",
+        CMYK_FILL,
+    );
+    let page_content = stream_object(5, "", b"0 0 1 rg\n1 1 10 10 re\nf\n/Fm Do");
+    let icc_profile = stream_object(6, " /N 3", b"");
+    let source = classic_pdf(&[CATALOG, PAGES, &page, &form, &page_content, &icc_profile]);
+
+    let audit = audit_color_usage(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(audit.status, ColorAuditStatus::Complete);
+    assert_eq!(audit.rgb_findings.len(), 1);
+    assert!(audit.default_color_space_findings.is_empty());
+    Ok(())
+}
+
+#[test]
+fn shared_root_form_invoked_twice_emits_one_finding_per_invocation() -> Result<(), String> {
+    let page = page_with_xobjects_object("/Fm 4 0 R", 5);
+    let form = form_xobject_with_resources(
+        4,
+        "/ColorSpace << /DefaultRGB [ /ICCBased 6 0 R ] >>",
+        RGB_FILL,
+    );
+    let page_content = stream_object(5, "", b"/Fm Do\n/Fm Do");
+    let icc_profile = stream_object(6, " /N 3", b"");
+    let source = classic_pdf(&[CATALOG, PAGES, &page, &form, &page_content, &icc_profile]);
+
+    let audit = audit_color_usage(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(audit.default_color_space_findings.len(), 2);
+    assert_eq!(
+        audit.default_color_space_findings[0].invocation,
+        Some(invocation_path(&[(0, b"Fm")]))
+    );
+    assert_eq!(
+        audit.default_color_space_findings[1].invocation,
+        Some(invocation_path(&[(1, b"Fm")]))
+    );
+    assert!(
+        audit
+            .default_color_space_findings
+            .iter()
+            .all(|finding| finding.matching_device_observation_count == 1)
+    );
+    Ok(())
+}
+
+#[test]
+fn malformed_present_root_form_default_is_coverage_gap_without_matching_observation()
+-> Result<(), String> {
+    let page = page_with_xobjects_object("/Fm 4 0 R", 5);
+    let form = form_xobject_with_resources(4, "/ColorSpace << /DefaultRGB 7 >>", b"");
+    let page_content = stream_object(5, "", b"/Fm Do");
+    let source = classic_pdf(&[CATALOG, PAGES, &page, &form, &page_content]);
+
+    let audit = audit_color_usage(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(audit.status, ColorAuditStatus::Incomplete);
+    assert!(audit.default_color_space_findings.is_empty());
+    assert_eq!(audit.coverage_gaps.len(), 1);
+    assert_eq!(
+        audit.coverage_gaps[0].kind,
+        crate::CoverageGapKind::DefaultColorSpaceSkipped
+    );
+    assert_eq!(audit.coverage_gaps[0].page, Some(PageIndex(0)));
+    Ok(())
+}
+
+#[test]
+fn nested_form_default_is_not_attributed_in_root_form_slice() -> Result<(), String> {
+    let page = page_with_xobjects_object("/A 4 0 R", 7);
+    let form_a = form_xobject_with_resources(4, "/XObject << /B 5 0 R >>", b"/B Do");
+    let form_b = form_xobject_with_resources(
+        5,
+        "/ColorSpace << /DefaultRGB [ /ICCBased 6 0 R ] >>",
+        RGB_FILL,
+    );
+    let icc_profile = stream_object(6, " /N 3", b"");
+    let page_content = stream_object(7, "", b"/A Do");
+    let source = classic_pdf(&[
+        CATALOG,
+        PAGES,
+        &page,
+        &form_a,
+        &form_b,
+        &icc_profile,
+        &page_content,
+    ]);
+
+    let audit = audit_color_usage(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(audit.status, ColorAuditStatus::Complete);
+    assert!(audit.default_color_space_findings.is_empty());
+    assert!(audit.inventory.inventory.entries.iter().any(|entry| {
+        entry.provenance.invocation == Some(invocation_path(&[(0, b"A"), (0, b"B")]))
+            && entry
+                .colors
+                .iter()
+                .any(|color| color.space == ColorSpace::DeviceRgb)
+    }));
+    Ok(())
+}
+
+#[test]
+fn form_default_color_space_finding_serde_shape_is_pinned() -> Result<(), String> {
+    let finding = DefaultColorSpaceFinding {
+        page: PageIndex(0),
+        source: DefaultColorSpaceFindingSource::FormDefaultColorSpace,
+        default: DefaultColorSpaceKind::DefaultRgb,
+        device_space: ColorSpace::DeviceRgb,
+        replacement_space: ColorSpace::IccBased,
+        replacement_component_count: Some(3),
+        replacement_spot_names: Vec::new(),
+        matching_device_observation_count: 1,
+        form_name: Some(PdfName(b"Fm".to_vec())),
+        invocation: Some(invocation_path(&[(0, b"Fm")])),
+    };
+
+    let value = serde_value(&finding).map_err(|error| error.to_string())?;
+    let TestSerdeValue::Map(fields) = &value else {
+        return Err("finding should serialize as a map".to_string());
+    };
+    assert!(fields.iter().any(|(key, value)| {
+        key == "source" && value == &TestSerdeValue::String("form_default_color_space".to_string())
+    }));
+    assert!(fields.iter().any(|(key, _)| key == "form_name"));
+    assert!(fields.iter().any(|(key, _)| key == "invocation"));
+    round_trip(&finding)?;
     Ok(())
 }

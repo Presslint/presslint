@@ -1,5 +1,16 @@
 # presslint Journal
 
+## T165 - Root form default colour-space attribution
+
+- Extended `ColorUsageAudit.default_color_space_findings` to page-level Form
+  `XObject` invocations. Form findings are correlated by page plus exact
+  one-frame `InvocationPath` and carry optional `form_name`/`invocation`
+  attribution; page findings omit those fields and keep the T164 JSON shape.
+- Malformed present root-form defaults now surface as
+  `CoverageGapKind::DefaultColorSpaceSkipped` when the root form invocation is
+  observed. The audit remains read-only and does not rewrite
+  `ColorObservation.space`, parse ICC profiles, or mutate inventory identity.
+
 ## T164 - Default colour-space audit findings
 
 - Added additive `ColorUsageAudit.default_color_space_findings` with serde

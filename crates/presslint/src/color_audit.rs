@@ -32,7 +32,10 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 use presslint_inventory::InventoryEntry;
-use presslint_types::{ColorObservation, ColorSpace, ColorUsage, ObjectId, ObjectKind, PageIndex};
+use presslint_types::{
+    ByteRange, ColorObservation, ColorSpace, ColorUsage, ContentScope, InvocationPath, ObjectId,
+    ObjectKind, PageIndex,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::color_environment::{OutputIntentEligibility, evaluate_pdf_output_intent_eligibility};
@@ -315,7 +318,8 @@ pub fn audit_color_usage(
     // input.
     let scan = scan_inventory(&inventory);
     let graphics_state = scan_document_graphics_state(input);
-    let default_color_spaces = scan_document_default_color_spaces(input, &scan);
+    let default_color_spaces =
+        scan_document_default_color_spaces(input, max_decoded_stream_bytes, &scan);
     Ok(build_audit(
         inventory,
         scan,
@@ -408,6 +412,8 @@ fn build_audit(
 pub struct Scan {
     document: SummaryAccumulator,
     pages: Vec<PageColorUsage>,
+    page_form_invocations: Vec<PageFormInvocation>,
+    root_form_invocations: Vec<RootFormInvocationColorCounts>,
     spot_names: BTreeSet<presslint_types::PdfName>,
     rgb_findings: Vec<RgbFinding>,
     coverage_gaps: Vec<CoverageGap>,
@@ -437,6 +443,61 @@ impl Scan {
             })
             .map_or(0, |count| count.count)
     }
+
+    pub fn root_form_invocations(&self) -> &[RootFormInvocationColorCounts] {
+        &self.root_form_invocations
+    }
+
+    pub fn page_form_invocations(&self) -> &[PageFormInvocation] {
+        &self.page_form_invocations
+    }
+
+    pub fn has_form_invocation_on_page(&self, page: PageIndex) -> bool {
+        self.has_page_form_invocation_on_page(page)
+            || self
+                .root_form_invocations
+                .iter()
+                .any(|counts| counts.page == page)
+    }
+
+    pub fn has_page_form_invocation_on_page(&self, page: PageIndex) -> bool {
+        self.page_form_invocations
+            .iter()
+            .any(|invocation| invocation.page == page)
+    }
+
+    pub fn count_root_form_observations(
+        &self,
+        page: PageIndex,
+        invocation: &InvocationPath,
+        space: &ColorSpace,
+    ) -> usize {
+        self.root_form_invocations
+            .iter()
+            .find(|counts| counts.page == page && &counts.invocation == invocation)
+            .and_then(|counts| {
+                counts
+                    .color_space_counts
+                    .iter()
+                    .find(|(color_space, _)| color_space == space)
+            })
+            .map_or(0, |(_, count)| *count)
+    }
+}
+
+/// Page-level Form `XObject` invocation entries, used to recover invoked root
+/// forms even when the form itself paints nothing.
+pub struct PageFormInvocation {
+    pub page: PageIndex,
+    pub range: Option<ByteRange>,
+}
+
+/// Device-colour counts for one page-level form invocation, in first-observed
+/// inventory order. Only exact one-frame invocation paths are represented.
+pub struct RootFormInvocationColorCounts {
+    pub page: PageIndex,
+    pub invocation: InvocationPath,
+    color_space_counts: Vec<(ColorSpace, usize)>,
 }
 
 const fn is_device_space(space: &ColorSpace) -> bool {
@@ -454,6 +515,8 @@ fn scan_inventory(inventory: &PdfInventory) -> Scan {
     let entries = &inventory.inventory.entries;
     let mut document = SummaryAccumulator::default();
     let mut pages = Vec::with_capacity(inventory.pages.len());
+    let mut page_form_invocations = Vec::new();
+    let mut root_form_invocations = Vec::new();
     let mut spot_names = BTreeSet::new();
     let mut rgb_findings = Vec::new();
     let mut coverage_gaps = Vec::new();
@@ -498,16 +561,19 @@ fn scan_inventory(inventory: &PdfInventory) -> Scan {
                 form_skipped,
             } => {
                 let end = (cursor + entry_count).min(entries.len());
-                for (offset, entry) in entries[cursor..end].iter().enumerate() {
-                    scan_entry(
-                        cursor + offset,
-                        entry,
-                        &mut page_summary,
-                        &mut document,
-                        &mut spot_names,
-                        &mut rgb_findings,
-                        &mut coverage_gaps,
-                    );
+                {
+                    let mut sinks = EntryScanSinks {
+                        page_summary: &mut page_summary,
+                        document: &mut document,
+                        page_form_invocations: &mut page_form_invocations,
+                        root_form_invocations: &mut root_form_invocations,
+                        spot_names: &mut spot_names,
+                        rgb_findings: &mut rgb_findings,
+                        coverage_gaps: &mut coverage_gaps,
+                    };
+                    for (offset, entry) in entries[cursor..end].iter().enumerate() {
+                        scan_entry(cursor + offset, entry, &mut sinks);
+                    }
                 }
                 for _ in form_skipped {
                     coverage_gaps.push(page_gap(
@@ -552,6 +618,8 @@ fn scan_inventory(inventory: &PdfInventory) -> Scan {
     Scan {
         document,
         pages,
+        page_form_invocations,
+        root_form_invocations,
         spot_names,
         rgb_findings,
         coverage_gaps,
@@ -560,23 +628,78 @@ fn scan_inventory(inventory: &PdfInventory) -> Scan {
 
 /// Scan one inventory entry: count its kind once, then classify each color
 /// observation in observation order.
-fn scan_entry(
-    entry_index: usize,
-    entry: &InventoryEntry,
-    page_summary: &mut SummaryAccumulator,
-    document: &mut SummaryAccumulator,
-    spot_names: &mut BTreeSet<presslint_types::PdfName>,
-    rgb_findings: &mut Vec<RgbFinding>,
-    coverage_gaps: &mut Vec<CoverageGap>,
-) {
-    page_summary.add_entry_kind(entry.kind);
-    document.add_entry_kind(entry.kind);
+fn scan_entry(entry_index: usize, entry: &InventoryEntry, sinks: &mut EntryScanSinks<'_>) {
+    sinks.page_summary.add_entry_kind(entry.kind);
+    sinks.document.add_entry_kind(entry.kind);
+    collect_page_form_invocation(entry, sinks.page_form_invocations);
+    let root_invocation_index = root_invocation_index(sinks.root_form_invocations, entry);
     for observation in &entry.colors {
-        page_summary.add_observation(observation);
-        document.add_observation(observation);
-        collect_spot_names(observation, spot_names);
-        classify_observation(entry_index, entry, observation, rgb_findings, coverage_gaps);
+        sinks.page_summary.add_observation(observation);
+        sinks.document.add_observation(observation);
+        if let Some(index) = root_invocation_index {
+            bump(
+                &mut sinks.root_form_invocations[index].color_space_counts,
+                &observation.space,
+            );
+        }
+        collect_spot_names(observation, sinks.spot_names);
+        classify_observation(
+            entry_index,
+            entry,
+            observation,
+            sinks.rgb_findings,
+            sinks.coverage_gaps,
+        );
     }
+}
+
+struct EntryScanSinks<'a> {
+    page_summary: &'a mut SummaryAccumulator,
+    document: &'a mut SummaryAccumulator,
+    page_form_invocations: &'a mut Vec<PageFormInvocation>,
+    root_form_invocations: &'a mut Vec<RootFormInvocationColorCounts>,
+    spot_names: &'a mut BTreeSet<presslint_types::PdfName>,
+    rgb_findings: &'a mut Vec<RgbFinding>,
+    coverage_gaps: &'a mut Vec<CoverageGap>,
+}
+
+fn collect_page_form_invocation(
+    entry: &InventoryEntry,
+    page_form_invocations: &mut Vec<PageFormInvocation>,
+) {
+    if entry.kind == ObjectKind::FormXObject
+        && entry.provenance.scope == ContentScope::Page
+        && entry.provenance.invocation.is_none()
+    {
+        page_form_invocations.push(PageFormInvocation {
+            page: entry.id.page,
+            range: entry.provenance.range,
+        });
+    }
+}
+
+fn root_invocation_index(
+    root_form_invocations: &mut Vec<RootFormInvocationColorCounts>,
+    entry: &InventoryEntry,
+) -> Option<usize> {
+    let invocation = root_invocation(entry)?;
+    if let Some(index) = root_form_invocations
+        .iter()
+        .position(|counts| counts.page == entry.id.page && counts.invocation == *invocation)
+    {
+        return Some(index);
+    }
+    root_form_invocations.push(RootFormInvocationColorCounts {
+        page: entry.id.page,
+        invocation: invocation.clone(),
+        color_space_counts: Vec::new(),
+    });
+    Some(root_form_invocations.len() - 1)
+}
+
+fn root_invocation(entry: &InventoryEntry) -> Option<&InvocationPath> {
+    let invocation = entry.provenance.invocation.as_ref()?;
+    (invocation.frames.len() == 1).then_some(invocation)
 }
 
 /// Collect spot-colorant names conservatively: only when the observation space
