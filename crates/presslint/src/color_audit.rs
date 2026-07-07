@@ -173,6 +173,12 @@ pub enum CoverageGapKind {
     /// A named entry that could not be classified is NOT a gap: it surfaces as
     /// the [`GraphicsStateFinding`] `unresolved` flag instead.
     ExtGStateResourceSkipped,
+    /// The document-level page `/Group` inspection could not begin, so whether
+    /// any page establishes a transparency group is unknown.
+    TransparencyGroupInspectionError,
+    /// A page top-level `/Group` entry was present but could not be classified
+    /// as a transparency group or another known safe absence.
+    TransparencyGroupSkipped,
 }
 
 /// One coverage gap: a place the audit could not fully classify color.

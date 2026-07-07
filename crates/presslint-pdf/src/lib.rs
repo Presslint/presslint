@@ -31,6 +31,7 @@ mod document_page_content_extents;
 mod extgstate_classify;
 mod form_color_space_resources;
 mod form_extgstate_resources;
+mod form_transparency_group;
 mod form_xobject_resources;
 mod image_xobject;
 mod indirect_reference;
@@ -51,6 +52,7 @@ mod page_contents;
 mod page_contents_resolved;
 mod page_extgstate_resources;
 mod page_resource_inheritance;
+mod page_transparency_group;
 mod page_tree_kid_targets;
 mod page_tree_kids;
 mod page_tree_leaves;
@@ -67,6 +69,7 @@ mod stream_encode;
 mod trailer;
 mod trailer_prev;
 mod trailer_root;
+mod transparency_group_classify;
 mod xref_chain;
 mod xref_resolve;
 mod xref_section;
@@ -139,6 +142,9 @@ pub use form_color_space_resources::{
 };
 pub use form_extgstate_resources::{
     FormExtGStateResourcesInspection, inspect_form_extgstate_resources,
+};
+pub use form_transparency_group::{
+    FormTransparencyGroupInspection, inspect_form_transparency_group,
 };
 pub use form_xobject_resources::{FormXObjectResourcesInspection, inspect_form_xobject_resources};
 pub use image_xobject::{
@@ -225,6 +231,11 @@ pub use page_extgstate_resources::{
     PageExtGStateResourcesInspection, inspect_document_page_extgstate_resources,
     inspect_document_page_extgstate_resources_with_lookup,
 };
+pub use page_transparency_group::{
+    DocumentPageTransparencyGroupsInspection, DocumentPageTransparencyGroupsInspectionError,
+    PageTransparencyGroupInspection, inspect_document_page_transparency_groups,
+    inspect_document_page_transparency_groups_with_lookup,
+};
 pub use page_tree_kid_targets::{
     PageTreeKidTargetInspection, PageTreeKidTargetsInspection, PageTreeKidTargetsInspectionError,
     PageTreeKidTargetsInspectionRejection, inspect_page_tree_kid_targets,
@@ -285,6 +296,10 @@ pub use trailer_prev::{
 pub use trailer_root::{
     ClassicXrefTrailerRootInspection, ClassicXrefTrailerRootInspectionError,
     ClassicXrefTrailerRootInspectionRejection, inspect_classic_xref_trailer_root,
+};
+pub use transparency_group_classify::{
+    ClassifiedTransparencyGroup, SkippedTransparencyGroup, SkippedTransparencyGroupReason,
+    TransparencyGroupColorSpace, TransparencyGroupParamClass, classify_transparency_group_entry,
 };
 pub use xref_chain::{
     MAX_XREF_STREAM_CHAIN_ENTRIES, MAX_XREF_STREAM_CHAIN_SECTIONS, XrefStreamChain,

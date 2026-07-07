@@ -1,5 +1,16 @@
 # presslint Journal
 
+## T160 - Transparency Group Audit Findings
+
+- `GraphicsStateFindingSource` gains additive page/form transparency-group
+  variants. The audit emits the page variant when a page dictionary contains
+  `/Group << /S /Transparency ... >>`, with `transparency=true` and
+  `unclassified=true` only for malformed or out-of-scope group safety fields.
+- Page `/Group` facts are derived from the new pdf-side page-group inspector and
+  are emitted alongside each page's ExtGState findings in document order.
+  Malformed or unknowable page `/Group` entries become additive transparency
+  group coverage gaps instead of being reported as ExtGState facts.
+
 ## T158 - Audit graphics-state findings, page scope (Phase 1-4)
 
 - `ColorUsageAudit` gains ONE additive top-level field:

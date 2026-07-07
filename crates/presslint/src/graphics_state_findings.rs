@@ -25,9 +25,10 @@ use presslint_inventory::{
     SoftMaskClass,
 };
 use presslint_pdf::{
-    DocumentAccessBackend, ObjectLookup, SkippedExtGStateResource, SkippedExtGStateResourceReason,
-    SkippedPageXObjectResourceReason, inspect_document_access,
+    DocumentAccessBackend, ObjectLookup, PageTransparencyGroupInspection, SkippedExtGStateResource,
+    SkippedExtGStateResourceReason, SkippedPageXObjectResourceReason, inspect_document_access,
     inspect_document_page_extgstate_resources_with_lookup,
+    inspect_document_page_transparency_groups_with_lookup,
 };
 use presslint_types::PageIndex;
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,14 @@ pub enum GraphicsStateFindingSource {
     /// emits this variant. Deep form-scope findings are a named residual for
     /// the transparency-group (`/Group`) slice era.
     FormExtGState,
+    /// The page's own top-level `/Group` dictionary.
+    PageTransparencyGroup,
+    /// A form `XObject`'s own top-level `/Group` dictionary.
+    ///
+    /// DECLARED CONTRACT ONLY: this slice emits page-scope transparency-group
+    /// findings. Deep form-scope guard/audit wiring needs a future form
+    /// invocation bridge.
+    FormTransparencyGroup,
 }
 
 /// One aggregated per-page declared graphics-state finding.
@@ -121,8 +130,14 @@ pub fn scan_document_graphics_state(input: &[u8]) -> GraphicsStateScan {
     ) else {
         return inspection_error_scan();
     };
+    let page_groups = inspect_document_page_transparency_groups_with_lookup(
+        input,
+        lookup,
+        access.page_tree_root.object_byte_offset,
+    );
 
     let mut scan = GraphicsStateScan::default();
+    let page_groups_ref = page_groups.as_ref().ok();
     for page in &report.pages {
         // The env mapping is the same one the walker consumes: named
         // skips surface as all-`Unresolved` entries, so the derivation sees
@@ -139,6 +154,18 @@ pub fn scan_document_graphics_state(input: &[u8]) -> GraphicsStateScan {
         if let Some(finding) = derive_page_extgstate_finding(page_index, &env) {
             scan.findings.push(finding);
         }
+        if let Some(group_page) = page_groups_ref.and_then(|groups| groups.pages.get(page.ordinal))
+        {
+            if let Some(finding) = derive_page_transparency_group_finding(page_index, group_page) {
+                scan.findings.push(finding);
+            }
+            if !group_page.skipped.is_empty() {
+                scan.coverage_gaps.push(page_gap(
+                    CoverageGapKind::TransparencyGroupSkipped,
+                    page_index,
+                ));
+            }
+        }
         for skip in &page.skipped {
             if is_hidden_extgstate_skip(skip, &env) {
                 scan.coverage_gaps.push(page_gap(
@@ -147,6 +174,12 @@ pub fn scan_document_graphics_state(input: &[u8]) -> GraphicsStateScan {
                 ));
             }
         }
+    }
+    match page_groups {
+        Ok(_) => {}
+        Err(_) => scan.coverage_gaps.push(pageless_gap(
+            CoverageGapKind::TransparencyGroupInspectionError,
+        )),
     }
     scan
 }
@@ -181,6 +214,25 @@ fn derive_page_extgstate_finding(
     }
     (finding.overprint || finding.transparency || finding.unresolved || finding.unclassified)
         .then_some(finding)
+}
+
+/// Aggregate one page's own top-level `/Group` into at most one
+/// [`GraphicsStateFinding`] with source
+/// [`GraphicsStateFindingSource::PageTransparencyGroup`].
+#[must_use]
+fn derive_page_transparency_group_finding(
+    page: PageIndex,
+    inspection: &PageTransparencyGroupInspection,
+) -> Option<GraphicsStateFinding> {
+    let group = inspection.group.as_ref()?;
+    Some(GraphicsStateFinding {
+        page,
+        source: GraphicsStateFindingSource::PageTransparencyGroup,
+        overprint: false,
+        transparency: group.transparency,
+        unresolved: false,
+        unclassified: group.has_unclassified_safety_field(),
+    })
 }
 
 /// Whether a resource declares overprint-relevant state: `OP`/`op` written

@@ -15,6 +15,19 @@ conversion (F4-2), generalised to MULTI-LINK source-space routing (F4-5) and, as
 of T136, to MULTI-content-stream pages (each content-stream OBJECT edited
 independently).
 
+## T160 - Page Transparency Group Convert Guard
+
+`convert_content_colors_incremental` now preflights selected pages for top-level
+page `/Group` transparency before editing. A page with
+`/Group << /S /Transparency ... >>`, or a page whose `/Group` entry is present
+but unknowable, is skipped byte-verbatim even when no `gs` operator appears.
+
+The public skip taxonomy gains additive `TransparencyGroupUnsafe {
+transparency, unresolved, unclassified }`; existing ExtGState skip shapes are
+unchanged. Form-group conversion guarding remains deferred until the converter
+has a form invocation bridge that can identify page-owned form groups without a
+new content interpreter.
+
 ## T159 - Precision ExtGState Guard for Device-Colour Conversion
 
 `convert_content_colors_incremental` now uses the page `/ExtGState` resource

@@ -289,7 +289,8 @@ const fn map_skip_reason(reason: PipelineSkipReason) -> ContentColorRewriteSkipR
         // only for exhaustiveness and folds into the same reason for totality.
         PipelineSkipReason::Unchanged
         | PipelineSkipReason::ExtGStatePresent
-        | PipelineSkipReason::ExtGStateUnsafe { .. } => {
+        | PipelineSkipReason::ExtGStateUnsafe { .. }
+        | PipelineSkipReason::TransparencyGroupUnsafe { .. } => {
             ContentColorRewriteSkipReason::NoMatchingOperators
         }
     }

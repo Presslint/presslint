@@ -22,12 +22,14 @@ use presslint_pdf::{
     DictionaryValueKind, DocumentAccessBackend, DocumentAccessError, DocumentAccessRejection,
     DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
     DocumentPageExtGStateResourcesInspection, DocumentPageExtGStateResourcesInspectionError,
+    DocumentPageTransparencyGroupsInspection, DocumentPageTransparencyGroupsInspectionError,
     FlateDecodeParameters, FlateDecodeParametersResolution, IndirectObjectEditDecision,
     IndirectObjectEditDisposition, IndirectRef, ObjectLookup, PageExtGStateResourcesInspection,
-    classify_content_stream_filter, content_stream_data_slice, decide_indirect_object_edit,
-    decode_flate_stream, encode_flate_stream, inspect_document_access,
+    PageTransparencyGroupInspection, classify_content_stream_filter, content_stream_data_slice,
+    decide_indirect_object_edit, decode_flate_stream, encode_flate_stream, inspect_document_access,
     inspect_document_page_content_extents_with_lookup,
-    inspect_document_page_extgstate_resources_with_lookup, inspect_indirect_object_dictionary,
+    inspect_document_page_extgstate_resources_with_lookup,
+    inspect_document_page_transparency_groups_with_lookup, inspect_indirect_object_dictionary,
     resolve_flate_decode_parameters,
 };
 use presslint_syntax::{serialize_tokens_unmodified, tokenize};
@@ -136,6 +138,11 @@ pub enum PipelineSkipReason {
         unclassified: bool,
         gs_count: u32,
     },
+    TransparencyGroupUnsafe {
+        transparency: bool,
+        unresolved: bool,
+        unclassified: bool,
+    },
     Unchanged,
 }
 
@@ -228,15 +235,7 @@ where
 {
     // Existing callers stay behaviourally identical: a no-op preflight that never
     // poisons a page and does not pay the preflight decode pass.
-    edit_page_content_incremental_indexed_inner(
-        input,
-        pages,
-        mode,
-        None::<
-            &fn(PageIndex, Option<&PageExtGStateResourcesInspection>, &[Vec<u8>]) -> PagePreflight,
-        >,
-        edit,
-    )
+    edit_page_content_incremental_indexed_inner(input, pages, mode, None, edit)
 }
 
 /// Page-aware, MULTI-stream-capable content edit with a GENERIC, OPT-IN page-level
@@ -266,21 +265,25 @@ pub fn edit_page_content_incremental_indexed_with_preflight<P, F>(
     edit: F,
 ) -> Result<EditPageContentOutput, EditPageContentError>
 where
-    P: Fn(PageIndex, Option<&PageExtGStateResourcesInspection>, &[Vec<u8>]) -> PagePreflight,
+    P: Fn(
+        PageIndex,
+        Option<&PageExtGStateResourcesInspection>,
+        Option<&PageTransparencyGroupInspection>,
+        &[Vec<u8>],
+    ) -> PagePreflight,
     F: Fn(PageIndex, &[u8]) -> EditedContent,
 {
     edit_page_content_incremental_indexed_inner(input, pages, mode, Some(&preflight), edit)
 }
 
-fn edit_page_content_incremental_indexed_inner<P, F>(
+fn edit_page_content_incremental_indexed_inner<F>(
     input: &[u8],
     pages: &PageSelection,
     mode: StreamMode,
-    preflight: Option<&P>,
+    preflight: Option<&PagePreflightCallback<'_>>,
     edit: F,
 ) -> Result<EditPageContentOutput, EditPageContentError>
 where
-    P: Fn(PageIndex, Option<&PageExtGStateResourcesInspection>, &[Vec<u8>]) -> PagePreflight,
     F: Fn(PageIndex, &[u8]) -> EditedContent,
 {
     let access = inspect_document_access(input).map_err(|error| EditPageContentError::Open {
@@ -307,6 +310,12 @@ where
         access.page_tree_root.object_byte_offset,
         preflight.is_some(),
     );
+    let group_document = inspect_transparency_group_document_for_preflight(
+        input,
+        lookup,
+        access.page_tree_root.object_byte_offset,
+        preflight.is_some(),
+    );
 
     let mut edited = Vec::new();
     let mut skipped = Vec::new();
@@ -326,20 +335,14 @@ where
             }),
             PageStreamsPlan::Streams(outcomes) => {
                 if let Some(preflight) = &preflight {
-                    let extgstate_page =
-                        match extgstate_page_for_preflight(&extgstate_document, index) {
-                            Ok(page) => page,
-                            Err(reason) => {
-                                skipped.push(whole_page_skip(page_index_of(page), reason));
-                                continue;
-                            }
-                        };
-                    if let Some(skip) = run_page_preflight(
+                    if let Some(skip) = preflight_skip_for_page(
                         input,
-                        page_index_of(page),
-                        extgstate_page,
+                        index,
+                        page,
                         &outcomes,
                         *preflight,
+                        &extgstate_document,
+                        &group_document,
                     ) {
                         skipped.push(skip);
                         continue;
@@ -412,6 +415,18 @@ type ExtGStateDocumentPreflight = Option<
     Result<DocumentPageExtGStateResourcesInspection, DocumentPageExtGStateResourcesInspectionError>,
 >;
 
+type TransparencyGroupDocumentPreflight = Option<
+    Result<DocumentPageTransparencyGroupsInspection, DocumentPageTransparencyGroupsInspectionError>,
+>;
+
+type PagePreflightCallback<'a> = dyn Fn(
+        PageIndex,
+        Option<&PageExtGStateResourcesInspection>,
+        Option<&PageTransparencyGroupInspection>,
+        &[Vec<u8>],
+    ) -> PagePreflight
+    + 'a;
+
 fn inspect_extgstate_document_for_preflight(
     input: &[u8],
     lookup: ObjectLookup<'_>,
@@ -444,6 +459,36 @@ fn extgstate_page_for_preflight(
     }
 }
 
+fn inspect_transparency_group_document_for_preflight(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    root_node_object_offset: usize,
+    enabled: bool,
+) -> TransparencyGroupDocumentPreflight {
+    enabled.then(|| {
+        inspect_document_page_transparency_groups_with_lookup(
+            input,
+            lookup,
+            root_node_object_offset,
+        )
+    })
+}
+
+fn transparency_group_page_for_preflight(
+    document: &TransparencyGroupDocumentPreflight,
+    index: usize,
+) -> Result<Option<&PageTransparencyGroupInspection>, PipelineSkipReason> {
+    match document {
+        Some(Ok(document)) => Ok(document.pages.get(index)),
+        Some(Err(_)) => Err(PipelineSkipReason::TransparencyGroupUnsafe {
+            transparency: false,
+            unresolved: true,
+            unclassified: true,
+        }),
+        None => Ok(None),
+    }
+}
+
 const fn whole_page_skip(page_index: PageIndex, reason: PipelineSkipReason) -> PipelinePageSkip {
     PipelinePageSkip {
         page_index,
@@ -453,16 +498,42 @@ const fn whole_page_skip(page_index: PageIndex, reason: PipelineSkipReason) -> P
     }
 }
 
-fn run_page_preflight<P>(
+fn preflight_skip_for_page(
+    input: &[u8],
+    index: usize,
+    page: &DocumentPageContentExtentInspection,
+    outcomes: &[StreamOutcome<'_>],
+    preflight: &PagePreflightCallback<'_>,
+    extgstate_document: &ExtGStateDocumentPreflight,
+    group_document: &TransparencyGroupDocumentPreflight,
+) -> Option<PipelinePageSkip> {
+    let page_index = page_index_of(page);
+    let extgstate_page = match extgstate_page_for_preflight(extgstate_document, index) {
+        Ok(page) => page,
+        Err(reason) => return Some(whole_page_skip(page_index, reason)),
+    };
+    let group_page = match transparency_group_page_for_preflight(group_document, index) {
+        Ok(page) => page,
+        Err(reason) => return Some(whole_page_skip(page_index, reason)),
+    };
+    run_page_preflight(
+        input,
+        page_index,
+        extgstate_page,
+        group_page,
+        outcomes,
+        preflight,
+    )
+}
+
+fn run_page_preflight(
     input: &[u8],
     page_index: PageIndex,
     extgstate_page: Option<&PageExtGStateResourcesInspection>,
+    group_page: Option<&PageTransparencyGroupInspection>,
     outcomes: &[StreamOutcome<'_>],
-    preflight: &P,
-) -> Option<PipelinePageSkip>
-where
-    P: Fn(PageIndex, Option<&PageExtGStateResourcesInspection>, &[Vec<u8>]) -> PagePreflight,
-{
+    preflight: &PagePreflightCallback<'_>,
+) -> Option<PipelinePageSkip> {
     // PAGE-LEVEL PREFLIGHT: decode this page's located (editable) streams ONCE
     // and let the hook poison the whole page before any dirty object is emitted.
     // Undecodable/skipped slots are excluded from the scan (they are never
@@ -474,7 +545,8 @@ where
             StreamOutcome::Skip { .. } => None,
         })
         .collect();
-    if let PagePreflight::SkipPage(reason) = preflight(page_index, extgstate_page, &decoded_streams)
+    if let PagePreflight::SkipPage(reason) =
+        preflight(page_index, extgstate_page, group_page, &decoded_streams)
     {
         Some(PipelinePageSkip {
             page_index,

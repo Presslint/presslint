@@ -586,6 +586,17 @@ fn page_finding(
     }
 }
 
+fn group_finding(transparency: bool, unclassified: bool) -> GraphicsStateFinding {
+    GraphicsStateFinding {
+        page: PageIndex(0),
+        source: GraphicsStateFindingSource::PageTransparencyGroup,
+        overprint: false,
+        transparency,
+        unresolved: false,
+        unclassified,
+    }
+}
+
 fn audit_extgstate_page(dict: &str) -> Result<ColorUsageAudit, String> {
     audit_color_usage(&page_with_extgstate_pdf(dict, CMYK_CONTENT_NO_GS), 1024)
         .map_err(|error| format!("{error:?}"))
@@ -627,6 +638,18 @@ fn graphics_state_finding_serde_shape_is_pinned() -> Result<(), String> {
         TestSerdeValue::String("form_ext_g_state".to_string())
     );
     round_trip(&GraphicsStateFindingSource::FormExtGState)?;
+    assert_eq!(
+        serde_value(&GraphicsStateFindingSource::PageTransparencyGroup)
+            .map_err(|error| error.to_string())?,
+        TestSerdeValue::String("page_transparency_group".to_string())
+    );
+    assert_eq!(
+        serde_value(&GraphicsStateFindingSource::FormTransparencyGroup)
+            .map_err(|error| error.to_string())?,
+        TestSerdeValue::String("form_transparency_group".to_string())
+    );
+    round_trip(&GraphicsStateFindingSource::PageTransparencyGroup)?;
+    round_trip(&GraphicsStateFindingSource::FormTransparencyGroup)?;
 
     // The two additive coverage-gap kinds are shape-locked the same way.
     assert_eq!(
@@ -640,6 +663,17 @@ fn graphics_state_finding_serde_shape_is_pinned() -> Result<(), String> {
         TestSerdeValue::String("ext_g_state_resource_skipped".to_string())
     );
     round_trip(&CoverageGapKind::ExtGStateResourceSkipped)?;
+    assert_eq!(
+        serde_value(&CoverageGapKind::TransparencyGroupInspectionError)
+            .map_err(|error| error.to_string())?,
+        TestSerdeValue::String("transparency_group_inspection_error".to_string())
+    );
+    assert_eq!(
+        serde_value(&CoverageGapKind::TransparencyGroupSkipped)
+            .map_err(|error| error.to_string())?,
+        TestSerdeValue::String("transparency_group_skipped".to_string())
+    );
+    round_trip(&CoverageGapKind::TransparencyGroupSkipped)?;
     Ok(())
 }
 
@@ -709,6 +743,39 @@ fn finding_bearing_audit_pins_the_graphics_state_findings_entry() -> Result<(), 
         ])])
     );
     round_trip(&audit)?;
+    Ok(())
+}
+
+#[test]
+fn page_transparency_group_reports_transparency_finding() -> Result<(), String> {
+    let mut page = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << >> ".to_vec();
+    page.extend_from_slice(
+        b"/Group << /S /Transparency /CS /DeviceCMYK /I true /K false >> /Contents 4 0 R >>\nendobj\n",
+    );
+    let content_object = stream_object(4, "", b"q\nQ");
+    let source = classic_pdf(&[CATALOG, PAGES, &page, &content_object]);
+    let audit = audit_color_usage(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(
+        audit.graphics_state_findings,
+        vec![group_finding(true, false)]
+    );
+    assert!(audit.coverage_gaps.is_empty());
+    Ok(())
+}
+
+#[test]
+fn malformed_page_group_reports_coverage_gap() -> Result<(), String> {
+    let mut page = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << >> ".to_vec();
+    page.extend_from_slice(b"/Group 42 /Contents 4 0 R >>\nendobj\n");
+    let content_object = stream_object(4, "", b"q\nQ");
+    let source = classic_pdf(&[CATALOG, PAGES, &page, &content_object]);
+    let audit = audit_color_usage(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    assert!(audit.graphics_state_findings.is_empty());
+    assert!(audit.coverage_gaps.iter().any(|gap| {
+        gap.kind == CoverageGapKind::TransparencyGroupSkipped && gap.page == Some(PageIndex(0))
+    }));
     Ok(())
 }
 

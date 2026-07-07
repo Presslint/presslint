@@ -1,4 +1,4 @@
-//! Precision page-level `ExtGState` guard for the device-colour converter.
+//! Precision page-level graphics-state guard for the device-colour converter.
 //!
 //! A page's content streams share graphics state, so one unsafe `gs` activation
 //! poisons the whole page. This guard scans already-decoded streams and checks
@@ -6,11 +6,9 @@
 //! resources, and resources with only harmless unclassified keys such as `/LW`,
 //! do not block conversion.
 //!
-//! Known residual: transparency groups (`/Group`) can make colour conversion
-//! unsafe without any `gs` operator. That belongs to a later graphics-state
-//! slice; this guard intentionally covers only page `ExtGState` activation.
-
-use presslint_pdf::{ClassifiedExtGStateResource, PageExtGStateResourcesInspection};
+use presslint_pdf::{
+    ClassifiedExtGStateResource, PageExtGStateResourcesInspection, PageTransparencyGroupInspection,
+};
 use presslint_syntax::{Token, TokenKind, assemble_operators, tokenize};
 
 use crate::content_edit_pipeline::PipelineSkipReason;
@@ -68,6 +66,27 @@ pub fn extgstate_page_skip_reason(
     } else {
         Some(flags.into_skip_reason())
     }
+}
+
+/// Return a page skip reason when the page dictionary establishes, or hides
+/// whether it establishes, a transparency group.
+#[must_use]
+pub fn transparency_group_page_skip_reason(
+    page_group: Option<&PageTransparencyGroupInspection>,
+) -> Option<PipelineSkipReason> {
+    let page_group = page_group?;
+    if let Some(group) = &page_group.group {
+        return Some(PipelineSkipReason::TransparencyGroupUnsafe {
+            transparency: group.transparency,
+            unresolved: false,
+            unclassified: group.has_unclassified_safety_field(),
+        });
+    }
+    (!page_group.skipped.is_empty()).then_some(PipelineSkipReason::TransparencyGroupUnsafe {
+        transparency: false,
+        unresolved: true,
+        unclassified: true,
+    })
 }
 
 fn scan_stream(

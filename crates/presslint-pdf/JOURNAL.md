@@ -4,6 +4,18 @@ Older accumulated journal history lives in [JOURNAL-archive-2.md](JOURNAL-archiv
 
 ## Current State
 
+### T160 - Transparency Group Inspectors
+
+- Added shallow page/form `/Group` classifiers for Phase-1 safety: recognise
+  `/S /Transparency`, record `/CS` as name/array shape, classify `/I` and `/K`
+  booleans when present, and preserve absence without inventing defaults.
+- Page inspection walks leaf pages in document order but reads `/Group` only
+  from each page dictionary; it is not inherited and is not a resource entry.
+  Form inspection reads only the form stream dictionary.
+- Malformed, unresolved, non-dictionary, and non-transparency group shapes are
+  structured diagnostics. The inspectors retain only small classified values and
+  byte-range diagnostics, not stream bodies or compositing state.
+
 ### T159 - ExtGState Safety Predicates
 
 - Added small predicate helpers on `ClassifiedExtGStateResource` for the Phase-1

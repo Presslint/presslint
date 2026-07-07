@@ -30,6 +30,19 @@ fn classic_extgstate_pdf(resources: &str, data: &[u8]) -> Vec<u8> {
     ])
 }
 
+fn classic_page_group_pdf(group: &str, data: &[u8]) -> Vec<u8> {
+    let page = format!(
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> /Group {group} /Contents 4 0 R >>"
+    )
+    .into_bytes();
+    assemble_classic(&[
+        CATALOG.to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        page,
+        stream_body("", data),
+    ])
+}
+
 fn classic_two_stream_extgstate_pdf(resources: &str, stream_a: &[u8], stream_b: &[u8]) -> Vec<u8> {
     assemble_classic(&[
         CATALOG.to_vec(),
@@ -252,4 +265,38 @@ fn page_without_declared_resources_and_no_gs_still_converts() {
 
     assert!(output.skipped.is_empty());
     assert_eq!(output.converted.len(), 1);
+}
+
+#[test]
+fn page_transparency_group_without_gs_skips_whole_page() {
+    let input = classic_page_group_pdf("<< /S /Transparency >>", b"0 0 0 1 k\n");
+    let output = convert_cmyk(&input);
+
+    assert_extgstate_skip(
+        &output,
+        ConvertPageSkipReason::TransparencyGroupUnsafe {
+            transparency: true,
+            unresolved: false,
+            unclassified: false,
+        },
+    );
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    assert_eq!(occurrence_count(&output.bytes, b"4 0 obj"), 1);
+}
+
+#[test]
+fn malformed_page_group_without_gs_skips_whole_page() {
+    let input = classic_page_group_pdf("42", b"0 0 0 1 k\n");
+    let output = convert_cmyk(&input);
+
+    assert_extgstate_skip(
+        &output,
+        ConvertPageSkipReason::TransparencyGroupUnsafe {
+            transparency: false,
+            unresolved: true,
+            unclassified: true,
+        },
+    );
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    assert_eq!(occurrence_count(&output.bytes, b"4 0 obj"), 1);
 }

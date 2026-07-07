@@ -44,7 +44,7 @@ use crate::{
         PipelineSkipReason, edit_page_content_incremental_indexed_with_preflight,
     },
     content_stream_plan::StreamMode,
-    extgstate_page_guard::extgstate_page_skip_reason,
+    extgstate_page_guard::{extgstate_page_skip_reason, transparency_group_page_skip_reason},
     link_routing::{DeviceLinkInput, LinkConversionCounts, LinkRouting, build_link_routing},
     pdf_number_serialize::serialize_color_component,
     selector_match::{
@@ -189,6 +189,17 @@ pub enum ConvertPageSkipReason {
         unclassified: bool,
         /// Number of `gs` operators seen in the page's decoded streams.
         gs_count: u32,
+    },
+    /// A page top-level `/Group` establishes, or hides whether it establishes,
+    /// transparency semantics that this direct converter cannot safely edit.
+    TransparencyGroupUnsafe {
+        /// True when `/Group << /S /Transparency ... >>` was classified.
+        transparency: bool,
+        /// True when the page-group inspection could not resolve the fact.
+        unresolved: bool,
+        /// True when the group shape or a group safety field is malformed or
+        /// outside the Phase-1 classifier.
+        unclassified: bool,
     },
 }
 
@@ -390,8 +401,9 @@ pub fn convert_content_colors_incremental(
         // Page streams share graphics state, so any unsafe `gs` activation
         // poisons the whole page. Harmless declared or unused resources do not
         // block conversion.
-        |_page, extgstate_page, decoded_streams| {
-            extgstate_page_skip_reason(extgstate_page, decoded_streams)
+        |_page, extgstate_page, group_page, decoded_streams| {
+            transparency_group_page_skip_reason(group_page)
+                .or_else(|| extgstate_page_skip_reason(extgstate_page, decoded_streams))
                 .map_or(PagePreflight::Continue, PagePreflight::SkipPage)
         },
         |page_index, decoded| {
@@ -778,6 +790,15 @@ const fn map_skip_reason(reason: PipelineSkipReason) -> ConvertPageSkipReason {
             unresolved,
             unclassified,
             gs_count,
+        },
+        PipelineSkipReason::TransparencyGroupUnsafe {
+            transparency,
+            unresolved,
+            unclassified,
+        } => ConvertPageSkipReason::TransparencyGroupUnsafe {
+            transparency,
+            unresolved,
+            unclassified,
         },
     }
 }

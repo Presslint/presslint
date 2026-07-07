@@ -220,7 +220,10 @@ const fn map_skip_reason(reason: PipelineSkipReason) -> ReencodePageSkipReason {
         PipelineSkipReason::NoContentStream
         | PipelineSkipReason::Unchanged
         | PipelineSkipReason::ExtGStatePresent
-        | PipelineSkipReason::ExtGStateUnsafe { .. } => ReencodePageSkipReason::NoContentStream,
+        | PipelineSkipReason::ExtGStateUnsafe { .. }
+        | PipelineSkipReason::TransparencyGroupUnsafe { .. } => {
+            ReencodePageSkipReason::NoContentStream
+        }
         PipelineSkipReason::CompressedContentObject {
             object_stream_number,
             index_within_object_stream,
