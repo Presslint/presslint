@@ -38,6 +38,7 @@ mod image_xobject;
 mod indirect_reference;
 mod integer_object;
 mod object_body;
+mod object_body_references;
 mod object_dictionary;
 mod object_header;
 mod object_lookup;
@@ -173,6 +174,12 @@ pub use object_body::{
     IndirectObjectBodyLeadingTokenKind, IndirectObjectBodyTokenInspection,
     IndirectObjectBodyTokenInspectionError, IndirectObjectBodyTokenInspectionRejection,
     inspect_indirect_object_body_token,
+};
+pub use object_body_references::{
+    MAX_OBJECT_BODY_REFERENCES, ObjectBodyReferencesInspection,
+    ObjectBodyReferencesInspectionError, ObjectBodyReferencesInspectionRejection,
+    ObjectBodyReferencesTruncation, SkippedObjectBodyReference, inspect_object_body_references,
+    inspect_object_body_references_resolved, scan_indirect_references_in_span,
 };
 pub use object_dictionary::{
     CompressedObjectDictionaryInspection, IndirectObjectDictionaryInspection,
