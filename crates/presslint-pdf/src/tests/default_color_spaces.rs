@@ -189,6 +189,32 @@ fn default_color_spaces_classifies_icc_based_n_four_without_stream_bytes() {
 }
 
 #[test]
+fn default_color_spaces_propagate_icc_descriptor_facts() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /DefaultCMYK [ /ICCBased 2 0 R ] >> >> >>\nstream\n\nendstream\nendobj\n",
+        b"2 0 obj\n<< /N 4 /Range [ 0 1 0 1 0 1 0 1 ] /Alternate /DeviceCMYK /Length 1 >>\nstream\nx\nendstream\nendobj\n",
+    ]);
+    let xref = pdf.xref();
+
+    let report = inspect_form_default_color_spaces(
+        &pdf.source,
+        ObjectLookup::ClassicXref(&xref),
+        pdf.object_offset(1),
+    );
+
+    assert!(report.skipped.is_empty());
+    let fact = &report.defaults[0].color_space;
+    assert_eq!(fact.family, ColorSpaceFamily::IccBased);
+    assert_eq!(
+        fact.icc_profile_stream,
+        Some(crate::tests::indirect_ref(2, 0))
+    );
+    assert_eq!(fact.icc_range_entry_count, Some(8));
+    assert_eq!(fact.icc_alternate_present, Some(true));
+    assert_eq!(fact.alternate_space, Some(ColorSpaceFamily::DeviceCmyk));
+}
+
+#[test]
 fn default_color_spaces_classifies_indexed_replacement_fact() {
     let pdf = fixture(&[
         b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /DefaultRGB [ /Indexed /DeviceRGB 255 <000102> ] >> >> >>\nstream\n\nendstream\nendobj\n",

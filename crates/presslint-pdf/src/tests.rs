@@ -32,6 +32,7 @@ mod object_stream;
 mod object_stream_objects;
 mod output_intents;
 mod page_boxes;
+mod page_color_space_classify;
 mod page_content_extents;
 mod page_content_targets;
 mod page_contents;

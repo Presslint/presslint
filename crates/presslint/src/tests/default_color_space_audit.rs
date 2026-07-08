@@ -84,6 +84,7 @@ fn empty_audit() -> ColorUsageAudit {
         rgb_findings: Vec::new(),
         graphics_state_findings: Vec::new(),
         default_color_space_findings: Vec::new(),
+        icc_based_findings: Vec::new(),
         output_intent_eligibility: None,
         coverage_gaps: Vec::new(),
         inventory: PdfInventory {

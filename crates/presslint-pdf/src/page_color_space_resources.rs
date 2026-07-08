@@ -97,6 +97,15 @@ pub struct ClassifiedColorSpaceDefinition {
     /// Shallow `Indexed` lookup operand shape; never the lookup bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_lookup: Option<IndexedLookupDescriptor>,
+    /// ICC profile stream reference from `[/ICCBased ref]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icc_profile_stream: Option<IndirectRef>,
+    /// Shallow element count of a direct ICC profile dictionary `/Range` array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icc_range_entry_count: Option<usize>,
+    /// Whether an ICC profile dictionary carried an `/Alternate` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icc_alternate_present: Option<bool>,
 }
 
 /// One classified `/Resources /ColorSpace` entry.
@@ -129,6 +138,15 @@ pub struct ClassifiedColorSpaceResource {
     /// Shallow `Indexed` lookup operand shape; never the lookup bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_lookup: Option<IndexedLookupDescriptor>,
+    /// ICC profile stream reference from `[/ICCBased ref]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icc_profile_stream: Option<IndirectRef>,
+    /// Shallow element count of a direct ICC profile dictionary `/Range` array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icc_range_entry_count: Option<usize>,
+    /// Whether an ICC profile dictionary carried an `/Alternate` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icc_alternate_present: Option<bool>,
 }
 
 impl ClassifiedColorSpaceResource {
@@ -143,6 +161,9 @@ impl ClassifiedColorSpaceResource {
             base_space: self.base_space,
             indexed_hival: self.indexed_hival,
             indexed_lookup: self.indexed_lookup,
+            icc_profile_stream: self.icc_profile_stream,
+            icc_range_entry_count: self.icc_range_entry_count,
+            icc_alternate_present: self.icc_alternate_present,
         }
     }
 }

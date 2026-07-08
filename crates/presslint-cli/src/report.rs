@@ -209,6 +209,12 @@ pub fn render_audit_human(
         audit.default_color_space_findings.len()
     )
     .map_err(stderr_error)?;
+    writeln!(
+        out,
+        "  icc-based findings: {}",
+        audit.icc_based_findings.len()
+    )
+    .map_err(stderr_error)?;
     writeln!(out, "  spot names: {}", audit.spot_names.len()).map_err(stderr_error)?;
     writeln!(out, "  coverage gaps: {}", audit.coverage_gaps.len()).map_err(stderr_error)?;
     render_warnings(out, warnings)

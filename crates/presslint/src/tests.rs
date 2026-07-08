@@ -10,6 +10,7 @@ mod default_color_space_audit;
 mod extgstate_wiring;
 mod form_inventory;
 mod form_inventory_golden;
+mod icc_based_audit;
 mod pdf_inventory;
 mod pdf_query;
 mod preflight;

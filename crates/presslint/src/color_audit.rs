@@ -54,6 +54,7 @@ use crate::default_color_space_findings::{
     DefaultColorSpaceScan, scan_document_default_color_spaces,
 };
 use crate::graphics_state_findings::{GraphicsStateScan, scan_document_graphics_state};
+use crate::icc_based_findings::scan_document_icc_based_findings;
 use crate::pdf_inventory::{PdfInventory, PdfInventoryError, build_pdf_inventory};
 
 /// Run the read-only document color-usage audit over PDF bytes.
@@ -81,11 +82,13 @@ pub fn audit_color_usage(
     let graphics_state = scan_document_graphics_state(input);
     let default_color_spaces =
         scan_document_default_color_spaces(input, max_decoded_stream_bytes, &scan);
+    let icc_based_findings = scan_document_icc_based_findings(input);
     Ok(build_audit(
         inventory,
         scan,
         graphics_state,
         default_color_spaces,
+        icc_based_findings,
     ))
 }
 
@@ -133,6 +136,7 @@ pub fn build_color_usage_audit(inventory: PdfInventory) -> ColorUsageAudit {
         scan,
         GraphicsStateScan::default(),
         DefaultColorSpaceScan::default(),
+        Vec::new(),
     )
 }
 
@@ -146,6 +150,7 @@ fn build_audit(
     scan: Scan,
     graphics_state: GraphicsStateScan,
     default_color_spaces: DefaultColorSpaceScan,
+    icc_based_findings: Vec<crate::icc_based_findings::IccBasedFinding>,
 ) -> ColorUsageAudit {
     let mut coverage_gaps = scan.coverage_gaps;
     coverage_gaps.extend(default_color_spaces.coverage_gaps);
@@ -163,6 +168,7 @@ fn build_audit(
         rgb_findings: scan.rgb_findings,
         graphics_state_findings: graphics_state.findings,
         default_color_space_findings: default_color_spaces.findings,
+        icc_based_findings,
         output_intent_eligibility: None,
         coverage_gaps,
         inventory,

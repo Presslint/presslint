@@ -41,6 +41,9 @@ pub fn classify_color_space_entry(
         base_space: definition.base_space,
         indexed_hival: definition.indexed_hival,
         indexed_lookup: definition.indexed_lookup,
+        icc_profile_stream: definition.icc_profile_stream,
+        icc_range_entry_count: definition.icc_range_entry_count,
+        icc_alternate_present: definition.icc_alternate_present,
     })
 }
 
@@ -113,6 +116,9 @@ fn classify_name_family(
         base_space: None,
         indexed_hival: None,
         indexed_lookup: None,
+        icc_profile_stream: None,
+        icc_range_entry_count: None,
+        icc_alternate_present: None,
     })
 }
 
@@ -163,6 +169,13 @@ fn classify_icc_based(
     let dictionary = inspect_indirect_object_dictionary(input, object_byte_offset)
         .map_err(|_| SkippedColorSpaceResourceReason::MalformedColorSpaceOperand)?;
     let component_count = dictionary_usize(input, &dictionary.entries, b"/N");
+    let icc_range_entry_count =
+        dictionary_direct_array_count(input, &dictionary.entries, b"/Range");
+    let icc_alternate_present = Some(dictionary_key_present(
+        input,
+        &dictionary.entries,
+        b"/Alternate",
+    ));
     let alternate_space = dictionary_alternate(input, lookup, &dictionary.entries);
     Ok(ClassifiedColorSpaceDefinition {
         family: ColorSpaceFamily::IccBased,
@@ -172,6 +185,9 @@ fn classify_icc_based(
         base_space: None,
         indexed_hival: None,
         indexed_lookup: None,
+        icc_profile_stream: Some(reference),
+        icc_range_entry_count,
+        icc_alternate_present,
     })
 }
 
@@ -198,6 +214,9 @@ fn classify_separation(
         base_space: None,
         indexed_hival: None,
         indexed_lookup: None,
+        icc_profile_stream: None,
+        icc_range_entry_count: None,
+        icc_alternate_present: None,
     })
 }
 
@@ -235,6 +254,9 @@ fn classify_device_n(
         base_space: None,
         indexed_hival: None,
         indexed_lookup: None,
+        icc_profile_stream: None,
+        icc_range_entry_count: None,
+        icc_alternate_present: None,
     })
 }
 
@@ -264,6 +286,9 @@ fn classify_indexed(
         base_space,
         indexed_hival: Some(indexed_hival),
         indexed_lookup: Some(indexed_lookup_descriptor(input, lookup_operand)),
+        icc_profile_stream: None,
+        icc_range_entry_count: None,
+        icc_alternate_present: None,
     })
 }
 
@@ -416,6 +441,30 @@ fn dictionary_usize(input: &[u8], entries: &[DictionaryEntrySpan], key: &[u8]) -
         return None;
     }
     parse_usize_decimal(bytes)
+}
+
+/// Read the element count of a direct dictionary array value.
+///
+/// The shared array scanner has a 64-element cap. That is harmless for ICC
+/// `/Range`: ISO 32000-1 bounds legal `ICCBased` `N` to 1, 3, or 4, and even the
+/// broader ICC colour-space component limit of 15 would need only 30 entries.
+fn dictionary_direct_array_count(
+    input: &[u8],
+    entries: &[DictionaryEntrySpan],
+    key: &[u8],
+) -> Option<usize> {
+    let entry = unique_entry(input, entries, key).ok().flatten()?;
+    if entry.value_kind != DictionaryValueKind::Array {
+        return None;
+    }
+    Some(array_elements(input, entry.value_range.start).ok()?.len())
+}
+
+/// Report whether a dictionary key is present at least once.
+fn dictionary_key_present(input: &[u8], entries: &[DictionaryEntrySpan], key: &[u8]) -> bool {
+    entries
+        .iter()
+        .any(|entry| input.get(entry.key_range.start..entry.key_range.end) == Some(key))
 }
 
 /// Shallow `/Alternate` family classification for an `ICCBased` dictionary.

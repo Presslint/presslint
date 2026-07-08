@@ -73,3 +73,11 @@ derive macro crate. The command surface and parsing behavior remain the same.
   added.
 - Follow-up: internal per-stage library timing should use tracing spans or an
   explicit returned timing structure when the library is instrumented.
+
+## T168: ICCBased audit finding counter
+
+- Human audit reports now include an `icc-based findings` counter beside the
+  existing finding and coverage counters.
+- JSON output needs no CLI-specific shaping: it carries the library
+  `ColorUsageAudit` unchanged, including the additive `icc_based_findings`
+  vector when present and omitting it when empty.

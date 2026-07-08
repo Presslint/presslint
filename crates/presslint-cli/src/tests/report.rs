@@ -138,6 +138,7 @@ fn human_audit_report_surfaces_default_color_space_count() {
     let rendered = String::from_utf8(rendered).unwrap();
 
     assert!(rendered.contains("default color-space findings: 0"));
+    assert!(rendered.contains("icc-based findings: 0"));
 }
 
 fn synthetic_audit() -> ColorUsageAudit {
@@ -152,6 +153,7 @@ fn synthetic_audit() -> ColorUsageAudit {
         rgb_findings: Vec::new(),
         graphics_state_findings: Vec::new(),
         default_color_space_findings: Vec::new(),
+        icc_based_findings: Vec::new(),
         output_intent_eligibility: None,
         coverage_gaps: Vec::new(),
         inventory: PdfInventory {

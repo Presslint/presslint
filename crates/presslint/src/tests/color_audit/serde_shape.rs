@@ -33,6 +33,21 @@ fn has_eligibility_field(fields: &[(String, TestSerdeValue)]) -> bool {
         .any(|(key, _)| key == "output_intent_eligibility")
 }
 
+fn has_field(fields: &[(String, TestSerdeValue)], name: &str) -> bool {
+    fields.iter().any(|(key, _)| key == name)
+}
+
+fn byte_seq(bytes: &[u8]) -> TestSerdeValue {
+    TestSerdeValue::Seq(
+        bytes
+            .iter()
+            .copied()
+            .map(u64::from)
+            .map(TestSerdeValue::U64)
+            .collect(),
+    )
+}
+
 #[test]
 fn report_serde_round_trips_all_shapes() -> Result<(), String> {
     let inventory = synthetic_inventory(
@@ -177,6 +192,7 @@ fn audit_without_findings_omits_the_field_and_old_json_deserializes() -> Result<
     );
     let audit = build_color_usage_audit(inventory);
     assert!(audit.graphics_state_findings.is_empty());
+    assert!(audit.icc_based_findings.is_empty());
 
     let value = serde_value(&audit).map_err(|error| error.to_string())?;
     let TestSerdeValue::Map(fields) = &value else {
@@ -187,12 +203,81 @@ fn audit_without_findings_omits_the_field_and_old_json_deserializes() -> Result<
             .iter()
             .all(|(key, _)| key != "graphics_state_findings")
     );
+    assert!(!has_field(fields, "icc_based_findings"));
 
     // The serialized map WITHOUT the key is exactly an old-format report: it
     // must deserialize through `#[serde(default)]`.
     let decoded: ColorUsageAudit = from_serde_value(value).map_err(|error| error.to_string())?;
     assert!(decoded.graphics_state_findings.is_empty());
+    assert!(decoded.icc_based_findings.is_empty());
     assert_eq!(&decoded, &audit);
+    Ok(())
+}
+
+#[test]
+fn icc_based_finding_serde_shape_is_pinned() -> Result<(), String> {
+    let finding = crate::IccBasedFinding {
+        page: PageIndex(2),
+        source: crate::IccBasedFindingSource::PageColorSpaceResource,
+        resource_name: PdfName(b"CS0".to_vec()),
+        profile_stream: Some(crate::pdf::IndirectRef {
+            object_number: 5,
+            generation: 0,
+        }),
+        n: Some(4),
+        alternate_space: Some(ColorSpace::DeviceCmyk),
+        kind: crate::IccBasedFindingKind::RangeArityMismatch {
+            expected: 8,
+            got: 6,
+        },
+    };
+
+    let value = serde_value(&finding).map_err(|error| error.to_string())?;
+    assert_eq!(
+        value,
+        TestSerdeValue::Map(vec![
+            ("page".to_string(), TestSerdeValue::U64(2)),
+            (
+                "source".to_string(),
+                TestSerdeValue::String("page_color_space_resource".to_string()),
+            ),
+            ("resource_name".to_string(), byte_seq(b"CS0")),
+            (
+                "profile_stream".to_string(),
+                TestSerdeValue::Some(Box::new(TestSerdeValue::Map(vec![
+                    ("object_number".to_string(), TestSerdeValue::U64(5)),
+                    ("generation".to_string(), TestSerdeValue::U64(0)),
+                ]))),
+            ),
+            (
+                "n".to_string(),
+                TestSerdeValue::Some(Box::new(TestSerdeValue::U64(4))),
+            ),
+            (
+                "alternate_space".to_string(),
+                TestSerdeValue::Some(Box::new(TestSerdeValue::String("device_cmyk".to_string(),))),
+            ),
+            (
+                "kind".to_string(),
+                TestSerdeValue::Map(vec![
+                    (
+                        "kind".to_string(),
+                        TestSerdeValue::String("range_arity_mismatch".to_string()),
+                    ),
+                    ("expected".to_string(), TestSerdeValue::U64(8)),
+                    ("got".to_string(), TestSerdeValue::U64(6)),
+                ]),
+            ),
+        ])
+    );
+    round_trip(&finding)?;
+    round_trip(&crate::IccBasedFindingKind::MissingOrMalformedN)?;
+    round_trip(&crate::IccBasedFindingKind::AlternateComponentMismatch {
+        n: 3,
+        alternate_implied: 4,
+    })?;
+    round_trip(&crate::IccBasedFindingKind::AlternateUnclassified)?;
+    round_trip(&crate::IccBasedFindingSource::DefaultColorSpace)?;
     Ok(())
 }
 

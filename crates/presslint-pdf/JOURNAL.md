@@ -215,7 +215,7 @@ Older accumulated journal history lives in [JOURNAL-archive-2.md](JOURNAL-archiv
   buffer is dropped after the `/Contents` refs are extracted — the report still
   carries only offsets, refs, and small delegated enums; no `/ObjStm` buffer, PDF
   bytes, or object bodies are retained. No per-operator allocation added.
-- Tests (SYNTHETIC fixtures only; real corpus never committed): resolved
+- Tests (SYNTHETIC fixtures only; private fixtures never committed): resolved
   `/Contents` reader unit tests (uncompressed + compressed dict; single ref +
   array; array with non-reference skips; missing / duplicate / non-reference /
   malformed `/Contents`; non-dictionary body); a compressed leaf with reachable
@@ -985,3 +985,13 @@ Older accumulated journal history lives in [JOURNAL-archive-2.md](JOURNAL-archiv
 - Deferred: this slice does not thread the new lookup through page-tree/document
   access, follow `/Prev`, merge incremental xref sections, support hybrid
   references, or extract object streams. That remains future spine wiring.
+
+### T168 - ICCBased Descriptor Facts
+
+- `ClassifiedColorSpaceDefinition` and `ClassifiedColorSpaceResource` now carry
+  additive ICCBased facts: profile stream ref, direct `/Range` arity, and
+  tri-state `/Alternate` presence.
+- The classifier remains decode-free: no stream bytes, ICC headers, `/Range`
+  values, or profile payloads are read or retained.
+- Serde compatibility is additive: all three fields default and are omitted when
+  absent, preserving older JSON shapes.

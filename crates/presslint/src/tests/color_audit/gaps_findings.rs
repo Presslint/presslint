@@ -36,6 +36,25 @@ fn device_rgb_is_a_finding_not_a_coverage_gap() {
 }
 
 #[test]
+fn icc_based_observation_is_modeled_not_a_coverage_gap() {
+    let inventory = synthetic_inventory(
+        vec![entry(
+            0,
+            0,
+            ObjectKind::Vector,
+            vec![observation(ColorUsage::Fill, ColorSpace::IccBased)],
+        )],
+        vec![inventoried_page(0, 1)],
+    );
+
+    let audit = build_color_usage_audit(inventory);
+
+    assert_eq!(audit.status, ColorAuditStatus::Complete);
+    assert!(audit.coverage_gaps.is_empty());
+    assert!(audit.icc_based_findings.is_empty());
+}
+
+#[test]
 fn skipped_page_and_unmodeled_space_make_audit_incomplete() {
     let inventory = synthetic_inventory(
         vec![entry(

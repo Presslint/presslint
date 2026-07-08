@@ -957,3 +957,20 @@
   `ObjectLookup`.
 - Next queue after X: #28 TAIL (`/Prev` chaining plus multi-section merge),
   then #26, then F3 (#29, design-notes only).
+
+## T168 - ICCBased Audit Findings
+
+- Added the public `IccBasedFinding` / `IccBasedFindingKind` audit family and
+  re-exported it at the crate root. The pass scans page colour-space resources
+  and page default colour-space facts only; form-scope attribution is deferred.
+- Findings cover missing/malformed `/N`, direct `/Range` arity mismatches,
+  device-family `/Alternate` component mismatches, and present-but-unclassified
+  alternates. They report parallel descriptor facts and do not arbitrate which
+  side a renderer should trust.
+- `ColorUsageAudit` now has additive `icc_based_findings`, omitted when empty
+  and defaulted on deserialize. The audit status remains gap-driven only:
+  ICCBased findings never create coverage gaps, and `ColorSpace::IccBased`
+  stays in the modeled non-gap arm.
+- The pass is read-only and uses shallow structural inspections only. It does
+  not decode ICC streams, read profile headers, change inventory identities, or
+  alter paint, conversion, selector, writer, or digest behavior.

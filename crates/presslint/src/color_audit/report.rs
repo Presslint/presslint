@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::color_environment::OutputIntentEligibility;
 use crate::default_color_space_findings::DefaultColorSpaceFinding;
 use crate::graphics_state_findings::GraphicsStateFinding;
+use crate::icc_based_findings::IccBasedFinding;
 use crate::pdf_inventory::{PdfInventory, PdfInventoryError};
 
 /// Overall audit completeness.
@@ -228,6 +229,13 @@ pub struct ColorUsageAudit {
     /// serialization and absent in older reports.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_color_space_findings: Vec<DefaultColorSpaceFinding>,
+    /// Page-scope `ICCBased` dictionary descriptor findings, ordered by source:
+    /// named colour-space resources in page order, then default colour-space
+    /// facts in page order. These report shallow descriptor divergences only;
+    /// they do not decode profile streams, read ICC headers, apply alternates,
+    /// or affect coverage-gap status.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub icc_based_findings: Vec<IccBasedFinding>,
     /// Optional report-only output-intent eligibility result.
     ///
     /// This is populated only when a caller supplies an explicit

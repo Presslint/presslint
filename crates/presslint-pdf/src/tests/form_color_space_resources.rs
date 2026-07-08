@@ -54,7 +54,7 @@ fn fixture(objects: &[&[u8]]) -> Fixture {
 fn form_own_color_spaces_classify_icc_and_separation() {
     let pdf = fixture(&[
         b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /CS0 [ /ICCBased 2 0 R ] /CS1 [ /Separation /PANTONE /DeviceCMYK 3 0 R ] >> >> >>\nstream\n\nendstream\nendobj\n",
-        b"2 0 obj\n<< /N 4 /Length 1 >>\nstream\nx\nendstream\nendobj\n",
+        b"2 0 obj\n<< /N 4 /Range [ 0 1 0 1 0 1 0 1 ] /Length 1 >>\nstream\nx\nendstream\nendobj\n",
         b"3 0 obj\n<< /FunctionType 2 /Domain [ 0 1 ] /N 1 /Length 0 >>\nstream\n\nendstream\nendobj\n",
     ]);
 
@@ -71,6 +71,12 @@ fn form_own_color_spaces_classify_icc_and_separation() {
     assert_eq!(cs0.family, ColorSpaceFamily::IccBased);
     assert_eq!(cs0.component_count, Some(4));
     assert!(cs0.spot_names.is_empty());
+    assert_eq!(
+        cs0.icc_profile_stream,
+        Some(crate::tests::indirect_ref(2, 0))
+    );
+    assert_eq!(cs0.icc_range_entry_count, Some(8));
+    assert_eq!(cs0.icc_alternate_present, Some(false));
 
     let cs1 = &report.color_spaces[1];
     assert_eq!(cs1.name, PdfName(b"CS1".to_vec()));
