@@ -189,6 +189,31 @@ fn default_color_spaces_classifies_icc_based_n_four_without_stream_bytes() {
 }
 
 #[test]
+fn default_color_spaces_classifies_indexed_replacement_fact() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /DefaultRGB [ /Indexed /DeviceRGB 255 <000102> ] >> >> >>\nstream\n\nendstream\nendobj\n",
+    ]);
+    let xref = pdf.xref();
+
+    let report = inspect_form_default_color_spaces(
+        &pdf.source,
+        ObjectLookup::ClassicXref(&xref),
+        pdf.object_offset(1),
+    );
+
+    assert!(report.skipped.is_empty());
+    assert_eq!(report.defaults.len(), 1);
+    assert_eq!(report.defaults[0].kind, DefaultColorSpaceKind::DefaultRgb);
+    let fact = &report.defaults[0].color_space;
+    assert_eq!(fact.family, ColorSpaceFamily::Indexed);
+    assert_eq!(fact.component_count, Some(1));
+    assert!(fact.spot_names.is_empty());
+    assert_eq!(fact.base_space, Some(ColorSpaceFamily::DeviceRgb));
+    assert_eq!(fact.indexed_hival, Some(255));
+    assert!(!format!("{report:?}").contains("000102"));
+}
+
+#[test]
 fn default_color_spaces_classifies_separation_and_device_n_facts() {
     let pdf = fixture(&[
         b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /DefaultGray [ /Separation /SpotA /DeviceCMYK 2 0 R ] /DefaultCMYK [ /DeviceN [ /Cyan /SpotB ] /DeviceCMYK 2 0 R ] >> >> >>\nstream\n\nendstream\nendobj\n",

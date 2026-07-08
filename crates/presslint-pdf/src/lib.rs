@@ -219,8 +219,8 @@ pub use page_boxes::{
 pub use page_color_space_resources::{
     ClassifiedColorSpaceDefinition, ClassifiedColorSpaceResource, ColorSpaceFamily,
     DocumentPageColorSpaceResourcesInspection, DocumentPageColorSpaceResourcesInspectionError,
-    PageColorSpaceResourcesInspection, SkippedColorSpaceResource, SkippedColorSpaceResourceReason,
-    inspect_document_page_color_space_resources,
+    IndexedLookupDescriptor, PageColorSpaceResourcesInspection, SkippedColorSpaceResource,
+    SkippedColorSpaceResourceReason, inspect_document_page_color_space_resources,
     inspect_document_page_color_space_resources_with_lookup,
 };
 pub use page_content_extents::{

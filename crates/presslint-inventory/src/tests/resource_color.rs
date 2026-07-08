@@ -1,7 +1,7 @@
 //! Walker + inventory tests for page resource colour-space tracking.
 //!
 //! These exercise `cs`/`CS` + `sc`/`scn`/`SC`/`SCN` over `ICCBased`,
-//! `Separation`, and `DeviceN` resource spaces resolved against a borrowed
+//! `Separation`, `DeviceN`, and `Indexed` resource spaces resolved against a borrowed
 //! colour-space environment, the initial-colour-after-`cs` case, unresolved
 //! names, and the device-operator regression (an environment must not perturb
 //! device colours).
@@ -42,6 +42,15 @@ fn device_n(resource: &[u8], colorants: &[&[u8]]) -> ColorSpaceResource {
         space: ColorSpace::DeviceN,
         component_count: Some(colorants.len()),
         spot_names: colorants.iter().map(|c| name(c)).collect(),
+    }
+}
+
+fn indexed(resource: &[u8]) -> ColorSpaceResource {
+    ColorSpaceResource {
+        name: name(resource),
+        space: ColorSpace::Indexed,
+        component_count: Some(1),
+        spot_names: Vec::new(),
     }
 }
 
@@ -145,6 +154,30 @@ fn separation_initial_colour_is_full_tint() -> Result<(), String> {
     assert_eq!(color.components, vec![1.0]);
     assert_eq!(color.spot_name, Some(name(b"Spot")));
     assert_eq!(color.spot_names, vec![name(b"Spot")]);
+    Ok(())
+}
+
+#[test]
+fn indexed_scn_reports_the_index_operand_not_base_components() -> Result<(), String> {
+    let inventory = inventory_with_env(b"/CS0 cs 7 scn 0 0 1 1 re f", &[indexed(b"CS0")])?;
+    let color = &inventory.entries[0].colors[0];
+    assert_eq!(color.usage, ColorUsage::Fill);
+    assert_eq!(color.space, ColorSpace::Indexed);
+    // The observation keeps the raw INDEX operand; no palette expansion into
+    // base-space components ever happens.
+    assert_eq!(color.components, vec![7.0]);
+    assert_eq!(color.spot_name, None);
+    assert!(color.spot_names.is_empty());
+    Ok(())
+}
+
+#[test]
+fn indexed_initial_colour_after_cs_is_index_zero() -> Result<(), String> {
+    let inventory = inventory_with_env(b"/CS0 cs 0 0 1 1 re f", &[indexed(b"CS0")])?;
+    let color = &inventory.entries[0].colors[0];
+    assert_eq!(color.space, ColorSpace::Indexed);
+    // Per ISO 32000-1 §8.6.3 the initial Indexed colour is index 0.
+    assert_eq!(color.components, vec![0.0]);
     Ok(())
 }
 

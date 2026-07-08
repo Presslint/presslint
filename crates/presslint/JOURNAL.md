@@ -1,5 +1,22 @@
 # presslint Journal
 
+## T166 - Indexed colour-space reporting
+
+- The umbrella colour-space mapping now resolves
+  `ColorSpaceFamily::Indexed` to `presslint_types::ColorSpace::Indexed` in both
+  the inventory bridge (`color_space_from_family`) and the default
+  colour-space findings (`family_space`). `cs`/`scn` over a classified Indexed
+  resource therefore reports `ColorSpace::Indexed` with the raw INDEX operands
+  (initial colour `[0.0]` after `cs`), never `Resource(_)`, base-space
+  components, or a resource-classification coverage gap.
+- `/DefaultGray|RGB|CMYK` pointing at an Indexed definition now emits a
+  default colour-space finding with `replacement_space = Indexed` and
+  `replacement_component_count = Some(1)`; the matching device observations
+  keep their original family and operands. No conversion, writer, selector, or
+  action-planning behaviour changed, and `color_audit.rs` is untouched: an
+  Indexed OBSERVATION still surfaces as the documented
+  `UnmodeledColorSpace` gap because palette semantics stay unmodeled.
+
 ## T165 - Root form default colour-space attribution
 
 - Extended `ColorUsageAudit.default_color_space_findings` to page-level Form

@@ -432,6 +432,7 @@ const fn family_space(family: ColorSpaceFamily) -> ColorSpace {
         ColorSpaceFamily::IccBased => ColorSpace::IccBased,
         ColorSpaceFamily::Separation => ColorSpace::Separation,
         ColorSpaceFamily::DeviceN => ColorSpace::DeviceN,
+        ColorSpaceFamily::Indexed => ColorSpace::Indexed,
     }
 }
 

@@ -36,6 +36,38 @@ pub enum ColorSpaceFamily {
     Separation,
     /// `[/DeviceN …]`.
     DeviceN,
+    /// `[/Indexed base hival lookup]` (or the `/I` alias).
+    Indexed,
+}
+
+/// Shallow shape of an `[/Indexed …]` lookup operand.
+///
+/// This is a DESCRIPTOR only: the lookup operand's syntactic class and, for a
+/// direct hex string, its decoded byte length derived from digit counting. No
+/// lookup bytes, stream bodies, or decoded palettes are retained, resolved, or
+/// expanded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IndexedLookupDescriptor {
+    /// A direct hex-string operand `<…>`.
+    HexString {
+        /// Decoded palette byte length (two hex digits per byte, a trailing odd
+        /// digit implying a final zero).
+        byte_len: usize,
+    },
+    /// A direct literal-string operand `(…)`; its decoded length is not
+    /// modeled because escape decoding is out of scope for this descriptor.
+    LiteralString,
+    /// An indirect reference operand (typically the lookup stream). It is
+    /// never resolved, read, or decoded.
+    Reference {
+        /// Referenced object number.
+        object_number: u32,
+        /// Referenced generation number.
+        generation: u16,
+    },
+    /// Any other shallow operand shape, recorded without interpretation.
+    Unknown,
 }
 
 /// Classified colour-space definition without a selecting resource name.
@@ -54,6 +86,17 @@ pub struct ClassifiedColorSpaceDefinition {
     pub spot_names: Vec<PdfName>,
     /// Alternate colour space recorded as a fact for `Separation`/`DeviceN`.
     pub alternate_space: Option<ColorSpaceFamily>,
+    /// Shallow `Indexed` base-space family recorded as a fact when it can be
+    /// classified shallowly; `None` for other families or an unmodeled base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_space: Option<ColorSpaceFamily>,
+    /// `Indexed` maximum index (`hival`) when it is a direct non-negative
+    /// integer token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_hival: Option<usize>,
+    /// Shallow `Indexed` lookup operand shape; never the lookup bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_lookup: Option<IndexedLookupDescriptor>,
 }
 
 /// One classified `/Resources /ColorSpace` entry.
@@ -75,6 +118,17 @@ pub struct ClassifiedColorSpaceResource {
     pub spot_names: Vec<PdfName>,
     /// Alternate colour space recorded as a fact for `Separation`/`DeviceN`.
     pub alternate_space: Option<ColorSpaceFamily>,
+    /// Shallow `Indexed` base-space family recorded as a fact when it can be
+    /// classified shallowly; `None` for other families or an unmodeled base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_space: Option<ColorSpaceFamily>,
+    /// `Indexed` maximum index (`hival`) when it is a direct non-negative
+    /// integer token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_hival: Option<usize>,
+    /// Shallow `Indexed` lookup operand shape; never the lookup bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_lookup: Option<IndexedLookupDescriptor>,
 }
 
 impl ClassifiedColorSpaceResource {
@@ -86,6 +140,9 @@ impl ClassifiedColorSpaceResource {
             component_count: self.component_count,
             spot_names: self.spot_names.clone(),
             alternate_space: self.alternate_space,
+            base_space: self.base_space,
+            indexed_hival: self.indexed_hival,
+            indexed_lookup: self.indexed_lookup,
         }
     }
 }
@@ -196,7 +253,10 @@ pub enum SkippedColorSpaceResourceReason {
     },
     /// `[/Pattern …]` — pattern colour is a counted skip in this slice.
     UnsupportedPatternColor,
-    /// `[/Indexed …]` — indexed colour expansion is a counted skip in this slice.
+    /// `[/Indexed …]` — retained for report compatibility. Shallow Indexed
+    /// definitions now classify structurally, so the classifier no longer
+    /// emits this reason; malformed Indexed operands skip as
+    /// [`MalformedColorSpaceOperand`](Self::MalformedColorSpaceOperand).
     UnsupportedIndexedColor,
     /// `[/Lab …]`, `[/CalGray …]`, or `[/CalRGB …]` — CIE colourimetry is a
     /// counted skip in this slice.

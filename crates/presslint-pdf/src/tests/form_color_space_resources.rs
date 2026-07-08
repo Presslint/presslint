@@ -1,5 +1,5 @@
 use crate::{
-    ClassicXrefTableInspection, ColorSpaceFamily, ObjectLookup, PdfName,
+    ClassicXrefTableInspection, ColorSpaceFamily, IndexedLookupDescriptor, ObjectLookup, PdfName,
     SkippedColorSpaceResourceReason, inspect_classic_xref_table,
     inspect_form_color_space_resources,
 };
@@ -153,6 +153,202 @@ fn form_unknown_color_space_name_is_a_structured_skip() {
     assert!(matches!(
         report.skipped[0].reason,
         SkippedColorSpaceResourceReason::UnknownColorSpaceName { .. }
+    ));
+}
+
+#[test]
+fn form_indexed_color_space_classifies_shallow_descriptor() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /CS0 [ /Indexed /DeviceRGB 255 <0A0B0C> ] >> >> >>\nstream\n\nendstream\nendobj\n",
+    ]);
+
+    let report =
+        inspect_form_color_space_resources(&pdf.source, pdf.lookup(), pdf.object_offset(1));
+
+    assert!(report.skipped.is_empty());
+    assert_eq!(report.color_spaces.len(), 1);
+    let cs0 = &report.color_spaces[0];
+    assert_eq!(cs0.name, PdfName(b"CS0".to_vec()));
+    assert_eq!(cs0.family, ColorSpaceFamily::Indexed);
+    // Painting Indexed takes exactly one index operand.
+    assert_eq!(cs0.component_count, Some(1));
+    assert!(cs0.spot_names.is_empty());
+    assert_eq!(cs0.alternate_space, None);
+    assert_eq!(cs0.base_space, Some(ColorSpaceFamily::DeviceRgb));
+    assert_eq!(cs0.indexed_hival, Some(255));
+    // Descriptor only: the decoded palette LENGTH, never the palette bytes.
+    assert_eq!(
+        cs0.indexed_lookup,
+        Some(IndexedLookupDescriptor::HexString { byte_len: 3 })
+    );
+    assert!(!format!("{report:?}").contains("0A0B0C"));
+}
+
+#[test]
+fn form_indexed_alias_with_literal_string_lookup_classifies() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /CS0 [ /I /DeviceCMYK 3 (abcdefgh) ] >> >> >>\nstream\n\nendstream\nendobj\n",
+    ]);
+
+    let report =
+        inspect_form_color_space_resources(&pdf.source, pdf.lookup(), pdf.object_offset(1));
+
+    assert!(report.skipped.is_empty());
+    let cs0 = &report.color_spaces[0];
+    assert_eq!(cs0.family, ColorSpaceFamily::Indexed);
+    assert_eq!(cs0.base_space, Some(ColorSpaceFamily::DeviceCmyk));
+    assert_eq!(cs0.indexed_hival, Some(3));
+    assert_eq!(
+        cs0.indexed_lookup,
+        Some(IndexedLookupDescriptor::LiteralString)
+    );
+    assert!(!format!("{report:?}").contains("abcdefgh"));
+}
+
+#[test]
+fn form_indexed_indirect_base_and_stream_lookup_classify_shallowly() {
+    // The base is an indirect bare-name object; the lookup is an indirect
+    // reference (a lookup stream) that is described but never resolved.
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /CS0 [ /Indexed 2 0 R 15 3 0 R ] >> >> >>\nstream\n\nendstream\nendobj\n",
+        b"2 0 obj\n/DeviceRGB\nendobj\n",
+        b"3 0 obj\n<< /Length 4 >>\nstream\nAAAA\nendstream\nendobj\n",
+    ]);
+
+    let report =
+        inspect_form_color_space_resources(&pdf.source, pdf.lookup(), pdf.object_offset(1));
+
+    assert!(report.skipped.is_empty());
+    let cs0 = &report.color_spaces[0];
+    assert_eq!(cs0.family, ColorSpaceFamily::Indexed);
+    assert_eq!(cs0.base_space, Some(ColorSpaceFamily::DeviceRgb));
+    assert_eq!(cs0.indexed_hival, Some(15));
+    assert_eq!(
+        cs0.indexed_lookup,
+        Some(IndexedLookupDescriptor::Reference {
+            object_number: 3,
+            generation: 0,
+        })
+    );
+}
+
+#[test]
+fn form_indexed_unmodeled_base_family_stays_indexed_with_unknown_base() {
+    // A `/CalRGB` base is not shallowly classifiable: the Indexed fact still
+    // classifies, with the base honestly unmodeled.
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /CS0 [ /Indexed [ /CalRGB << /WhitePoint [ 1 1 1 ] >> ] 7 <00> ] >> >> >>\nstream\n\nendstream\nendobj\n",
+    ]);
+
+    let report =
+        inspect_form_color_space_resources(&pdf.source, pdf.lookup(), pdf.object_offset(1));
+
+    assert!(report.skipped.is_empty());
+    let cs0 = &report.color_spaces[0];
+    assert_eq!(cs0.family, ColorSpaceFamily::Indexed);
+    assert_eq!(cs0.base_space, None);
+    assert_eq!(cs0.indexed_hival, Some(7));
+}
+
+#[test]
+fn form_indexed_missing_lookup_is_malformed_skip() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /CS0 [ /Indexed /DeviceRGB 255 ] >> >> >>\nstream\n\nendstream\nendobj\n",
+    ]);
+
+    let report =
+        inspect_form_color_space_resources(&pdf.source, pdf.lookup(), pdf.object_offset(1));
+
+    assert!(report.color_spaces.is_empty());
+    assert_eq!(report.skipped.len(), 1);
+    assert!(matches!(
+        report.skipped[0].reason,
+        SkippedColorSpaceResourceReason::MalformedColorSpaceOperand
+    ));
+}
+
+#[test]
+fn form_indexed_non_integer_hival_is_malformed_skip() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /CS0 [ /Indexed /DeviceRGB 2.5 <00> ] >> >> >>\nstream\n\nendstream\nendobj\n",
+    ]);
+
+    let report =
+        inspect_form_color_space_resources(&pdf.source, pdf.lookup(), pdf.object_offset(1));
+
+    assert!(report.color_spaces.is_empty());
+    assert_eq!(report.skipped.len(), 1);
+    assert!(matches!(
+        report.skipped[0].reason,
+        SkippedColorSpaceResourceReason::MalformedColorSpaceOperand
+    ));
+}
+
+#[test]
+fn form_indexed_signed_positive_hival_classifies() {
+    // ISO 32000-1 §7.3.3 integer syntax permits an optional sign: `+15` is a
+    // valid non-negative `hival` token.
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /CS0 [ /Indexed /DeviceRGB +15 <00> ] >> >> >>\nstream\n\nendstream\nendobj\n",
+    ]);
+
+    let report =
+        inspect_form_color_space_resources(&pdf.source, pdf.lookup(), pdf.object_offset(1));
+
+    assert!(report.skipped.is_empty());
+    let cs0 = &report.color_spaces[0];
+    assert_eq!(cs0.family, ColorSpaceFamily::Indexed);
+    assert_eq!(cs0.indexed_hival, Some(15));
+}
+
+#[test]
+fn form_indexed_negative_hival_is_malformed_skip() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /CS0 [ /Indexed /DeviceRGB -1 <00> ] >> >> >>\nstream\n\nendstream\nendobj\n",
+    ]);
+
+    let report =
+        inspect_form_color_space_resources(&pdf.source, pdf.lookup(), pdf.object_offset(1));
+
+    assert!(report.color_spaces.is_empty());
+    assert_eq!(report.skipped.len(), 1);
+    assert!(matches!(
+        report.skipped[0].reason,
+        SkippedColorSpaceResourceReason::MalformedColorSpaceOperand
+    ));
+}
+
+#[test]
+fn form_indexed_unresolved_indirect_base_is_structured_skip() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /CS0 [ /Indexed 99 0 R 255 <00> ] >> >> >>\nstream\n\nendstream\nendobj\n",
+    ]);
+
+    let report =
+        inspect_form_color_space_resources(&pdf.source, pdf.lookup(), pdf.object_offset(1));
+
+    assert!(report.color_spaces.is_empty());
+    assert_eq!(report.skipped.len(), 1);
+    assert!(matches!(
+        report.skipped[0].reason,
+        SkippedColorSpaceResourceReason::UnresolvedResourceReference { .. }
+    ));
+}
+
+#[test]
+fn form_lab_color_space_remains_unsupported_skip() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ColorSpace << /CS0 [ /Lab << /WhitePoint [ 1 1 1 ] >> ] >> >> >>\nstream\n\nendstream\nendobj\n",
+    ]);
+
+    let report =
+        inspect_form_color_space_resources(&pdf.source, pdf.lookup(), pdf.object_offset(1));
+
+    assert!(report.color_spaces.is_empty());
+    assert_eq!(report.skipped.len(), 1);
+    assert!(matches!(
+        report.skipped[0].reason,
+        SkippedColorSpaceResourceReason::UnsupportedLabOrCalSpace
     ));
 }
 

@@ -710,6 +710,57 @@ fn nested_form_resolves_its_own_color_space_independently() {
 }
 
 #[test]
+fn page_and_form_indexed_resources_resolve_to_indexed_index_operands() {
+    // The PAGE declares its own Indexed space and paints `7 scn`; the form
+    // declares a DIFFERENT Indexed space (CMYK base) and paints `3 scn`. Both
+    // resolve scope-locally to `ColorSpace::Indexed`, and every observation
+    // keeps the raw INDEX operand — no palette expansion into base components.
+    let page: &[u8] = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Fm 4 0 R >> /ColorSpace << /P0 [ /Indexed /DeviceRGB 255 <000102> ] >> >> /Contents 5 0 R >>\nendobj\n";
+    let form = stream_object(
+        4,
+        " /Type /XObject /Subtype /Form /BBox [ 0 0 100 100 ] /Resources << /ColorSpace << /F0 [ /I /DeviceCMYK 15 <00010203> ] >> >>",
+        b"/F0 cs 3 scn 0 0 50 50 re f",
+    );
+    let page_content = stream_object(5, "", b"/P0 cs 7 scn 0 0 50 50 re f\n/Fm Do");
+    let source = classic_pdf(&[CATALOG, PAGES, page, &form, &page_content]);
+
+    let report = build_pdf_inventory(&source, MAX).expect("inventory should build");
+
+    let page_color = report
+        .inventory
+        .entries
+        .iter()
+        .filter(|entry| entry.provenance.scope == ContentScope::Page)
+        .flat_map(|entry| entry.colors.iter())
+        .find(|color| color.space == ColorSpace::Indexed)
+        .expect("page Indexed fill resolves to Indexed");
+    assert_eq!(page_color.components, vec![7.0]);
+    assert_eq!(page_color.spot_name, None);
+
+    let form_scope = ContentScope::FormXObject {
+        name: PdfName(b"Fm".to_vec()),
+    };
+    let form_color = report
+        .inventory
+        .entries
+        .iter()
+        .filter(|entry| entry.provenance.scope == form_scope)
+        .flat_map(|entry| entry.colors.iter())
+        .find(|color| color.space == ColorSpace::Indexed)
+        .expect("form Indexed fill resolves to Indexed");
+    assert_eq!(form_color.components, vec![3.0]);
+    // No colour observation stayed unresolved as a `Resource(name)`.
+    assert!(
+        report
+            .inventory
+            .entries
+            .iter()
+            .flat_map(|entry| entry.colors.iter())
+            .all(|color| !matches!(color.space, ColorSpace::Resource(_)))
+    );
+}
+
+#[test]
 fn nested_resource_classification_skips_surface_as_form_skips() {
     let page = page_with_xobjects_object("/A 4 0 R", 6);
     let form_a = form_xobject(4, "/Bad 99 0 R /B 5 0 R", b"/B Do");

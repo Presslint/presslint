@@ -1,5 +1,15 @@
 # presslint-inventory Journal
 
+## T166 - Indexed resource-colour regressions
+
+- Added walker/inventory regressions for `cs`/`scn` over an `Indexed`
+  colour-space environment resource: the observation reports
+  `ColorSpace::Indexed` with the single raw index operand (e.g. `[7.0]`), no
+  spot names, and the initial colour after `cs` is index `[0.0]`. No walker,
+  digest, or identity code changed; the existing generic per-component paths
+  already cover Indexed once the environment supplies
+  `component_count = Some(1)`.
+
 ## T162 - Multi-colorant observation propagation
 
 - Inventory observations now preserve full `Separation`/`DeviceN` colorant

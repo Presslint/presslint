@@ -22,6 +22,7 @@ use super::{
     ClassifiedColorSpaceDefinition, ClassifiedColorSpaceResource, ColorSpaceFamily,
     SkippedColorSpaceResourceReason,
 };
+use crate::page_color_space_resources::IndexedLookupDescriptor;
 
 /// Classify one `/ColorSpace` dictionary entry into a structural family.
 pub fn classify_color_space_entry(
@@ -37,6 +38,9 @@ pub fn classify_color_space_entry(
         component_count: definition.component_count,
         spot_names: definition.spot_names,
         alternate_space: definition.alternate_space,
+        base_space: definition.base_space,
+        indexed_hival: definition.indexed_hival,
+        indexed_lookup: definition.indexed_lookup,
     })
 }
 
@@ -106,6 +110,9 @@ fn classify_name_family(
         component_count: Some(family.1),
         spot_names: Vec::new(),
         alternate_space: None,
+        base_space: None,
+        indexed_hival: None,
+        indexed_lookup: None,
     })
 }
 
@@ -126,7 +133,7 @@ fn classify_array(
         b"/ICCBased" => classify_icc_based(input, lookup, &elements),
         b"/Separation" => classify_separation(input, lookup, &elements),
         b"/DeviceN" => classify_device_n(input, lookup, &elements),
-        b"/Indexed" | b"/I" => Err(SkippedColorSpaceResourceReason::UnsupportedIndexedColor),
+        b"/Indexed" | b"/I" => classify_indexed(input, lookup, &elements),
         b"/Pattern" => Err(SkippedColorSpaceResourceReason::UnsupportedPatternColor),
         b"/Lab" | b"/CalGray" | b"/CalRGB" => {
             Err(SkippedColorSpaceResourceReason::UnsupportedLabOrCalSpace)
@@ -162,6 +169,9 @@ fn classify_icc_based(
         component_count,
         spot_names: Vec::new(),
         alternate_space,
+        base_space: None,
+        indexed_hival: None,
+        indexed_lookup: None,
     })
 }
 
@@ -185,6 +195,9 @@ fn classify_separation(
         component_count: Some(1),
         spot_names: vec![spot],
         alternate_space,
+        base_space: None,
+        indexed_hival: None,
+        indexed_lookup: None,
     })
 }
 
@@ -219,11 +232,105 @@ fn classify_device_n(
         component_count,
         spot_names,
         alternate_space,
+        base_space: None,
+        indexed_hival: None,
+        indexed_lookup: None,
     })
 }
 
-/// Shallow family classification of an alternate-space array element (name or
-/// nested array head). Returns `None` when it cannot be determined shallowly.
+/// Classify a shallow `[/Indexed base hival lookup]` definition into a
+/// structural fact: family `Indexed`, one index paint operand, the shallowly
+/// classified base family, the direct integer `hival`, and a descriptor-only
+/// lookup shape. No palette expansion, lookup decoding, or byte retention.
+fn classify_indexed(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    elements: &[ArrayElement],
+) -> Result<ClassifiedColorSpaceDefinition, SkippedColorSpaceResourceReason> {
+    let (Some(base), Some(hival), Some(lookup_operand)) =
+        (elements.get(1), elements.get(2), elements.get(3))
+    else {
+        return Err(SkippedColorSpaceResourceReason::MalformedColorSpaceOperand);
+    };
+    let indexed_hival = non_negative_integer_element(input, hival)
+        .ok_or(SkippedColorSpaceResourceReason::MalformedColorSpaceOperand)?;
+    let base_space = classify_indexed_base_family(input, lookup, base)?;
+    Ok(ClassifiedColorSpaceDefinition {
+        family: ColorSpaceFamily::Indexed,
+        // Painting an Indexed colour takes exactly one index operand.
+        component_count: Some(1),
+        spot_names: Vec::new(),
+        alternate_space: None,
+        base_space,
+        indexed_hival: Some(indexed_hival),
+        indexed_lookup: Some(indexed_lookup_descriptor(input, lookup_operand)),
+    })
+}
+
+fn classify_indexed_base_family(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    base: &ArrayElement,
+) -> Result<Option<ColorSpaceFamily>, SkippedColorSpaceResourceReason> {
+    // An indirect base that does not resolve stays an explicit skip; any other
+    // shallowly unclassifiable base is honestly recorded as `None`.
+    if let ArrayElementKind::Reference(reference) = base.kind {
+        let (_, object_byte_offset) =
+            resolve_reference(lookup, reference).map_err(|error| unresolved_reference(&error))?;
+        return Ok(classify_indirect_name_family(input, object_byte_offset));
+    }
+    Ok(classify_element_family(input, lookup, base))
+}
+
+/// Read a shallow non-negative direct integer array element (`hival`).
+///
+/// ISO 32000-1 §7.3.3 integer syntax permits an optional sign, so an
+/// explicitly positive token such as `+15` is a valid non-negative integer.
+/// Negative-signed tokens stay unaccepted.
+fn non_negative_integer_element(input: &[u8], element: &ArrayElement) -> Option<usize> {
+    let ArrayElementKind::Other = element.kind else {
+        return None;
+    };
+    let bytes = input.get(element.start..element.end)?;
+    let digits = bytes.strip_prefix(b"+").unwrap_or(bytes);
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    parse_usize_decimal(digits)
+}
+
+/// Describe the shallow syntactic shape of an Indexed lookup operand without
+/// resolving, reading, decoding, or retaining any lookup bytes.
+fn indexed_lookup_descriptor(input: &[u8], element: &ArrayElement) -> IndexedLookupDescriptor {
+    match element.kind {
+        ArrayElementKind::Reference(reference) => IndexedLookupDescriptor::Reference {
+            object_number: reference.object_number,
+            generation: reference.generation,
+        },
+        ArrayElementKind::Other => match input.get(element.start) {
+            Some(b'(') => IndexedLookupDescriptor::LiteralString,
+            Some(b'<') if input.get(element.start + 1) != Some(&b'<') => {
+                IndexedLookupDescriptor::HexString {
+                    byte_len: hex_string_byte_len(&input[element.start..element.end]),
+                }
+            }
+            _ => IndexedLookupDescriptor::Unknown,
+        },
+        ArrayElementKind::Name | ArrayElementKind::Array => IndexedLookupDescriptor::Unknown,
+    }
+}
+
+/// Decoded byte length of a hex string span `<…>`: two hex digits per byte,
+/// with a trailing odd digit implying a final zero (ISO 32000-1 §7.3.4.3).
+/// Only digit COUNTING happens here; no bytes are decoded or retained.
+fn hex_string_byte_len(span: &[u8]) -> usize {
+    let digits = span.iter().filter(|byte| byte.is_ascii_hexdigit()).count();
+    digits.div_ceil(2)
+}
+
+/// Shallow family classification of an alternate-space or Indexed-base array
+/// element (name, nested array head, or a reference to a bare name). Returns
+/// `None` when it cannot be determined shallowly.
 fn classify_element_family(
     input: &[u8],
     lookup: ObjectLookup<'_>,
@@ -241,18 +348,24 @@ fn classify_element_family(
         }
         ArrayElementKind::Reference(reference) => {
             let (_, object_byte_offset) = resolve_reference(lookup, reference).ok()?;
-            let header = inspect_indirect_object_header(input, object_byte_offset).ok()?;
-            let token =
-                inspect_indirect_object_body_token(input, header.after_obj_keyword_offset).ok()?;
-            match token.token_kind {
-                IndirectObjectBodyLeadingTokenKind::Name => {
-                    let end = skip_name(input, token.first_token_byte_offset, input.len());
-                    name_family(&input[token.first_token_byte_offset..end])
-                }
-                _ => None,
-            }
+            classify_indirect_name_family(input, object_byte_offset)
         }
         ArrayElementKind::Other => None,
+    }
+}
+
+fn classify_indirect_name_family(
+    input: &[u8],
+    object_byte_offset: usize,
+) -> Option<ColorSpaceFamily> {
+    let header = inspect_indirect_object_header(input, object_byte_offset).ok()?;
+    let token = inspect_indirect_object_body_token(input, header.after_obj_keyword_offset).ok()?;
+    match token.token_kind {
+        IndirectObjectBodyLeadingTokenKind::Name => {
+            let end = skip_name(input, token.first_token_byte_offset, input.len());
+            name_family(&input[token.first_token_byte_offset..end])
+        }
+        _ => None,
     }
 }
 

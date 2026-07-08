@@ -187,6 +187,45 @@ fn non_trivial_default_without_matching_device_observation_emits_no_finding() ->
 }
 
 #[test]
+fn indexed_default_rgb_reports_indexed_replacement_without_conversion() -> Result<(), String> {
+    let source = page_with_color_space_resources(
+        "/DefaultRGB [ /Indexed /DeviceRGB 255 <000102> ]",
+        RGB_FILL,
+    );
+
+    let audit = audit_color_usage(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(audit.status, ColorAuditStatus::Complete);
+    assert!(audit.coverage_gaps.is_empty());
+    assert_eq!(
+        audit.default_color_space_findings,
+        vec![DefaultColorSpaceFinding {
+            page: PageIndex(0),
+            source: DefaultColorSpaceFindingSource::PageDefaultColorSpace,
+            default: DefaultColorSpaceKind::DefaultRgb,
+            device_space: ColorSpace::DeviceRgb,
+            replacement_space: ColorSpace::Indexed,
+            replacement_component_count: Some(1),
+            replacement_spot_names: Vec::new(),
+            matching_device_observation_count: 1,
+            form_name: None,
+            invocation: None,
+        }]
+    );
+    // The observation keeps its original device family and operands: the
+    // Indexed default is REPORTED, never applied or converted.
+    assert_eq!(
+        audit.inventory.inventory.entries[0].colors[0].space,
+        ColorSpace::DeviceRgb
+    );
+    assert_eq!(
+        audit.inventory.inventory.entries[0].colors[0].components,
+        vec![0.0, 0.0, 1.0]
+    );
+    Ok(())
+}
+
+#[test]
 fn malformed_present_default_is_coverage_gap_not_finding() -> Result<(), String> {
     let source = page_with_color_space_resources("/DefaultRGB 7", RGB_FILL);
 
