@@ -39,6 +39,7 @@ mod indirect_reference;
 mod integer_object;
 mod object_body;
 mod object_body_references;
+mod object_consumer_index;
 mod object_dictionary;
 mod object_header;
 mod object_lookup;
@@ -180,6 +181,14 @@ pub use object_body_references::{
     ObjectBodyReferencesInspectionError, ObjectBodyReferencesInspectionRejection,
     ObjectBodyReferencesTruncation, SkippedObjectBodyReference, inspect_object_body_references,
     inspect_object_body_references_resolved, scan_indirect_references_in_span,
+};
+pub use object_consumer_index::{
+    MAX_OBJECT_CONSUMER_CACHE_BYTES, MAX_OBJECT_CONSUMER_EXPANDED_NODES,
+    MAX_OBJECT_CONSUMER_RECORDED_PAIRS, MAX_OBJECT_CONSUMER_TRAVERSAL_DEPTH,
+    MAX_OBJECT_CONSUMER_VISITED_NODES, ObjectConsumerIndexInspection, ObjectConsumerIndexLimit,
+    ObjectConsumerIndexTruncation, ObjectConsumerReferrer, ObjectConsumerUnresolvedEdge,
+    ObjectConsumersEntry, ObjectStreamCacheReport, SkippedObjectConsumerScan,
+    inspect_object_consumer_index,
 };
 pub use object_dictionary::{
     CompressedObjectDictionaryInspection, IndirectObjectDictionaryInspection,

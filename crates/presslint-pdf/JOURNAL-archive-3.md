@@ -101,3 +101,36 @@ history lives in [JOURNAL-archive-2.md](JOURNAL-archive-2.md).
 - Deferred: this slice does not thread the new lookup through page-tree/document
   access, follow `/Prev`, merge incremental xref sections, support hybrid
   references, or extract object streams. That remains future spine wiring.
+
+### T166 - Indexed Colour-Space Structural Classification
+
+- The colour-space classifier now models shallow `[/Indexed base hival lookup]`
+  (and the `/I` alias) definitions instead of skipping them as
+  `UnsupportedIndexedColor`. A classified Indexed fact carries family
+  `Indexed`, `component_count = Some(1)` (one index paint operand), an optional
+  shallowly classified `base_space` family, the direct non-negative integer
+  `indexed_hival`, and a descriptor-only `indexed_lookup` shape (hex-string
+  decoded byte length by digit counting, literal string, indirect reference, or
+  unknown). No palette expansion, lookup decoding/retention, or profile parsing
+  happens (ISO 32000-1 §8.6.6.3 shapes; length-vs-base validation deliberately
+  deferred).
+- `ClassifiedColorSpaceDefinition`/`ClassifiedColorSpaceResource` gained the
+  three fields additively with `serde(default, skip_serializing_if)`, so
+  existing JSON shapes are unchanged for non-Indexed families and old JSON
+  deserializes. `ColorSpaceFamily::Indexed` is appended after `DeviceN`. The
+  new `IndexedLookupDescriptor` enum lives in `page_color_space_resources` and
+  is root-re-exported from `lib.rs` alongside the other colour-space report
+  types (review fix: the public `indexed_lookup` field would otherwise carry an
+  unnameable type downstream).
+- Review fix: `hival` accepts an optional leading `+` sign; ISO 32000-1 §7.3.3
+  integer syntax permits a sign, so `+15` is a valid non-negative integer token.
+  Negative-signed tokens stay `MalformedColorSpaceOperand`; both sides are
+  locked by form-resource regressions.
+- Malformed Indexed shapes stay structured skips: fewer than four array
+  elements or a non-integer/non-direct `hival` are
+  `MalformedColorSpaceOperand`; an unresolved indirect base is the existing
+  `UnresolvedResourceReference` skip. An unmodeled (Pattern/Lab/Cal) base
+  leaves `base_space = None` while the Indexed fact still classifies.
+  `UnsupportedIndexedColor` is retained for report compatibility but no longer
+  emitted. Pattern/Lab/Cal top-level spaces and image `ColorSpace` handling are
+  unchanged.

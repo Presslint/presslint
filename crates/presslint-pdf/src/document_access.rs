@@ -397,6 +397,24 @@ pub enum DocumentAccessBackend {
     },
 }
 
+impl DocumentAccessBackend {
+    /// Borrowed [`ObjectLookup`] view over this backend's parsed metadata.
+    ///
+    /// The projection is the same for every consumer of the spine, so it is
+    /// part of the public contract rather than a per-crate private match
+    /// (higher-level crates previously duplicated it). The view borrows the
+    /// backend; it owns no bytes and builds no cache.
+    #[must_use]
+    pub const fn object_lookup(&self) -> ObjectLookup<'_> {
+        match self {
+            Self::ClassicXref { xref_table, .. } => ObjectLookup::ClassicXref(xref_table),
+            Self::ClassicXrefChain { chain } => ObjectLookup::ClassicXrefChain(chain),
+            Self::XrefStreamSection { section } => ObjectLookup::XrefStreamSection(section),
+            Self::XrefStreamChain { chain } => ObjectLookup::XrefStreamChain(chain),
+        }
+    }
+}
+
 /// Error returned when the neutral document-access spine cannot complete.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentAccessError {

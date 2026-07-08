@@ -4,39 +4,6 @@ Older accumulated journal history lives in [JOURNAL-archive-3.md](JOURNAL-archiv
 
 ## Current State
 
-### T166 - Indexed Colour-Space Structural Classification
-
-- The colour-space classifier now models shallow `[/Indexed base hival lookup]`
-  (and the `/I` alias) definitions instead of skipping them as
-  `UnsupportedIndexedColor`. A classified Indexed fact carries family
-  `Indexed`, `component_count = Some(1)` (one index paint operand), an optional
-  shallowly classified `base_space` family, the direct non-negative integer
-  `indexed_hival`, and a descriptor-only `indexed_lookup` shape (hex-string
-  decoded byte length by digit counting, literal string, indirect reference, or
-  unknown). No palette expansion, lookup decoding/retention, or profile parsing
-  happens (ISO 32000-1 §8.6.6.3 shapes; length-vs-base validation deliberately
-  deferred).
-- `ClassifiedColorSpaceDefinition`/`ClassifiedColorSpaceResource` gained the
-  three fields additively with `serde(default, skip_serializing_if)`, so
-  existing JSON shapes are unchanged for non-Indexed families and old JSON
-  deserializes. `ColorSpaceFamily::Indexed` is appended after `DeviceN`. The
-  new `IndexedLookupDescriptor` enum lives in `page_color_space_resources` and
-  is root-re-exported from `lib.rs` alongside the other colour-space report
-  types (review fix: the public `indexed_lookup` field would otherwise carry an
-  unnameable type downstream).
-- Review fix: `hival` accepts an optional leading `+` sign — ISO 32000-1
-  §7.3.3 integer syntax permits a sign, so `+15` is a valid non-negative
-  integer token. Negative-signed tokens stay `MalformedColorSpaceOperand`;
-  both sides are locked by form-resource regressions.
-- Malformed Indexed shapes stay structured skips: fewer than four array
-  elements or a non-integer/non-direct `hival` are
-  `MalformedColorSpaceOperand`; an unresolved indirect base is the existing
-  `UnresolvedResourceReference` skip. An unmodeled (Pattern/Lab/Cal) base
-  leaves `base_space = None` while the Indexed fact still classifies.
-  `UnsupportedIndexedColor` is retained for report compatibility but no longer
-  emitted. Pattern/Lab/Cal top-level spaces and image `ColorSpace` handling are
-  unchanged.
-
 ### T161a - Colour Environment Descriptor Facts
 
 - Added companion, read-only default colour-space inspectors for page and form
@@ -937,3 +904,69 @@ Older accumulated journal history lives in [JOURNAL-archive-3.md](JOURNAL-archiv
 - Deferred to the consumer-index slice: referrer taxonomy and ownership
   semantics, objstm once-decode caching, dangling/free/generation validation,
   and byte ranges for the uncompressed path.
+
+### T170 - Document-Wide Object Consumer Index (Read-Only Snapshot)
+
+- New `object_consumer_index` module (facade + `traversal` submodule):
+  `inspect_object_consumer_index(input, &DocumentAccess)` builds the
+  document-wide reverse-reference map as a deterministic SNAPSHOT report: sorted
+  `ObjectConsumersEntry { target, referrers }` entries, unresolved-edge
+  facts, structured skips, truncation facts, cache facts, and an
+  `unreferenced` diff of in-use xref entries no user ever reached.
+- Referrer taxonomy (serde `tag = "referrer"`, snake_case): `TrailerKey`
+  (one per NEWEST-trailer key except `/Root`; chains re-inspect their
+  newest section, xref-stream backends read the stream object's own
+  dictionary), `Root` (the catalog object itself, registration only),
+  `RootKey` (one per catalog key incl. `/Pages`), `Page { page_index,
+  page }`. The report retains key NAME bytes only. No `/Thumb` or
+  `/Annots` machinery: page-subtree and generic edges cover them.
+- Traversal is iterative with a PER-USER visited set (`BTreeSet<u32>`),
+  never global — a global set would classify shared subtrees as
+  single-use (unsafe in-place mutation later). Page rules are membership
+  checks, never `/Type` sniffing: the top-level `/Parent` edge of
+  page/page-tree-node dictionaries is skipped; an edge to a known page
+  other than the user's own page is registered but not expanded, which
+  makes `RootKey(/Pages)` own tree intermediates while stopping at every
+  page dict. The page match compares the FULL leaf reference (number AND
+  generation), so a generation-mismatched reference to a page's object
+  number resolves like any other edge and lands as an unresolved-edge
+  fact, never a consumer edge (regression-tested). Page dicts are therefore INHERENTLY multi-user
+  (`RootKey(/Pages)` + own `Page` user) — pinned by test as the safety
+  property. Reference extraction reuses the T169 scanner, so
+  stream-parameter edges (indirect `/Length` etc.) are consumer edges
+  and stream data is never scanned.
+- Object streams are transparent: member references are MEMBER edges;
+  the container is never a consumer and shows up only via direct
+  referrers or the unreferenced diff. A per-container once-decode cache
+  (64 MiB budget) re-derives `/First`/`/N` + header pairs defensively
+  after the first canonical `resolve_object`; later members slice the
+  cached buffer, any mismatch falls back to the canonical (re-decoding)
+  path so the error taxonomy stays identical. Budget overflow drops the
+  whole cache (slower but correct) and is a report fact.
+- Dangling/free/generation-mismatch/reserved/classic-ambiguous edges are
+  `ObjectConsumerUnresolvedEdge` facts wrapping the existing
+  `ObjectResolutionRejection` (ISO 32000-1 7.3.10 null semantics), never
+  consumer edges, never fatal. Bounds (per-user depth 64, per-user
+  visited 65_536, global expanded 1_048_576, recorded pairs 1_000_000,
+  8 MiB per-container decode) each surface as structured truncation
+  facts; the module docs PIN that a truncated index must never feed
+  ownership decisions.
+- Review fix: a compressed member whose `/ObjStm` container exceeds the
+  existing 8 MiB decoded-byte cap now records
+  `MaxDecodedObjectStreamBytes { decoded_length, max_decoded_object_stream_bytes }`
+  in `truncations` in addition to the unresolved-edge fact, so skipped member
+  outgoing edges cannot be mistaken for a complete ownership proof.
+- `DocumentAccessBackend::object_lookup()` is now the public
+  backend-to-lookup projection (presslint-write still carries a private
+  duplicate; migrating it is a later slice). Performance: cost is
+  O(sum of per-user reachable subtrees) — an accepted industry trade-off;
+  shared-subtree closure memoization is a recorded future optimization.
+  The only owned buffers are the bounded cached decoded object streams.
+- Deferred to the write-integration slice: referrer→consumer mapping for
+  `decide_indirect_object_edit` (`TrailerKey` has no owning object),
+  `content_object_owners` absorption, snapshot-invalidation contract.
+- Final-review hardening: the per-user visited set is keyed by FULL
+  `IndirectRef`, not object number — a generation-mismatched edge sharing a
+  visited object's number (e.g. `3 1 R` inside page `3 0 R`) must reach
+  resolution and surface as an unresolved-edge fact instead of being
+  silently suppressed; pinned by a same-number mismatch regression.
