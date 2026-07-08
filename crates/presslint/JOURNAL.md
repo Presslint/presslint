@@ -1,5 +1,41 @@
 # presslint Journal
 
+## T167 - Colour-audit module split (zero behaviour change)
+
+- Split `color_audit.rs` (964 lines) into a directory module with the file as
+  facade root: `color_audit/report.rs` (serde DTOs, no logic),
+  `color_audit/scan.rs` (the single deterministic inventory pass, `Scan`, the
+  resource-skip predicates), `color_audit/classify.rs` (per-observation
+  classification, `entry_gap`/`page_gap` constructors), and
+  `color_audit/summary.rs` (`SummaryAccumulator`, the shared `bump` probe, the
+  fixed variant orders). The root keeps `audit_color_usage`,
+  `audit_color_usage_with_output_intent_policy`, the `#[cfg(test)]`
+  `build_color_usage_audit`, and `build_audit`.
+- Every existing path is preserved by root re-exports: the crate-root public
+  set (`ColorAuditStatus` … `audit_color_usage_with_output_intent_policy`) and
+  the crate-internal `crate::color_audit::{Scan, CoverageGap, CoverageGapKind,
+  page_gap, build_color_usage_audit}` seams are unchanged, so `lib.rs`,
+  `default_color_space_findings.rs`, `graphics_state_findings.rs`, and the
+  sibling test modules needed no edits. `Scan` fields and
+  `SummaryAccumulator`/`bump` became `pub(super)` so the root/scan can consume
+  them without widening visibility beyond the module.
+- Split the 991-line test module the same way: `tests/color_audit/mod.rs`
+  holds the shared fixtures (serde harness include, synthetic-inventory
+  builders, count helpers, page/ExtGState PDF builders) and the 23 tests moved
+  unchanged into `scan_counts.rs`, `gaps_findings.rs`, `serde_shape.rs`, and
+  `graphics_state.rs`. The relative serde-harness `#[path]` gained one `../`
+  for the extra directory level. Same 23 test names, no expectation changes.
+- No behaviour, serde-shape, or hot-path change: the pass structure,
+  allocation profile, and report JSON are untouched; the compiled code is the
+  moved code modulo symbol paths.
+- Ablation: the two document-anchored inspection-error gap literals in
+  `scan_inventory` now go through a `pub(super)` `pageless_gap` constructor in
+  `classify.rs`, next to `entry_gap`/`page_gap`. Same construction, one
+  definition inside the module. The identical private `pageless_gap` copies in
+  `graphics_state_findings.rs`/`default_color_space_findings.rs` predate this
+  task and were left alone to keep those files diff-free; unifying all three on
+  the module-root export is a follow-up.
+
 ## T166 - Indexed colour-space reporting
 
 - The umbrella colour-space mapping now resolves
