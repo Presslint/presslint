@@ -34,6 +34,7 @@ mod form_color_space_resources;
 mod form_extgstate_resources;
 mod form_transparency_group;
 mod form_xobject_resources;
+mod icc_profile;
 mod image_xobject;
 mod indirect_reference;
 mod integer_object;
@@ -158,6 +159,11 @@ pub use form_transparency_group::{
     FormTransparencyGroupInspection, inspect_form_transparency_group,
 };
 pub use form_xobject_resources::{FormXObjectResourcesInspection, inspect_form_xobject_resources};
+pub use icc_profile::{
+    ICC_PROFILE_HEADER_LEN, IccProfileHeaderDescriptor, IccProfileHeaderParse,
+    IccProfileInspectionGap, IccProfileStreamInspection, inspect_icc_profile_stream_with_lookup,
+    parse_icc_profile_header,
+};
 pub use image_xobject::{
     ImageColorSpaceMetadata, ImageIntegerMetadata, ImageXObjectMetadata,
     inspect_image_xobject_metadata,

@@ -4,6 +4,42 @@ Older accumulated journal history lives in [JOURNAL-archive-4.md](JOURNAL-archiv
 
 ## Current State
 
+### T173 - Bounded ICCBased Profile Header Descriptor Facts (T168b)
+
+- New `icc_profile` module. The ONE new abstraction is
+  `IccProfileHeaderDescriptor`: byte-level facts from the fixed 128-byte ICC
+  header (ICC.1:2022, big-endian) — `decoded_len`, `declared_profile_size`
+  (bytes `0..4`), `version_raw` + decoded `version_major`/`version_minor`/
+  `version_bugfix` (BCD of bytes `8..12`), `profile_class_signature`
+  (`12..16`), `data_color_space_signature` (`16..20`), `pcs_signature`
+  (`20..24`), and `acsp_present` (bytes `36..40` == `acsp`). Raw four-byte
+  signatures are always preserved next to any decoded convenience field, so a
+  signature with spaces or unknown bytes is a fact, not an error. No lcms/skcms,
+  no tag-table parsing, no colorimetry.
+- `parse_icc_profile_header(decoded) -> IccProfileHeaderParse` reads only the
+  128-byte header. Its sole rejection is `Truncated { decoded_len }` (< 128
+  bytes); a corrupt `acsp`, an anomalous version, and unknown signatures all
+  yield a populated `Parsed { descriptor }`. `data_space_component_count()` is
+  the conservative ICC mapping `GRAY`=1, `RGB `/`CMY `=3, `CMYK`=4,
+  `2CLR`..`FCLR`=2..15, everything else `None`.
+- `inspect_icc_profile_stream_with_lookup(input, lookup, reference,
+  output_limit) -> IccProfileStreamInspection` is pure composition of existing
+  seams: `resolve_xref_object_offset` (stream objects cannot be object-stream
+  members, so the offset-only resolver suffices) → extent → slice → filter
+  classify → single `/FlateDecode` or identity decode → header parse. The
+  decoded buffer is dropped after facts are extracted. Result taxonomy:
+  `Parsed { descriptor }`, `Truncated { decoded_len }`, or `Gap { reason }`.
+- `IccProfileInspectionGap` (unit variants, plain snake_case strings):
+  `ProfileObjectCompressed`, `ProfileObjectUnresolved`, `StreamExtent`,
+  `StreamSlice`, `FilterClassification`, `UnsupportedFilter`,
+  `DecodeParmsDeclared`, `UnsupportedDecodeParms`, `DecodeParmsMalformed`,
+  `DecodeOutputLimitExceeded`, `FlateDecodeFailed`. `/DecodeParms` PITFALL: a
+  declared `/DecodeParms` key (even `null`) is a gap, never a silent
+  default-parameter decode that could produce a plausible-but-wrong header.
+- Read-only and bounded: no CMM, no tag-table access, no writer/converter
+  impact. Every malformed/uninspectable outcome is a structured value, never a
+  panic.
+
 ### T170 - Document-Wide Object Consumer Index (Read-Only Snapshot)
 
 - New `object_consumer_index` module (facade + `traversal` submodule):

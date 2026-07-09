@@ -282,6 +282,118 @@ fn icc_based_finding_serde_shape_is_pinned() -> Result<(), String> {
 }
 
 #[test]
+fn icc_based_profile_finding_kinds_serde_shapes_are_pinned() -> Result<(), String> {
+    // Truncated header: tagged struct-variant with a single `decoded_len`.
+    assert_eq!(
+        serde_value(&crate::IccBasedFindingKind::ProfileHeaderTruncated { decoded_len: 40 })
+            .map_err(|error| error.to_string())?,
+        TestSerdeValue::Map(vec![
+            (
+                "kind".to_string(),
+                TestSerdeValue::String("profile_header_truncated".to_string()),
+            ),
+            ("decoded_len".to_string(), TestSerdeValue::U64(40)),
+        ])
+    );
+
+    // Missing acsp: a unit-like tagged variant carrying only its `kind` tag.
+    assert_eq!(
+        serde_value(&crate::IccBasedFindingKind::ProfileAcspMissing)
+            .map_err(|error| error.to_string())?,
+        TestSerdeValue::Map(vec![(
+            "kind".to_string(),
+            TestSerdeValue::String("profile_acsp_missing".to_string()),
+        )])
+    );
+
+    // Declared-size mismatch: both size facts alongside the tag.
+    assert_eq!(
+        serde_value(&crate::IccBasedFindingKind::ProfileDeclaredSizeMismatch {
+            declared: 999,
+            decoded_len: 128,
+        })
+        .map_err(|error| error.to_string())?,
+        TestSerdeValue::Map(vec![
+            (
+                "kind".to_string(),
+                TestSerdeValue::String("profile_declared_size_mismatch".to_string()),
+            ),
+            ("declared".to_string(), TestSerdeValue::U64(999)),
+            ("decoded_len".to_string(), TestSerdeValue::U64(128)),
+        ])
+    );
+
+    // Component-count mismatch: the raw four-byte signature serializes as a seq.
+    assert_eq!(
+        serde_value(&crate::IccBasedFindingKind::ProfileComponentCountMismatch {
+            n: 3,
+            data_color_space_signature: *b"GRAY",
+        })
+        .map_err(|error| error.to_string())?,
+        TestSerdeValue::Map(vec![
+            (
+                "kind".to_string(),
+                TestSerdeValue::String("profile_component_count_mismatch".to_string()),
+            ),
+            ("n".to_string(), TestSerdeValue::U64(3)),
+            ("data_color_space_signature".to_string(), byte_seq(b"GRAY"),),
+        ])
+    );
+
+    // Disallowed class: raw class signature as a seq.
+    assert_eq!(
+        serde_value(&crate::IccBasedFindingKind::ProfileClassDisallowed {
+            profile_class_signature: *b"link",
+        })
+        .map_err(|error| error.to_string())?,
+        TestSerdeValue::Map(vec![
+            (
+                "kind".to_string(),
+                TestSerdeValue::String("profile_class_disallowed".to_string()),
+            ),
+            ("profile_class_signature".to_string(), byte_seq(b"link"),),
+        ])
+    );
+
+    // Inspection gap: the nested pdf reason serializes as a plain snake_case
+    // string under the `reason` field.
+    assert_eq!(
+        serde_value(&crate::IccBasedFindingKind::ProfileInspectionGap {
+            reason: crate::pdf::IccProfileInspectionGap::UnsupportedFilter,
+        })
+        .map_err(|error| error.to_string())?,
+        TestSerdeValue::Map(vec![
+            (
+                "kind".to_string(),
+                TestSerdeValue::String("profile_inspection_gap".to_string()),
+            ),
+            (
+                "reason".to_string(),
+                TestSerdeValue::String("unsupported_filter".to_string()),
+            ),
+        ])
+    );
+
+    round_trip(&crate::IccBasedFindingKind::ProfileHeaderTruncated { decoded_len: 40 })?;
+    round_trip(&crate::IccBasedFindingKind::ProfileAcspMissing)?;
+    round_trip(&crate::IccBasedFindingKind::ProfileDeclaredSizeMismatch {
+        declared: 999,
+        decoded_len: 128,
+    })?;
+    round_trip(&crate::IccBasedFindingKind::ProfileComponentCountMismatch {
+        n: 3,
+        data_color_space_signature: *b"GRAY",
+    })?;
+    round_trip(&crate::IccBasedFindingKind::ProfileClassDisallowed {
+        profile_class_signature: *b"link",
+    })?;
+    round_trip(&crate::IccBasedFindingKind::ProfileInspectionGap {
+        reason: crate::pdf::IccProfileInspectionGap::ProfileObjectCompressed,
+    })?;
+    Ok(())
+}
+
+#[test]
 fn finding_bearing_audit_pins_the_graphics_state_findings_entry() -> Result<(), String> {
     // Content with no colour operators: the finding comes from the DECLARED
     // resources alone, and the audit then carries no f64 colour components the

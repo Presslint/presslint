@@ -2,6 +2,35 @@
 
 Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T173 - Bounded ICCBased Profile Header Descriptor Facts (T168b)
+
+- `scan_document_icc_based_findings(input)` now runs a second, bounded
+  profile-header descriptor pass alongside the dictionary pass (its public
+  signature is unchanged, so `color_audit.rs` is untouched). It consumes each
+  `ICCBased` use-site's `icc_profile_stream` reference through
+  `presslint_pdf::inspect_icc_profile_stream_with_lookup`, deduplicating the
+  decode per `IndirectRef` (a `BTreeMap` memo, so a shared profile inflates once)
+  while still emitting additive findings per use-site anchor in deterministic
+  order. Each unique profile is inflated at most once under the module-const
+  `MAX_DECODED_ICC_PROFILE_BYTES` (8 MiB) cap and the decoded buffer is dropped
+  after facts are extracted. Descriptor facts are NOT added to
+  `ClassifiedColorSpaceDefinition` / `ClassifiedColorSpaceResource`; structural
+  classification stays decode-free.
+- Additive `IccBasedFindingKind` variants: `ProfileHeaderTruncated
+  { decoded_len }`, `ProfileAcspMissing`, `ProfileDeclaredSizeMismatch
+  { declared, decoded_len }`, `ProfileComponentCountMismatch { n,
+  data_color_space_signature }` (only when `/N` and a recognized data-space
+  count are both available), `ProfileClassDisallowed { profile_class_signature }`
+  (allowed PDF classes are `scnr`/`mntr`/`prtr`/`spac`; `link`/unknown are
+  reported), and `ProfileInspectionGap { reason }` carrying the pdf-side
+  `IccProfileInspectionGap`.
+- Non-fatal by construction: a malformed, truncated, or uninspectable profile is
+  a finding or a coverage-gap fact only. The audit never fails and
+  `ColorAuditStatus` is unchanged.
+- Serde stays additive: new kinds are shape-pinned, empty reports still omit
+  `icc_based_findings`, and old JSON deserializes. The CLI `icc-based findings`
+  count naturally includes the new kinds; no new CLI field/count was added.
+
 ## T168 - ICCBased Audit Findings
 
 - Added the public `IccBasedFinding` / `IccBasedFindingKind` audit family and

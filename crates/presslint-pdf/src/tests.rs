@@ -20,6 +20,7 @@ mod form_color_space_resources;
 mod form_extgstate_resources;
 mod form_transparency_group;
 mod form_xobject_resources;
+mod icc_profile;
 mod image_xobject;
 mod indirect_reference;
 mod integer_object;
