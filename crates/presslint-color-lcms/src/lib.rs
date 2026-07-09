@@ -37,12 +37,12 @@
 //!
 //! # Copy / build budget
 //!
-//! This crate builds one transform per call (a bounded cache can be added later
-//! using `presslint-color::TransformCacheKey`). Each call opens one profile
-//! handle, builds one transform handle, and allocates one small output
-//! `Vec<f64>` (at most a few components). The input slice is read in place — no
-//! byte copy. Both handles are released via RAII on every return path. No
-//! batching.
+//! The free function opens one profile handle, builds one transform handle, and
+//! allocates one small output `Vec<f64>` (at most a few components) per call.
+//! The [`PreparedDeviceLink`] engine path retains the DeviceLink bytes and, on
+//! first successful application, lazily stores one opened profile plus one
+//! transform for reuse within that request. There is no global cache and no
+//! cross-request sharing.
 
 // This crate intentionally isolates the Little CMS C FFI; `unsafe` lives here so
 // `presslint-color` can stay pure-Rust. Override the workspace `unsafe_code`
@@ -150,15 +150,19 @@ pub enum LcmsError {
 /// it can be used.
 pub fn inspect_device_link(bytes: &[u8]) -> Result<DeviceLinkInfo, LcmsError> {
     let profile = OpenProfile::open_device_link(bytes)?;
+    Ok(device_link_info(&profile))
+}
+
+fn device_link_info(profile: &OpenProfile) -> DeviceLinkInfo {
     // SAFETY: `profile.handle` is a live DeviceLink profile owned by `profile`.
     let source = unsafe { cmsGetColorSpace(profile.handle) };
     let destination = unsafe { cmsGetPCS(profile.handle) };
-    Ok(DeviceLinkInfo {
+    DeviceLinkInfo {
         source_space: map_space(source),
         destination_space: map_space(destination),
         input_channels: channels_of(source),
         output_channels: channels_of(destination),
-    })
+    }
 }
 
 /// Apply a DeviceLink to ONE scalar colour and return the output components.
@@ -190,16 +194,90 @@ pub fn inspect_device_link(bytes: &[u8]) -> Result<DeviceLinkInfo, LcmsError> {
 ///   transform.
 pub fn apply_device_link_f64(bytes: &[u8], input: &[f64]) -> Result<Vec<f64>, LcmsError> {
     let profile = OpenProfile::open_device_link(bytes)?;
-    // SAFETY: `profile.handle` is a live DeviceLink profile owned by `profile`.
-    let source = unsafe { cmsGetColorSpace(profile.handle) };
-    let destination = unsafe { cmsGetPCS(profile.handle) };
+    let info = device_link_info(&profile);
+    let formats = validate_device_link_input(info, input)?;
+    let native = NativeDeviceLink::from_profile(profile, info, formats)?;
+    Ok(native.apply(input))
+}
 
-    let input_channels = channels_of(source);
-    let output_channels = channels_of(destination);
+pub(crate) struct NativeDeviceLink {
+    transform: OwnedTransform,
+    _profile: OpenProfile,
+    output_channels: usize,
+}
 
-    if input.len() != input_channels {
+impl NativeDeviceLink {
+    pub(crate) fn open(
+        bytes: &[u8],
+        info: DeviceLinkInfo,
+        formats: DeviceLinkFormats,
+    ) -> Result<Self, LcmsError> {
+        Self::from_profile(OpenProfile::open_device_link(bytes)?, info, formats)
+    }
+
+    fn from_profile(
+        profile: OpenProfile,
+        info: DeviceLinkInfo,
+        formats: DeviceLinkFormats,
+    ) -> Result<Self, LcmsError> {
+        // DeviceLink-only transform: one profile that is the whole LUT. The
+        // intent is baked into the link, so the fixed value below does not
+        // affect the result. Flags `0` keeps them minimal (no NOCACHE, no
+        // HIGHRESPRECALC).
+        let mut handles = [profile.handle];
+        // SAFETY: `handles` points to one live DeviceLink profile; the formats
+        // are valid `TYPE_*_DBL` constants matching the inspected channel
+        // counts.
+        let transform = unsafe {
+            cmsCreateMultiprofileTransform(
+                handles.as_mut_ptr(),
+                1,
+                formats.input,
+                formats.output,
+                Intent::RelativeColorimetric,
+                0,
+            )
+        };
+        let transform =
+            OwnedTransform::from_raw(transform).ok_or(LcmsError::TransformBuildFailed)?;
+
+        Ok(Self {
+            transform,
+            _profile: profile,
+            output_channels: info.output_channels,
+        })
+    }
+
+    pub(crate) fn apply(&self, input: &[f64]) -> Vec<f64> {
+        let mut output = vec![0.0f64; self.output_channels];
+        // SAFETY: validation has guaranteed that `input` has the transform's
+        // input channel count; `output` is sized to the inspected output channel
+        // count; exactly one pixel is transformed.
+        unsafe {
+            cmsDoTransform(
+                self.transform.handle,
+                input.as_ptr().cast(),
+                output.as_mut_ptr().cast(),
+                1,
+            );
+        }
+        output
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct DeviceLinkFormats {
+    input: PixelFormat,
+    output: PixelFormat,
+}
+
+pub(crate) fn validate_device_link_input(
+    info: DeviceLinkInfo,
+    input: &[f64],
+) -> Result<DeviceLinkFormats, LcmsError> {
+    if input.len() != info.input_channels {
         return Err(LcmsError::ChannelCountMismatch {
-            expected: input_channels,
+            expected: info.input_channels,
             got: input.len(),
         });
     }
@@ -210,9 +288,9 @@ pub fn apply_device_link_f64(bytes: &[u8], input: &[f64]) -> Result<Vec<f64>, Lc
     // normalized `0.0..=1.0` scalar domain — is rejected as
     // `UnsupportedColorSpace` regardless of the component values, before the
     // range validation below (which assumes the normalized domain).
-    let input_format = dbl_format(map_space(source)).ok_or(LcmsError::UnsupportedColorSpace)?;
+    let input_format = dbl_format(info.source_space).ok_or(LcmsError::UnsupportedColorSpace)?;
     let output_format =
-        dbl_format(map_space(destination)).ok_or(LcmsError::UnsupportedColorSpace)?;
+        dbl_format(info.destination_space).ok_or(LcmsError::UnsupportedColorSpace)?;
 
     for &component in input {
         if !component.is_finite() {
@@ -223,38 +301,10 @@ pub fn apply_device_link_f64(bytes: &[u8], input: &[f64]) -> Result<Vec<f64>, Lc
         }
     }
 
-    // DeviceLink-only transform: one profile that is the whole LUT. The intent
-    // is baked into the link, so the fixed value below does not affect the
-    // result. Flags `0` keeps them minimal (no NOCACHE, no HIGHRESPRECALC).
-    let mut handles = [profile.handle];
-    // SAFETY: `handles` points to one live DeviceLink profile; the formats are
-    // valid `TYPE_*_DBL` constants matching the profile's channel counts.
-    let transform = unsafe {
-        cmsCreateMultiprofileTransform(
-            handles.as_mut_ptr(),
-            1,
-            input_format,
-            output_format,
-            Intent::RelativeColorimetric,
-            0,
-        )
-    };
-    let transform = OwnedTransform::from_raw(transform).ok_or(LcmsError::TransformBuildFailed)?;
-
-    let mut output = vec![0.0f64; output_channels];
-    // SAFETY: the transform reads `input_channels` f64 from `input` (validated
-    // to that length) and writes `output_channels` f64 into `output` (sized to
-    // that length) for exactly one pixel.
-    unsafe {
-        cmsDoTransform(
-            transform.handle,
-            input.as_ptr().cast(),
-            output.as_mut_ptr().cast(),
-            1,
-        );
-    }
-
-    Ok(output)
+    Ok(DeviceLinkFormats {
+        input: input_format,
+        output: output_format,
+    })
 }
 
 /// RAII wrapper closing an opened profile handle on drop.

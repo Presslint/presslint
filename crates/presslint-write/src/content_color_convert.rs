@@ -27,7 +27,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use presslint_color_lcms::{DeviceLinkSpace, LcmsError, apply_device_link_f64};
+use presslint_color_lcms::{ColorEngine, DeviceLinkSpace, LcmsColorEngine, LcmsError};
 use presslint_pdf::{
     DictionaryValueKind, DocumentAccessError, IndirectObjectEditDisposition, IndirectRef,
 };
@@ -540,7 +540,7 @@ fn convert_decoded(
             }
             continue;
         }
-        let Ok(components) = apply_device_link_f64(link.bytes, &operands) else {
+        let Ok(components) = LcmsColorEngine.apply_device_link(&link.prepared, &operands) else {
             // Unreachable after the source-space route + per-operand validation
             // (channel count and range are already guaranteed); leave verbatim.
             continue;

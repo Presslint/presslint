@@ -9,7 +9,7 @@
 // "DeviceLink" is the ICC domain term used as prose here.
 #![allow(clippy::doc_markdown)]
 
-use presslint_color_lcms::DeviceLinkSpace;
+use presslint_color_lcms::{DeviceLinkSpace, LcmsError};
 use presslint_syntax::{assemble_operators, tokenize};
 
 use crate::{
@@ -173,24 +173,25 @@ fn bad_link_is_inspect_failed_with_its_index_and_id() {
         ConvertContentColorsError::DeviceLinkInspectFailed {
             index: 1,
             id: Some(ref id),
-            ..
+            error: LcmsError::InvalidProfile,
         } if id == "broken"
     ));
 }
 
 #[test]
-fn unsupported_link_space_reports_index_and_id() {
+fn unsupported_link_space_reports_raw_spaces_index_and_id() {
     let input = classic_raw_pdf(b"1 0 0 rg\n");
     let error = convert_links_err(&input, vec![link("lab", LAB_TO_RGB_LINK)]);
 
-    assert!(matches!(
+    assert_eq!(
         error,
         ConvertContentColorsError::UnsupportedLinkSpace {
             index: 0,
-            id: Some(ref id),
-            ..
-        } if id == "lab"
-    ));
+            id: Some("lab".to_string()),
+            source: DeviceLinkSpace::Lab,
+            destination: DeviceLinkSpace::Rgb,
+        }
+    );
 }
 
 #[test]

@@ -8,6 +8,19 @@ no selectors, and no content-stream rewriting. The crate isolates the C
 dependency and all `unsafe` FFI so `presslint-color` stays pure-Rust
 `#![forbid(unsafe_code)]`.
 
+## T172 - Prepared DeviceLink Handles
+
+`PreparedDeviceLink` now owns the ICC bytes plus raw `DeviceLinkInfo` and lazily
+retains one private native pair (`OpenProfile` + `OwnedTransform`) on first
+successful `ColorEngine::apply_device_link`. Later applies through the same
+prepared link reuse that transform request-locally; there is no global cache, no
+new `Send`/`Sync` bound, and no public exposure of native handles.
+
+The free `apply_device_link_f64` path now shares the same validation/build/apply
+helpers. Validation order remains channel count, scalar-format/Lab support,
+finite components, range components, then transform build/apply. LCMS flags and
+intent remain unchanged (`RelativeColorimetric`, flags `0`).
+
 ### Public API
 
 - `inspect_device_link(bytes: &[u8]) -> Result<DeviceLinkInfo, LcmsError>` — opens

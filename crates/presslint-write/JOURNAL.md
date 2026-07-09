@@ -15,6 +15,20 @@ conversion (F4-2), generalised to MULTI-LINK source-space routing (F4-5) and, as
 of T136, to MULTI-content-stream pages (each content-stream OBJECT edited
 independently).
 
+## T172 - Prepared DeviceLink Routing
+
+DeviceLink routing now prepares each supplied link through `LcmsColorEngine` and
+stores the resulting `PreparedDeviceLink` in `RoutedLink`. The converter hot loop
+calls `ColorEngine::apply_device_link` on that prepared link, so the first
+reachable apply lazily builds LCMS native state and later operators in the same
+request reuse it.
+
+Routing still reports errors and per-link counts from raw `DeviceLinkInfo`, not
+the lossy shared `DeviceLinkShape`: invalid bytes remain
+`DeviceLinkInspectFailed`, Lab/unsupported sides remain `UnsupportedLinkSpace`
+with raw `DeviceLinkSpace` values, duplicate sources remain
+`AmbiguousLinkSource`, and report `source`/`destination` fields are unchanged.
+
 ## T160 - Page Transparency Group Convert Guard
 
 `convert_content_colors_incremental` now preflights selected pages for top-level
@@ -887,7 +901,7 @@ already-parsed operand components. `selector_matches` walks the boolean tree
 directly (`All`=true, `None`=false, `Not`, `And`=all, `Or`=any, `Predicate`=leaf).
 It builds NO `InventoryEntry`, tracks NO graphics state, and does NOT call
 `presslint_selectors::matches`; the private page-match and component-match
-semantics of the selector crate are reimplemented locally (parity on the
+semantics of the selector crate are reimplemented locally (odd/even on the
 one-based page number, exact/tolerant component compare) so the evaluator stays a
 cheap per-operator boolean with no inventory dependency.
 
@@ -899,7 +913,7 @@ any unsupported leaf makes the whole call fail with
 Vec<UnsupportedTargetLeaf> }` — never a silent non-match, because silently
 under-converting is bad prepress behaviour. SUPPORTED (operator-local) leaves:
 `ColorSpace` for Device Gray/RGB/CMYK only, `Page` + `PageMatch`
-(parity/range/set/exact), `ColorUsage` for Fill/Stroke only, `ColorComponents`
+(odd-even/range/set/exact), `ColorUsage` for Fill/Stroke only, `ColorComponents`
 over the operand components (device space + usage None/Fill/Stroke), and
 `ComponentCompare` over one operand component (device space + usage
 None/Fill/Stroke). REJECTED leaves (need graphics-state association, a later

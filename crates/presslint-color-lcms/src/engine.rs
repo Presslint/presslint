@@ -3,22 +3,19 @@
 //! [`LcmsColorEngine`] is a zero-state implementation of the
 //! `presslint-color` LINK-APPLICATION contract. It delegates verbatim to the
 //! existing free functions [`inspect_device_link`](crate::inspect_device_link)
-//! and [`apply_device_link_f64`](crate::apply_device_link_f64), so its results
-//! are bit-identical to — and fail identically to — the current converter's
-//! API. The differential integration test pins that equivalence.
-//!
-//! Native profile/transform handle retention is EXPLICITLY the next slice; a
-//! [`PreparedDeviceLink`] currently owns the link bytes plus the inspected
-//! [`DeviceLinkInfo`](crate::DeviceLinkInfo) only, and `apply` re-parses the
-//! bytes through `apply_device_link_f64` exactly as the shipped converter does
-//! today. Retaining the opened profile + built transform behind this type will
-//! be a pure implementation detail with no contract change.
+//! and the same validation/build/apply helpers as
+//! [`apply_device_link_f64`](crate::apply_device_link_f64), so results stay
+//! bit-identical to — and fail identically to — the free function.
+
+use std::cell::RefCell;
+use std::fmt;
 
 use presslint_color::{ColorEngine, DeviceLinkShape};
 use presslint_types::ColorSpace;
 
 use crate::{
-    DeviceLinkInfo, DeviceLinkSpace, LcmsError, apply_device_link_f64, inspect_device_link,
+    DeviceLinkInfo, DeviceLinkSpace, LcmsError, NativeDeviceLink, inspect_device_link,
+    validate_device_link_input,
 };
 
 /// A zero-state [`ColorEngine`] backed by Little CMS.
@@ -28,19 +25,40 @@ use crate::{
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LcmsColorEngine;
 
-/// A prepared DeviceLink: its ICC bytes and the inspected two-sided shape.
+/// A prepared DeviceLink: its ICC bytes, inspected shape, and lazy native pair.
 ///
-/// This owns a copy of the DeviceLink bytes so `apply` can re-open the profile,
-/// matching the shipped converter's per-operator parse. That byte copy is
-/// intentional and bounded (one small profile per routed link, off the
-/// hot-path this slice does not touch); the retained-native-handle optimisation
-/// that ends the re-parse is the next slice.
-#[derive(Debug, Clone)]
+/// This owns a copy of the DeviceLink bytes so first application can open the
+/// profile and build the transform request-locally. The native pair is retained
+/// after that first successful `apply`, so later applies through the same
+/// prepared link reuse the transform instead of reparsing/rebuilding it.
 pub struct PreparedDeviceLink {
-    /// The DeviceLink ICC bytes, re-opened on every `apply`.
+    /// The DeviceLink ICC bytes, opened lazily on first reachable `apply`.
     bytes: Vec<u8>,
     /// The inspected source/destination spaces and channel counts.
     info: DeviceLinkInfo,
+    /// Lazy `OpenProfile` + `OwnedTransform`; private to this crate.
+    native: RefCell<Option<NativeDeviceLink>>,
+}
+
+impl PreparedDeviceLink {
+    /// The raw inspected DeviceLink metadata.
+    ///
+    /// This preserves unsupported ICC signatures for callers that need exact
+    /// report/error fields. It exposes no native Little CMS handles.
+    #[must_use]
+    pub const fn info(&self) -> DeviceLinkInfo {
+        self.info
+    }
+}
+
+impl fmt::Debug for PreparedDeviceLink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreparedDeviceLink")
+            .field("bytes_len", &self.bytes.len())
+            .field("info", &self.info)
+            .field("native_ready", &self.native.borrow().is_some())
+            .finish()
+    }
 }
 
 impl ColorEngine for LcmsColorEngine {
@@ -55,6 +73,7 @@ impl ColorEngine for LcmsColorEngine {
         Ok(PreparedDeviceLink {
             bytes: bytes.to_vec(),
             info,
+            native: RefCell::new(None),
         })
     }
 
@@ -72,10 +91,13 @@ impl ColorEngine for LcmsColorEngine {
         link: &Self::DeviceLink,
         input: &[f64],
     ) -> Result<Vec<f64>, Self::Error> {
-        // Delegate verbatim: identical bytes, identical validation order
-        // (channel-count → format/Lab-reject → finiteness → range), identical
-        // output. The differential test asserts bit-identity with this call.
-        apply_device_link_f64(&link.bytes, input)
+        let formats = validate_device_link_input(link.info, input)?;
+        let mut native = link.native.borrow_mut();
+        if native.is_none() {
+            *native = Some(NativeDeviceLink::open(&link.bytes, link.info, formats)?);
+        }
+        let native = native.as_ref().ok_or(LcmsError::TransformFailed)?;
+        Ok(native.apply(input))
     }
 }
 

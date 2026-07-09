@@ -14,10 +14,11 @@
 //!
 //! # Copy budget
 //!
-//! Each link's raw ICC bytes are BORROWED from the request (`&'a [u8]`) — no
-//! profile payload is copied into the routing table. The only owned copies are
-//! the small optional `id` label strings (one per link, bounded by the number of
-//! links), materialised so the routing outlives per-page borrows cleanly.
+//! Each link is prepared once through `presslint-color-lcms`, which retains one
+//! request-bounded copy of its ICC bytes and lazily builds native LCMS state on
+//! first application. The only other owned copies are the small optional `id`
+//! label strings (one per link, bounded by the number of links), materialised so
+//! the routing outlives per-page borrows cleanly.
 
 // "DeviceLink" is the ICC profile-class domain term used throughout these docs as
 // prose, not always as a code identifier; mirror the `presslint-color-lcms` crate
@@ -26,7 +27,7 @@
 
 use std::collections::BTreeMap;
 
-use presslint_color_lcms::{DeviceLinkSpace, inspect_device_link};
+use presslint_color_lcms::{ColorEngine, DeviceLinkSpace, LcmsColorEngine, PreparedDeviceLink};
 use serde::{Deserialize, Serialize};
 
 use crate::content_color_convert::{ConvertContentColorsError, DeviceColorSpace};
@@ -63,17 +64,17 @@ pub struct LinkConversionCounts {
 
 /// One validated, source-routable DeviceLink.
 ///
-/// Bytes are BORROWED from the request, so building the routing copies no profile
-/// payload. Both `DeviceColorSpace` fields drive per-operator mechanics (operand
+/// The prepared link owns request-local ICC bytes and lazily retained LCMS
+/// state. Both `DeviceColorSpace` fields drive per-operator mechanics (operand
 /// rewrite, black preservation); the `DeviceLinkSpace` fields are the inspected
 /// spaces echoed verbatim into [`LinkConversionCounts`].
-pub struct RoutedLink<'a> {
+pub struct RoutedLink {
     /// Index of this link in the request `device_links` vec.
     pub index: usize,
     /// The link's opaque caller label.
     pub id: Option<String>,
-    /// Borrowed raw ICC bytes for `apply_device_link_f64`.
-    pub bytes: &'a [u8],
+    /// Prepared DeviceLink used by the conversion hot loop.
+    pub prepared: PreparedDeviceLink,
     /// Narrowed destination device space (drives the operator rewrite).
     pub destination: DeviceColorSpace,
     /// Inspected source space, echoed into the per-link report.
@@ -83,22 +84,22 @@ pub struct RoutedLink<'a> {
 }
 
 /// Deterministic source-space -> link routing table, built once per call.
-pub struct LinkRouting<'a> {
+pub struct LinkRouting {
     /// Validated links in request (`link_index`) order; position == `index`.
-    links: Vec<RoutedLink<'a>>,
+    links: Vec<RoutedLink>,
     /// Source device space -> position in `links`. `BTreeMap` keeps duplicate
     /// detection and iteration deterministic.
     by_source: BTreeMap<DeviceColorSpace, usize>,
 }
 
-impl<'a> LinkRouting<'a> {
+impl LinkRouting {
     /// Every validated link, in request (`link_index`) order.
-    pub fn links(&self) -> &[RoutedLink<'a>] {
+    pub fn links(&self) -> &[RoutedLink] {
         &self.links
     }
 
     /// The link whose SOURCE space equals `space`, if any.
-    pub fn route(&self, space: DeviceColorSpace) -> Option<&RoutedLink<'a>> {
+    pub fn route(&self, space: DeviceColorSpace) -> Option<&RoutedLink> {
         self.by_source.get(&space).map(|&index| &self.links[index])
     }
 }
@@ -116,22 +117,24 @@ impl<'a> LinkRouting<'a> {
 ///   same source space (routing would be a silent guess).
 pub fn build_link_routing(
     inputs: &[DeviceLinkInput],
-) -> Result<LinkRouting<'_>, ConvertContentColorsError> {
+) -> Result<LinkRouting, ConvertContentColorsError> {
     if inputs.is_empty() {
         return Err(ConvertContentColorsError::NoDeviceLinks);
     }
 
-    let mut links: Vec<RoutedLink<'_>> = Vec::with_capacity(inputs.len());
+    let engine = LcmsColorEngine;
+    let mut links: Vec<RoutedLink> = Vec::with_capacity(inputs.len());
     let mut by_source: BTreeMap<DeviceColorSpace, usize> = BTreeMap::new();
 
     for (index, input) in inputs.iter().enumerate() {
-        let info = inspect_device_link(&input.bytes).map_err(|error| {
+        let prepared = engine.prepare_device_link(&input.bytes).map_err(|error| {
             ConvertContentColorsError::DeviceLinkInspectFailed {
                 index,
                 id: input.id.clone(),
                 error,
             }
         })?;
+        let info = prepared.info();
         let (Some(source), Some(destination)) = (
             DeviceColorSpace::from_link(info.source_space),
             DeviceColorSpace::from_link(info.destination_space),
@@ -154,7 +157,7 @@ pub fn build_link_routing(
         links.push(RoutedLink {
             index,
             id: input.id.clone(),
-            bytes: input.bytes.as_slice(),
+            prepared,
             destination,
             source_link_space: info.source_space,
             destination_link_space: info.destination_space,

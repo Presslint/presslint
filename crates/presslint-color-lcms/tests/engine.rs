@@ -251,6 +251,41 @@ fn adapter_apply_is_bit_identical_on_gray_link() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn prepared_link_reuses_native_transform_across_repeated_applies() -> Result<(), String> {
+    let bytes = rgb_to_rgb_link()?;
+    let engine = LcmsColorEngine;
+    let link = engine
+        .prepare_device_link(&bytes)
+        .expect("prepare a valid DeviceLink");
+
+    assert!(
+        format!("{link:?}").contains("native_ready: false"),
+        "prepare must not build native state"
+    );
+
+    let first = engine
+        .apply_device_link(&link, &[0.25, 0.5, 0.75])
+        .map_err(|error| format!("{error:?}"))?;
+    assert!(
+        format!("{link:?}").contains("native_ready: true"),
+        "first apply must retain native state"
+    );
+
+    let second = engine
+        .apply_device_link(&link, &[0.25, 0.5, 0.75])
+        .map_err(|error| format!("{error:?}"))?;
+    let free =
+        apply_device_link_f64(&bytes, &[0.25, 0.5, 0.75]).map_err(|error| format!("{error:?}"))?;
+
+    let first_bits: Vec<u64> = first.iter().map(|value| value.to_bits()).collect();
+    let second_bits: Vec<u64> = second.iter().map(|value| value.to_bits()).collect();
+    let free_bits: Vec<u64> = free.iter().map(|value| value.to_bits()).collect();
+    assert_eq!(first_bits, second_bits);
+    assert_eq!(first_bits, free_bits);
+    Ok(())
+}
+
 // --- Shape agreement ---------------------------------------------------------
 
 #[test]
@@ -338,5 +373,57 @@ fn error_identity_on_out_of_range_components() -> Result<(), String> {
     let bytes = rgb_to_rgb_link()?;
     assert_adapter_matches_free_function(&bytes, &[0.1, 1.5, 0.3]);
     assert_adapter_matches_free_function(&bytes, &[0.1, -0.5, 0.3]);
+    Ok(())
+}
+
+#[test]
+fn validation_order_is_preserved_on_prepared_and_free_paths() -> Result<(), String> {
+    let engine = LcmsColorEngine;
+
+    let rgb = rgb_to_rgb_link()?;
+    let rgb_prepared = engine
+        .prepare_device_link(&rgb)
+        .expect("prepare RGB DeviceLink");
+    let channel_mismatch = Err(LcmsError::ChannelCountMismatch {
+        expected: 3,
+        got: 2,
+    });
+    assert_eq!(
+        apply_device_link_f64(&rgb, &[f64::NAN, 0.2]),
+        channel_mismatch
+    );
+    assert_eq!(
+        engine.apply_device_link(&rgb_prepared, &[f64::NAN, 0.2]),
+        channel_mismatch
+    );
+
+    let lab = lab_to_rgb_link()?;
+    let lab_prepared = engine
+        .prepare_device_link(&lab)
+        .expect("prepare Lab-sided DeviceLink");
+    assert_eq!(
+        apply_device_link_f64(&lab, &[0.5, f64::NAN, 0.5]),
+        Err(LcmsError::UnsupportedColorSpace)
+    );
+    assert_eq!(
+        engine.apply_device_link(&lab_prepared, &[0.5, f64::NAN, 0.5]),
+        Err(LcmsError::UnsupportedColorSpace)
+    );
+    assert_eq!(
+        apply_device_link_f64(&rgb, &[0.1, f64::NAN, 0.3]),
+        Err(LcmsError::NonFiniteComponent)
+    );
+    assert_eq!(
+        engine.apply_device_link(&rgb_prepared, &[0.1, f64::NAN, 0.3]),
+        Err(LcmsError::NonFiniteComponent)
+    );
+    assert_eq!(
+        apply_device_link_f64(&rgb, &[0.1, 1.5, 0.3]),
+        Err(LcmsError::ComponentOutOfRange)
+    );
+    assert_eq!(
+        engine.apply_device_link(&rgb_prepared, &[0.1, 1.5, 0.3]),
+        Err(LcmsError::ComponentOutOfRange)
+    );
     Ok(())
 }
