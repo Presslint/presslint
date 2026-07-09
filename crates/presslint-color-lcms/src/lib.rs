@@ -52,6 +52,13 @@
 // as prose, not always as a code identifier; do not force backticks on it.
 #![allow(clippy::doc_markdown)]
 
+mod engine;
+
+pub use engine::{LcmsColorEngine, PreparedDeviceLink};
+// Re-export the contract so future consumers need no direct `presslint-color`
+// dependency edge.
+pub use presslint_color::{ColorEngine, DeviceLinkShape};
+
 use lcms2_sys::ffi::{
     ColorSpaceSignature, HPROFILE, HTRANSFORM, Intent, PixelFormat, ProfileClassSignature,
     cmsChannelsOf, cmsCloseProfile, cmsCreateMultiprofileTransform, cmsDeleteTransform,

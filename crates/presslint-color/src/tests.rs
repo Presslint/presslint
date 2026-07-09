@@ -2,6 +2,7 @@
 
 mod color_policy;
 mod devicelink;
+mod engine;
 mod json;
 mod overprint;
 mod spot;

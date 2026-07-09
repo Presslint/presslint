@@ -159,6 +159,30 @@
   The split was a mechanical move with no contract, signature, or behavior change;
   the `target_identity` and `is_process_device_color_space` helpers stay private to
   their modules.
+- Adds the colour-EXECUTION contract in `engine.rs`: the `ColorEngine` trait plus
+  `DeviceLinkShape { source, destination, input_channels, output_channels }` over
+  `presslint-types::ColorSpace` (serde per crate convention). This is the
+  LINK-APPLICATION half of the colour engine; the LINK-SELECTION half stays in the
+  pure `resolve_device_link_policy` / `resolve_transform_plan` resolvers. The trait
+  has two associated types — `DeviceLink` (a backend's prepared handle) and
+  `Error: Debug + Clone + PartialEq + Serialize + DeserializeOwned` — and three
+  methods: `prepare_device_link(bytes) -> DeviceLink`, `device_link_shape(&link) ->
+  DeviceLinkShape`, and `apply_device_link(&link, input) -> Vec<f64>`. The
+  `prepare`/`apply` split lets a backend retain parsed profile/transform state
+  behind `DeviceLink` with no contract change.
+- Rendering intent, black-point compensation, K-preservation, and quantisation are
+  DELIBERATELY absent from every method: intent/BPC/K are creation-time DeviceLink
+  LUT properties (a precompiled devicelink bakes intent in; lcms ignores runtime
+  intent/BPC for devicelinks), black preservation is a rule-based operand overlay
+  the caller applies BEFORE the link, and quantisation is downstream (the caller
+  owns rounding — `apply` returns raw `f64`). No `Send`/`Sync` supertrait bounds:
+  a real backend's prepared link will hold native `!Send + !Sync` handles. The two
+  associated types make the trait intentionally not object-safe (`dyn ColorEngine`
+  is neither needed nor supported); consumers are generic or concrete. The crate
+  stays `#![forbid(unsafe_code)]` and contracts-only — no backend edge is added.
+- Contract tests use a tiny in-crate fake engine to pin the prepare/shape/apply
+  plumbing and prove the `Error` bounds (clone/eq + a serde round-trip), plus a
+  `DeviceLinkShape` serde-shape lock through the dependency-free JSON harness.
 
 ## Follow-Ups
 

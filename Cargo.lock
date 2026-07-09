@@ -318,6 +318,8 @@ name = "presslint-color-lcms"
 version = "0.0.1"
 dependencies = [
  "lcms2-sys",
+ "presslint-color",
+ "presslint-types",
  "serde",
 ]
 

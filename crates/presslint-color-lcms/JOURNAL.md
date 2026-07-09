@@ -126,6 +126,53 @@ untouched and remains `#![forbid(unsafe_code)]`.
 --all-targets`, and `./scripts/ci_check.sh` (clippy `-D warnings` incl. pedantic +
 nursery) all pass.
 
+### `ColorEngine` adapter (`engine.rs`)
+
+`LcmsColorEngine` implements the `presslint-color` `ColorEngine` contract by
+delegating verbatim to the existing free functions — a zero-state adapter that
+introduces the contract WITHOUT moving any call site (the shipped converter keeps
+calling the free functions this slice). `prepare_device_link` performs the same
+single `inspect_device_link` the routing layer already runs and returns a
+`PreparedDeviceLink` owning the link bytes plus the inspected `DeviceLinkInfo`;
+`apply_device_link` delegates to `apply_device_link_f64(&link.bytes, input)`, so
+the validation ORDER (channel-count → format/Lab-reject → finiteness → range) and
+the output are identical. `device_link_shape` maps the inspected `DeviceLinkSpace`
+sides to the shared `ColorSpace` vocabulary (Gray→DeviceGray, Rgb→DeviceRgb,
+Cmyk→DeviceCmyk, Lab→Lab, Unsupported(_)→Unknown). NOTE: the raw 32-bit ICC
+signature carried by `Unsupported(u32)` is LOST in that mapping — `Unknown` is
+signature-free, so a caller needing the raw signature must read `DeviceLinkInfo`
+directly. `type Error = LcmsError` (unchanged; its existing derives already satisfy
+the contract's `Debug + Clone + PartialEq + Serialize + DeserializeOwned` bounds —
+no `Display` added). No `Send`/`Sync`, matching the contract.
+
+### New dependency edges + no keyed cache
+
+Adds workspace-internal edges `presslint-color-lcms -> presslint-color` and `->
+presslint-types` ONLY (the reverse edge stays forbidden: `presslint-color` is
+contracts-only and `#![forbid(unsafe_code)]`). The crate re-exports the contract
+(`pub use presslint_color::{ColorEngine, DeviceLinkShape}`) so future consumers
+need no direct edge; the umbrella's `pub use presslint_color as color` exposes the
+trait with no umbrella edit. Cargo.lock gains only these two internal edges (no new
+third-party packages; the licence gate is unaffected). `PreparedDeviceLink` copies
+the DeviceLink bytes — an intentional, bounded copy (one small profile per routed
+link, off the hot path this slice does not touch); native-handle retention that
+ends the per-`apply` re-parse is the NEXT slice. The keyed transform cache stays
+DORMANT: `TransformCacheKey` is unwired because it is blocked on profile identity
+(`DeviceLinkInput.id` is optional/non-unique and the key's doctrine forbids hashing
+bytes) — a profile-registry-era concern, not this slice.
+
+### Differential proof (`tests/engine.rs`)
+
+A separate integration test rebuilds the same synthetic in-memory DeviceLinks the
+executor suite builds and asserts, per fixture and input, that the adapter's
+`prepare + apply` is BIT-IDENTICAL to `apply_device_link_f64` (`f64::to_bits`
+equality) and ERROR-FOR-ERROR identical on every failure fixture (invalid profile,
+not a devicelink, Lab-sided reject, channel mismatch, non-finite, out-of-range),
+plus that `device_link_shape` agrees with `inspect_device_link`. The synthetic
+builders are duplicated from `tests/device_link.rs` rather than shared through a
+`tests/common` module, because a shared module would be a third file outside this
+slice's write scope; no existing test was edited or weakened. 11 new tests.
+
 ## Follow-Ups
 
 - Wire this executor into content-operand rewriting by calling it once per

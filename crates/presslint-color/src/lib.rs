@@ -4,6 +4,7 @@
 
 mod color_policy;
 mod devicelink;
+mod engine;
 mod output_intent;
 mod overprint;
 mod policy;
@@ -18,6 +19,7 @@ pub use color_policy::{ColorPolicyDecision, resolve_color_policy};
 pub use devicelink::{
     DeviceLinkDecision, DeviceLinkDescription, DeviceLinkRejection, resolve_device_link_policy,
 };
+pub use engine::{ColorEngine, DeviceLinkShape};
 pub use output_intent::{
     ObservedOutputIntent, OutputIntentDecision, OutputIntentRejection, resolve_output_intent_policy,
 };

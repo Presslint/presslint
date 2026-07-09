@@ -9,6 +9,8 @@ description = "Little CMS (lcms2) DeviceLink executor for presslint colour conve
 
 [dependencies]
 lcms2-sys.workspace = true
+presslint-color.workspace = true
+presslint-types.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
