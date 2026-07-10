@@ -2,6 +2,32 @@
 
 Earlier entries are preserved in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T176 - Exact Logical Page Content
+
+The direct-device converter now treats an ordered page `/Contents` array as one
+exact decoded byte sequence. Private `PageContentSequence` owns that logical
+buffer, its single global token and operator-record vectors, and ordered
+physical occurrence spans. The superseded per-stream `ParsedContent` path is
+removed. No separator is synthesized: occurrence boundaries may cross
+whitespace or comment trivia (including CRLF), but a boundary strictly inside
+any other lexical token refuses the page.
+
+Paint interpretation and the ExtGState guard consume the global records, so
+operands, `q`/`Q`, graphics state, and `gs` may cross physical streams. Selected
+replacement ranges must localize wholly to one occurrence. Complete occurrence
+plans for a repeated indirect object must be identical, including edit versus
+no edit; identical plans collapse to one physical rewrite and count.
+
+The converter path is page-atomic. It decodes every unique physical object once,
+checks the aggregate logical size including repeated occurrences, stages local
+splices and reports, rebuilds and globally parses/walks the edited sequence,
+then encodes and constructs all dirty objects before publishing the page.
+Readable ownership-vetoed objects still participate in interpretation while
+their own edits and tallies remain suppressed. The public request, report,
+selector, serde, CLI, append-only prefix, and ownership policy shapes are
+unchanged. Cross-occurrence replacement itself remains intentionally unsupported
+and fails closed.
+
 ## T175 - Parse-Once Paint-Driven Direct Converter
 
 The shipped direct-device colour converter now discovers candidates exclusively

@@ -38,6 +38,8 @@ pub enum StreamMode {
     /// T136 behaviour: every content-stream object of a page is located and
     /// ownership-gated independently.
     MultiStream,
+    /// Preserve every physical occurrence for one logical page-sequence walk.
+    LogicalSequence,
 }
 
 /// One located, source-addressable content-stream object of a page.
@@ -133,19 +135,27 @@ pub fn plan_page_streams(
             reason: PipelineSkipReason::MultipleContentStreams { count },
         };
     }
+    if mode == StreamMode::LogicalSequence && !contents.skipped.is_empty() {
+        return PageStreamsPlan::PageSkip {
+            content_object: None,
+            reason: PipelineSkipReason::ContentRoundTripMismatch,
+        };
+    }
 
     let page_index = page_index_of(page);
     let mut seen: BTreeSet<IndirectRef> = BTreeSet::new();
     let mut outcomes = Vec::with_capacity(extents.entries.len());
     for (stream_ordinal, entry) in extents.entries.iter().enumerate() {
         let outcome = locate_entry(page_index, stream_ordinal, entry);
-        if let Some(object) = outcome_content_object(&outcome) {
-            if !seen.insert(object) {
-                // Same content-stream object already located on this page: its
-                // edits MERGE into the first occurrence (identical object bytes and
-                // deterministic edit), so it is neither re-edited nor double-counted
-                // and the plan is never handed two dirty objects with one number.
-                continue;
+        if mode != StreamMode::LogicalSequence {
+            if let Some(object) = outcome_content_object(&outcome) {
+                if !seen.insert(object) {
+                    // Same content-stream object already located on this page: its
+                    // edits MERGE into the first occurrence (identical object bytes and
+                    // deterministic edit), so it is neither re-edited nor double-counted
+                    // and the plan is never handed two dirty objects with one number.
+                    continue;
+                }
             }
         }
         outcomes.push(outcome);

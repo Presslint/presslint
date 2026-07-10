@@ -9,9 +9,11 @@
 use presslint_pdf::{
     ClassifiedExtGStateResource, PageExtGStateResourcesInspection, PageTransparencyGroupInspection,
 };
-use presslint_syntax::{Token, TokenKind, assemble_operators, tokenize};
+use presslint_syntax::{Token, TokenKind};
 
-use crate::content_edit_pipeline::PipelineSkipReason;
+use crate::{
+    content_edit_pipeline::PipelineSkipReason, page_content_sequence::PageContentSequence,
+};
 
 const GS_OPERATOR: &[u8] = b"gs";
 
@@ -55,12 +57,10 @@ impl ExtGStateUnsafeFlags {
 #[must_use]
 pub fn extgstate_page_skip_reason(
     page_resources: Option<&PageExtGStateResourcesInspection>,
-    decoded_streams: &[Vec<u8>],
+    sequence: &PageContentSequence,
 ) -> Option<PipelineSkipReason> {
     let mut flags = ExtGStateUnsafeFlags::default();
-    for decoded in decoded_streams {
-        scan_stream(decoded, page_resources, &mut flags);
-    }
+    scan_sequence(sequence, page_resources, &mut flags);
     if flags.gs_count == 0 || flags.is_empty() {
         None
     } else {
@@ -89,24 +89,19 @@ pub fn transparency_group_page_skip_reason(
     })
 }
 
-fn scan_stream(
-    decoded: &[u8],
+fn scan_sequence(
+    sequence: &PageContentSequence,
     page_resources: Option<&PageExtGStateResourcesInspection>,
     flags: &mut ExtGStateUnsafeFlags,
 ) {
-    let Ok(tokens) = tokenize(decoded) else {
-        return;
-    };
-    let Ok(assembled) = assemble_operators(&tokens) else {
-        return;
-    };
-
-    for record in assembled.records {
+    let decoded = sequence.bytes();
+    let tokens = sequence.tokens();
+    for record in sequence.records() {
         if tokens[record.operator.token_index].source_bytes(decoded) != Some(GS_OPERATOR) {
             continue;
         }
         flags.gs_count = flags.gs_count.saturating_add(1);
-        let Some(name) = gs_operand_name(&record.operands, decoded, &tokens) else {
+        let Some(name) = gs_operand_name(&record.operands, decoded, tokens) else {
             flags.add(ExtGStateUnsafeFlags::UNCLASSIFIED);
             continue;
         };

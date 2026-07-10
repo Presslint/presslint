@@ -12,16 +12,12 @@
 //! that have not adopted the per-stream model. The page-aware and re-encode
 //! callers drive [`StreamMode::MultiStream`] and edit every stream object.
 //!
-//! Two edit-callback flavours exist behind one loop. Raw byte callbacks keep
-//! the historical `&[u8]` contract and the tokenize + byte-identical
-//! serialization precheck. Operator-interpreting callers use the crate-private
-//! parse-once seam ([`edit_page_content_incremental_parsed_with_preflight`]):
-//! the pipeline builds one validated [`ParsedContent`] per stream (tokenize,
-//! round-trip check, operator assembly — each exactly once) and the callback
-//! consumes it directly. Both flavours retain the independent post-edit
-//! round-trip validation of the edited bytes.
+//! Raw byte callbacks retain their historical per-stream contract. The direct
+//! converter uses a separate private page transaction: unique physical objects
+//! decode once, exact occurrence bytes form one logical sequence, and all
+//! physical rewrites publish only after global post-edit validation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use presslint_actions::{
     IncrementalRevisionPlan, MutationBoundary, PlannedDirtyObject, PlannedValueProvenance,
@@ -29,13 +25,12 @@ use presslint_actions::{
 use presslint_pdf::{
     ContentStreamDataExtentInspection, ContentStreamFilterClassification, DictionaryEntrySpan,
     DictionaryValueKind, DocumentAccessBackend, DocumentAccessError, DocumentAccessRejection,
-    DocumentPageContentExtentInspection, DocumentPageExtGStateResourcesInspection,
-    DocumentPageExtGStateResourcesInspectionError, DocumentPageTransparencyGroupsInspection,
-    DocumentPageTransparencyGroupsInspectionError, FlateDecodeParameters,
-    FlateDecodeParametersResolution, IndirectObjectEditDecision, IndirectObjectEditDisposition,
-    IndirectRef, ObjectLookup, PageExtGStateResourcesInspection, PageTransparencyGroupInspection,
-    classify_content_stream_filter, content_stream_data_slice, decode_flate_stream,
-    encode_flate_stream, inspect_document_access,
+    DocumentPageExtGStateResourcesInspection, DocumentPageExtGStateResourcesInspectionError,
+    DocumentPageTransparencyGroupsInspection, DocumentPageTransparencyGroupsInspectionError,
+    FlateDecodeParameters, FlateDecodeParametersResolution, IndirectObjectEditDecision,
+    IndirectObjectEditDisposition, IndirectRef, ObjectLookup, PageExtGStateResourcesInspection,
+    PageTransparencyGroupInspection, classify_content_stream_filter, content_stream_data_slice,
+    decode_flate_stream, encode_flate_stream, inspect_document_access,
     inspect_document_page_content_extents_with_lookup,
     inspect_document_page_extgstate_resources_with_lookup,
     inspect_document_page_transparency_groups_with_lookup, inspect_indirect_object_dictionary,
@@ -52,7 +47,7 @@ use crate::{
         LocatedContentStream, PageStreamsPlan, StreamMode, StreamOutcome, page_index_of,
         plan_page_streams,
     },
-    parsed_content::ParsedContent,
+    page_content_sequence::{OccurrenceInput, PageContentSequence, PhysicalObjectPlan},
     stream_object_body::build_stream_object_body,
     write_incremental_revision, write_incremental_revision_plan,
 };
@@ -157,23 +152,7 @@ pub enum PipelineSkipReason {
     Unchanged,
 }
 
-/// Whole-page decision returned by a pipeline preflight hook, evaluated BEFORE any
-/// dirty object is emitted for a page.
-///
-/// The hook is GENERIC and OPT-IN: the pipeline decodes a page's editable content
-/// streams once and hands them to the caller-supplied closure, which either lets
-/// the normal per-stream edit loop run ([`PagePreflight::Continue`]) or poisons
-/// the ENTIRE page ([`PagePreflight::SkipPage`], emit one whole-page skip and
-/// convert nothing). The pipeline itself stays scanner-agnostic; the converter
-/// supplies the `gs`-presence scanner.
-pub enum PagePreflight {
-    /// Run the normal per-stream edit loop for this page.
-    Continue,
-    /// Poison the whole page: emit one [`PipelinePageSkip`] with this reason and
-    /// edit none of the page's streams.
-    SkipPage(PipelineSkipReason),
-}
-
+/// Result of editing selected pages through the content-stream pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditPageContentOutput {
     pub bytes: Vec<u8>,
@@ -222,19 +201,10 @@ where
     })
 }
 
-/// The two edit-callback flavours the per-stream edit loop can drive.
-///
-/// `Raw` preserves the historical byte contract for existing callers: the
-/// decoded bytes pass the tokenize + byte-identical-serialization check and the
-/// callback receives `&[u8]` exactly as before. `Parsed` is the crate-private
-/// parse-once seam: the pipeline builds one validated [`ParsedContent`]
-/// (tokenize + round-trip check + operator assembly, all exactly once) and the
-/// operator-interpreting callback consumes it without re-parsing.
+/// Historical raw callback used by the source-compatible per-stream loop.
 enum StreamEditCallback<'a> {
     /// Historical raw byte callback (public wrappers).
     Raw(&'a dyn Fn(PageIndex, &[u8]) -> EditedContent),
-    /// Parse-once callback (crate-private converter seam).
-    Parsed(&'a dyn Fn(PageIndex, &ParsedContent<'_>) -> EditedContent),
 }
 
 /// Page-aware, MULTI-stream-capable content edit: the edit closure receives the
@@ -261,72 +231,344 @@ where
 {
     // Existing callers stay behaviourally identical: a no-op preflight that never
     // poisons a page and does not pay the preflight decode pass.
-    edit_page_content_incremental_indexed_inner(
-        input,
-        pages,
-        mode,
-        None,
-        &StreamEditCallback::Raw(&edit),
-    )
+    edit_page_content_incremental_indexed_inner(input, pages, mode, &StreamEditCallback::Raw(&edit))
 }
 
-/// Page-aware, MULTI-stream-capable, PARSE-ONCE content edit with a GENERIC,
-/// OPT-IN page-level PREFLIGHT hook: before any dirty object is emitted for a
-/// selected page, the pipeline decodes that page's editable content streams once
-/// and calls `preflight(page_index, &decoded_streams)`. On
-/// [`PagePreflight::SkipPage`] the whole page is left byte-verbatim and reported
-/// as one [`PipelinePageSkip`] (`stream_ordinal: 0`, `content_object: None`); on
-/// [`PagePreflight::Continue`] the per-stream edit loop runs.
-///
-/// The edit callback receives one validated [`ParsedContent`] per stream: the
-/// pipeline tokenizes, verifies byte-identical token serialization, and
-/// assembles the operator records exactly once, so an operator-interpreting
-/// callback never re-parses the same bytes. A stream that fails any of those
-/// steps is skipped as [`PipelineSkipReason::ContentRoundTripMismatch`] before
-/// the callback runs. The independent post-edit round-trip validation of the
-/// edited bytes is retained unchanged.
-///
-/// The preflight is deliberately whole-page (ISO 32000 §7.8.2: a page's content
-/// streams share graphics state), so a poisoned page converts NONE of its streams
-/// even when only one carries the poison operator. The decoded-stream slice passed
-/// to the hook contains only the streams that decode successfully (an undecodable
-/// stream is never edited either); this is the interim double-decode (preflight
-/// scan then edit decode) accepted for T140, bounded by [`MAX_CONTENT_STREAM_BYTES`].
-///
-/// # Errors
-///
-/// Returns [`EditPageContentError`] under the same conditions as
-/// [`edit_page_content_incremental_indexed`].
-pub fn edit_page_content_incremental_parsed_with_preflight<P, F>(
+/// Converter-private result for one fully analysed logical page.
+pub struct PageSequenceEdit<T> {
+    pub plans: Vec<PhysicalObjectPlan>,
+    pub metadata: T,
+}
+
+/// Converter-private page transaction output. Metadata is published only for
+/// pages whose complete physical staging succeeded.
+pub struct PageSequenceOutput<T> {
+    pub bytes: Vec<u8>,
+    pub pages: Vec<T>,
+    pub skipped: Vec<PipelinePageSkip>,
+}
+
+struct PreparedSequenceObject<'a> {
+    located: &'a LocatedContentStream<'a>,
+    decoded: Vec<u8>,
+    filter: PipelineFilterKind,
+    length_value_range: ByteRange,
+    dictionary_open: usize,
+    dictionary_end: usize,
+    occurrences: usize,
+    decision: IndirectObjectEditDecision,
+}
+
+/// Decode, analyse, validate, encode, and publish each selected page atomically
+/// in exact logical `/Contents` order.
+#[allow(clippy::too_many_lines)]
+pub fn edit_page_content_incremental_sequence<T, P, F>(
     input: &[u8],
     pages: &PageSelection,
-    mode: StreamMode,
     preflight: P,
     edit: F,
-) -> Result<EditPageContentOutput, EditPageContentError>
+) -> Result<PageSequenceOutput<T>, EditPageContentError>
 where
     P: Fn(
         PageIndex,
         Option<&PageExtGStateResourcesInspection>,
         Option<&PageTransparencyGroupInspection>,
-        &[Vec<u8>],
-    ) -> PagePreflight,
-    F: Fn(PageIndex, &ParsedContent<'_>) -> EditedContent,
+        &PageContentSequence,
+    ) -> Option<PipelineSkipReason>,
+    F: Fn(PageIndex, &PageContentSequence) -> Option<PageSequenceEdit<T>>,
 {
-    edit_page_content_incremental_indexed_inner(
+    let access = inspect_document_access(input).map_err(|error| EditPageContentError::Open {
+        error: Box::new(error),
+    })?;
+    let lookup = lookup_from_backend(&access.backend);
+    let document = inspect_document_page_content_extents_with_lookup(
         input,
-        pages,
-        mode,
-        Some(&preflight),
-        &StreamEditCallback::Parsed(&edit),
+        lookup,
+        access.page_tree_root.object_byte_offset,
     )
+    .map_err(|error| EditPageContentError::Open {
+        error: Box::new(DocumentAccessError {
+            byte_len: input.len(),
+            reason: DocumentAccessRejection::PageTreeLeaves { error: error.error },
+        }),
+    })?;
+    let selected = select_indices(pages, document.pages.len())?;
+    let ownership = ContentObjectOwnershipIndex::new(
+        &document.pages,
+        inspect_object_consumer_index(input, &access),
+    );
+    let extgstate_document = inspect_extgstate_document_for_preflight(
+        input,
+        lookup,
+        access.page_tree_root.object_byte_offset,
+        true,
+    );
+    let group_document = inspect_transparency_group_document_for_preflight(
+        input,
+        lookup,
+        access.page_tree_root.object_byte_offset,
+        true,
+    );
+    let mut published = Vec::new();
+    let mut skipped = Vec::new();
+    let mut dirty_objects = Vec::new();
+
+    for index in selected {
+        let page = &document.pages[index];
+        let page_index = page_index_of(page);
+        let outcomes = match plan_page_streams(page, StreamMode::LogicalSequence) {
+            PageStreamsPlan::Streams(outcomes) => outcomes,
+            PageStreamsPlan::PageSkip {
+                content_object,
+                reason,
+            } => {
+                skipped.push(PipelinePageSkip {
+                    page_index,
+                    stream_ordinal: 0,
+                    content_object,
+                    reason,
+                });
+                continue;
+            }
+        };
+
+        let mut prepared = Vec::new();
+        let mut object_indexes: BTreeMap<IndirectRef, usize> = BTreeMap::new();
+        let mut occurrence_indexes = Vec::with_capacity(outcomes.len());
+        let mut failure = None;
+        for outcome in &outcomes {
+            let StreamOutcome::Located(located) = outcome else {
+                if let StreamOutcome::Skip { reason, .. } = outcome {
+                    failure = Some(*reason);
+                }
+                break;
+            };
+            if let Some(object_index) = object_indexes.get(&located.content_object) {
+                occurrence_indexes.push(*object_index);
+                continue;
+            }
+            match prepare_sequence_object(input, located, &ownership) {
+                Ok(object) => {
+                    let object_index = prepared.len();
+                    object_indexes.insert(located.content_object, object_index);
+                    occurrence_indexes.push(object_index);
+                    prepared.push(object);
+                }
+                Err(reason) => {
+                    failure = Some(reason);
+                    break;
+                }
+            }
+        }
+        if let Some(reason) = failure {
+            skipped.push(whole_page_skip(page_index, reason));
+            continue;
+        }
+
+        let inputs: Vec<_> = outcomes
+            .iter()
+            .zip(&occurrence_indexes)
+            .filter_map(|(outcome, object_index)| {
+                let StreamOutcome::Located(located) = outcome else {
+                    return None;
+                };
+                let object = &prepared[*object_index];
+                Some(OccurrenceInput {
+                    stream_ordinal: located.stream_ordinal,
+                    content_object: located.content_object,
+                    decoded: &object.decoded,
+                    disposition: object.decision.disposition,
+                })
+            })
+            .collect();
+        let Some(sequence) = PageContentSequence::new(&inputs, MAX_CONTENT_STREAM_BYTES) else {
+            skipped.push(whole_page_skip(
+                page_index,
+                PipelineSkipReason::ContentRoundTripMismatch,
+            ));
+            continue;
+        };
+        let extgstate_page = match extgstate_page_for_preflight(&extgstate_document, index) {
+            Ok(value) => value,
+            Err(reason) => {
+                skipped.push(whole_page_skip(page_index, reason));
+                continue;
+            }
+        };
+        let group_page = match transparency_group_page_for_preflight(&group_document, index) {
+            Ok(value) => value,
+            Err(reason) => {
+                skipped.push(whole_page_skip(page_index, reason));
+                continue;
+            }
+        };
+        if let Some(reason) = preflight(page_index, extgstate_page, group_page, &sequence) {
+            skipped.push(whole_page_skip(page_index, reason));
+            continue;
+        }
+        let Some(page_edit) = edit(page_index, &sequence) else {
+            skipped.push(whole_page_skip(
+                page_index,
+                PipelineSkipReason::ContentRoundTripMismatch,
+            ));
+            continue;
+        };
+
+        let mut edited_by_object = BTreeMap::new();
+        let mut stage_failed = false;
+        for plan in &page_edit.plans {
+            let Some(object_index) = object_indexes.get(&plan.content_object).copied() else {
+                stage_failed = true;
+                break;
+            };
+            let object = &prepared[object_index];
+            if object.decision.disposition != IndirectObjectEditDisposition::InPlaceMutation
+                && !plan.splices.is_empty()
+            {
+                stage_failed = true;
+                break;
+            }
+            if plan.splices.is_empty() {
+                continue;
+            }
+            let mut decoded = object.decoded.clone();
+            for splice in plan.splices.iter().rev() {
+                if splice.range.end > decoded.len() {
+                    stage_failed = true;
+                    break;
+                }
+                decoded.splice(
+                    splice.range.start..splice.range.end,
+                    splice.replacement.iter().copied(),
+                );
+            }
+            edited_by_object.insert(plan.content_object, decoded);
+        }
+        let decoded_by_object: BTreeMap<_, _> = prepared
+            .iter()
+            .map(|object| {
+                let content_object = object.located.content_object;
+                let decoded = edited_by_object
+                    .get(&content_object)
+                    .map_or(object.decoded.as_slice(), Vec::as_slice);
+                (content_object, decoded)
+            })
+            .collect();
+        if stage_failed || !sequence.validate_edited(&decoded_by_object, MAX_CONTENT_STREAM_BYTES) {
+            skipped.push(whole_page_skip(
+                page_index,
+                PipelineSkipReason::ContentRoundTripMismatch,
+            ));
+            continue;
+        }
+        drop(decoded_by_object);
+        let mut staged_dirty = Vec::new();
+        for plan in &page_edit.plans {
+            if plan.splices.is_empty() {
+                continue;
+            }
+            let object = &prepared[object_indexes[&plan.content_object]];
+            let Some(decoded) = edited_by_object.remove(&plan.content_object) else {
+                stage_failed = true;
+                break;
+            };
+            let encoded = match object.filter {
+                PipelineFilterKind::Raw => decoded,
+                PipelineFilterKind::Flate => {
+                    let Ok(encoded) = encode_flate_stream(&decoded, MAX_CONTENT_STREAM_BYTES)
+                    else {
+                        stage_failed = true;
+                        break;
+                    };
+                    encoded
+                }
+            };
+            let body = build_stream_object_body(
+                input,
+                object.dictionary_open,
+                object.dictionary_end,
+                object.length_value_range,
+                &encoded,
+            );
+            staged_dirty.push(PlannedDirtyObject {
+                reference: plan.content_object,
+                boundaries: vec![whole_stream_boundary(
+                    plan.content_object,
+                    object.located.extent,
+                    &object.decision,
+                )],
+                body_bytes: body,
+            });
+        }
+        if stage_failed {
+            skipped.push(whole_page_skip(
+                page_index,
+                PipelineSkipReason::ContentRoundTripMismatch,
+            ));
+            continue;
+        }
+        for object in &prepared {
+            if object.decision.disposition != IndirectObjectEditDisposition::InPlaceMutation {
+                skipped.push(PipelinePageSkip {
+                    page_index,
+                    stream_ordinal: object.located.stream_ordinal,
+                    content_object: Some(object.located.content_object),
+                    reason: PipelineSkipReason::OwnershipNotInPlace {
+                        occurrences: object.occurrences,
+                        disposition: object.decision.disposition,
+                    },
+                });
+            }
+        }
+        dirty_objects.extend(staged_dirty);
+        published.push(page_edit.metadata);
+    }
+    merge_duplicate_dirty_objects(&mut dirty_objects);
+    let bytes = write_dirty_objects(input, dirty_objects)?;
+    Ok(PageSequenceOutput {
+        bytes,
+        pages: published,
+        skipped,
+    })
+}
+
+fn prepare_sequence_object<'a>(
+    input: &[u8],
+    located: &'a LocatedContentStream<'a>,
+    ownership: &ContentObjectOwnershipIndex,
+) -> Result<PreparedSequenceObject<'a>, PipelineSkipReason> {
+    let dictionary = inspect_indirect_object_dictionary(input, located.object_byte_offset)
+        .map_err(|_| PipelineSkipReason::NoContentStream)?;
+    let length_value_range = find_direct_length(input, &dictionary.entries)?;
+    let filter = classify_filter(input, located.object_byte_offset)?;
+    let stream_data = content_stream_data_slice(input, located.extent)
+        .map_err(|_| PipelineSkipReason::NoContentStream)?;
+    let decoded = match filter {
+        PipelineFilterKind::Raw => stream_data.to_vec(),
+        PipelineFilterKind::Flate => decode_flate_stream(
+            stream_data,
+            FlateDecodeParameters::default(),
+            MAX_CONTENT_STREAM_BYTES,
+        )
+        .map_err(|_| PipelineSkipReason::ContentRoundTripMismatch)?,
+    };
+    let (occurrences, decision) = ownership.decide(located.content_object);
+    Ok(PreparedSequenceObject {
+        located,
+        decoded,
+        filter,
+        length_value_range,
+        dictionary_open: dictionary.dictionary_open_byte_offset,
+        dictionary_end: dictionary.after_dictionary_close_byte_offset,
+        occurrences,
+        decision,
+    })
 }
 
 fn edit_page_content_incremental_indexed_inner(
     input: &[u8],
     pages: &PageSelection,
     mode: StreamMode,
-    preflight: Option<&PagePreflightCallback<'_>>,
     edit: &StreamEditCallback<'_>,
 ) -> Result<EditPageContentOutput, EditPageContentError> {
     let access = inspect_document_access(input).map_err(|error| EditPageContentError::Open {
@@ -350,19 +592,6 @@ fn edit_page_content_incremental_indexed_inner(
     // input/access snapshot used by all subsequent ownership decisions.
     let consumer_inspection = inspect_object_consumer_index(input, &access);
     let ownership = ContentObjectOwnershipIndex::new(&document.pages, consumer_inspection);
-    let extgstate_document = inspect_extgstate_document_for_preflight(
-        input,
-        lookup,
-        access.page_tree_root.object_byte_offset,
-        preflight.is_some(),
-    );
-    let group_document = inspect_transparency_group_document_for_preflight(
-        input,
-        lookup,
-        access.page_tree_root.object_byte_offset,
-        preflight.is_some(),
-    );
-
     let mut edited = Vec::new();
     let mut skipped = Vec::new();
     let mut dirty_objects: Vec<PlannedDirtyObject> = Vec::new();
@@ -380,20 +609,6 @@ fn edit_page_content_incremental_indexed_inner(
                 reason,
             }),
             PageStreamsPlan::Streams(outcomes) => {
-                if let Some(preflight) = &preflight {
-                    if let Some(skip) = preflight_skip_for_page(
-                        input,
-                        index,
-                        page,
-                        &outcomes,
-                        *preflight,
-                        &extgstate_document,
-                        &group_document,
-                    ) {
-                        skipped.push(skip);
-                        continue;
-                    }
-                }
                 for outcome in outcomes {
                     match outcome {
                         StreamOutcome::Skip {
@@ -465,14 +680,6 @@ type TransparencyGroupDocumentPreflight = Option<
     Result<DocumentPageTransparencyGroupsInspection, DocumentPageTransparencyGroupsInspectionError>,
 >;
 
-type PagePreflightCallback<'a> = dyn Fn(
-        PageIndex,
-        Option<&PageExtGStateResourcesInspection>,
-        Option<&PageTransparencyGroupInspection>,
-        &[Vec<u8>],
-    ) -> PagePreflight
-    + 'a;
-
 fn inspect_extgstate_document_for_preflight(
     input: &[u8],
     lookup: ObjectLookup<'_>,
@@ -541,67 +748,6 @@ const fn whole_page_skip(page_index: PageIndex, reason: PipelineSkipReason) -> P
         stream_ordinal: 0,
         content_object: None,
         reason,
-    }
-}
-
-fn preflight_skip_for_page(
-    input: &[u8],
-    index: usize,
-    page: &DocumentPageContentExtentInspection,
-    outcomes: &[StreamOutcome<'_>],
-    preflight: &PagePreflightCallback<'_>,
-    extgstate_document: &ExtGStateDocumentPreflight,
-    group_document: &TransparencyGroupDocumentPreflight,
-) -> Option<PipelinePageSkip> {
-    let page_index = page_index_of(page);
-    let extgstate_page = match extgstate_page_for_preflight(extgstate_document, index) {
-        Ok(page) => page,
-        Err(reason) => return Some(whole_page_skip(page_index, reason)),
-    };
-    let group_page = match transparency_group_page_for_preflight(group_document, index) {
-        Ok(page) => page,
-        Err(reason) => return Some(whole_page_skip(page_index, reason)),
-    };
-    run_page_preflight(
-        input,
-        page_index,
-        extgstate_page,
-        group_page,
-        outcomes,
-        preflight,
-    )
-}
-
-fn run_page_preflight(
-    input: &[u8],
-    page_index: PageIndex,
-    extgstate_page: Option<&PageExtGStateResourcesInspection>,
-    group_page: Option<&PageTransparencyGroupInspection>,
-    outcomes: &[StreamOutcome<'_>],
-    preflight: &PagePreflightCallback<'_>,
-) -> Option<PipelinePageSkip> {
-    // PAGE-LEVEL PREFLIGHT: decode this page's located (editable) streams ONCE
-    // and let the hook poison the whole page before any dirty object is emitted.
-    // Undecodable/skipped slots are excluded from the scan (they are never
-    // edited); per-stream skips are still reported by the edit loop on Continue.
-    let decoded_streams: Vec<Vec<u8>> = outcomes
-        .iter()
-        .filter_map(|outcome| match outcome {
-            StreamOutcome::Located(located) => decode_located_stream_for_preflight(input, located),
-            StreamOutcome::Skip { .. } => None,
-        })
-        .collect();
-    if let PagePreflight::SkipPage(reason) =
-        preflight(page_index, extgstate_page, group_page, &decoded_streams)
-    {
-        Some(PipelinePageSkip {
-            page_index,
-            stream_ordinal: 0,
-            content_object: None,
-            reason,
-        })
-    } else {
-        None
     }
 }
 
@@ -795,28 +941,7 @@ fn classify_filter(
     }
 }
 
-/// Best-effort decode of one located content stream for the page-level preflight
-/// scan. Returns the decoded bytes, or `None` when the stream's filter is
-/// unsupported, its data slice is unavailable, or `FlateDecode` fails — such a
-/// stream is never converted by the per-stream edit loop either, so excluding it
-/// keeps the preflight scan aligned with what the loop would actually edit.
-fn decode_located_stream_for_preflight(
-    input: &[u8],
-    located: &LocatedContentStream<'_>,
-) -> Option<Vec<u8>> {
-    let filter = classify_filter(input, located.object_byte_offset).ok()?;
-    let stream_data = content_stream_data_slice(input, located.extent).ok()?;
-    match filter {
-        PipelineFilterKind::Raw => Some(stream_data.to_vec()),
-        PipelineFilterKind::Flate => decode_flate_stream(
-            stream_data,
-            FlateDecodeParameters::default(),
-            MAX_CONTENT_STREAM_BYTES,
-        )
-        .ok(),
-    }
-}
-
+/// Encoded replacement bytes and the number of edits applied to one stream.
 struct EditedStreamData {
     encoded: Vec<u8>,
     edit_count: usize,
@@ -842,14 +967,6 @@ fn edit_stream_data(
         StreamEditCallback::Raw(edit) => {
             require_round_trip(&decoded)?;
             edit(page_index, &decoded)
-        }
-        StreamEditCallback::Parsed(edit) => {
-            // Parse ONCE: tokenize + byte-identical serialization check +
-            // operator assembly. This subsumes `require_round_trip` for the
-            // parsed path and replaces the callback's own tokenize/assemble.
-            let parsed = ParsedContent::parse(&decoded)
-                .ok_or(PipelineSkipReason::ContentRoundTripMismatch)?;
-            edit(page_index, &parsed)
         }
     };
     let (edited, edit_count) = match outcome {

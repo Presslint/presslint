@@ -259,6 +259,27 @@ fn unsafe_gs_in_second_stream_skips_whole_page() {
 }
 
 #[test]
+fn gs_operand_and_operator_split_across_streams_are_guarded_globally() {
+    let input = classic_two_stream_extgstate_pdf(
+        "<< /ExtGState << /GS1 << /OP true >> >> >>",
+        b"/GS1 ",
+        b"gs\n0 0 0 1 k\n",
+    );
+    let output = convert_cmyk(&input);
+
+    assert_extgstate_skip(
+        &output,
+        ConvertPageSkipReason::ExtGStateUnsafe {
+            overprint: true,
+            transparency: false,
+            unresolved: false,
+            unclassified: false,
+            gs_count: 1,
+        },
+    );
+}
+
+#[test]
 fn page_without_declared_resources_and_no_gs_still_converts() {
     let input = classic_raw_pdf(b"0 0 0 1 k\n");
     let output = convert_cmyk(&input);

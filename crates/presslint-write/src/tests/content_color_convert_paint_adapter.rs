@@ -1,36 +1,38 @@
-//! Paint-driven candidate discovery: parse-once seam, exact shortcut-byte
+//! Paint-driven candidate discovery: page-sequence seam, exact shortcut-byte
 //! eligibility, record-range splices, and resource-operator exclusion.
 //!
 //! The converter discovers candidates exclusively through the shared paint
 //! interpreter and splices at each event's record range. These tests pin the
-//! `ParsedContent` seam invariants (byte-identical token serialization, single
+//! page-sequence invariants (exact token coverage, single
 //! assembly, refusal shapes) and that ONLY the six exact direct device shortcut
 //! operators (`g`/`G`, `rg`/`RG`, `k`/`K`) are eligible — resource colour
 //! operators, lookalike operator bytes, and payload text resembling a shortcut
 //! all stay byte-verbatim.
 
-use presslint_syntax::serialize_tokens_unmodified;
+use presslint_paint::{ColorSpaceEnv, PaintProgram};
+use presslint_pdf::{IndirectObjectEditDisposition, IndirectRef};
 
 use crate::OperatorSkipCounts;
-use crate::parsed_content::ParsedContent;
+use crate::page_content_sequence::{OccurrenceInput, PageContentSequence};
 
 use super::content_color_convert::{
     GRAY_TO_GRAY_LINK, RGB_TO_CMYK_LINK, classic_raw_pdf, contains, convert, occurrence_count,
     operands_of, page_decoded_stream,
 };
 
-// --- ParsedContent: the parse-once seam ------------------------------------
+// --- PageContentSequence: the parse-once seam -------------------------------
 
 #[test]
-fn parsed_content_round_trips_tokens_and_assembles_records_once() {
+fn page_content_sequence_parses_and_assembles_globally() {
     let decoded = b"q % note\n1 0 0 rg\nQ\n";
-    let parsed = ParsedContent::parse(decoded).expect("valid stream parses");
+    let parsed = sequence(&[decoded]).expect("valid stream parses");
 
     assert_eq!(parsed.bytes(), decoded);
     // The owned tokens re-serialize byte-identically (comments included).
-    let serialized =
-        serialize_tokens_unmodified(decoded, parsed.tokens()).expect("tokens serialize");
-    assert_eq!(serialized, decoded);
+    assert_eq!(
+        parsed.tokens().last().map(|token| token.range.end),
+        Some(decoded.len())
+    );
     // Exactly one assembly: q, rg, Q — with exact record ranges.
     let records = parsed.records();
     assert_eq!(records.len(), 3);
@@ -43,32 +45,66 @@ fn parsed_content_round_trips_tokens_and_assembles_records_once() {
 }
 
 #[test]
-fn parsed_content_accepts_unusual_whitespace() {
+fn page_sequence_accepts_unusual_whitespace() {
     let decoded = b"1\t0\r0 rg";
-    let parsed = ParsedContent::parse(decoded).expect("unusual whitespace parses");
+    let parsed = sequence(&[decoded]).expect("unusual whitespace parses");
     assert_eq!(parsed.records().len(), 1);
     let record = &parsed.records()[0];
     assert_eq!(&decoded[record.range.start..record.range.end], decoded);
 }
 
 #[test]
-fn parsed_content_accepts_the_empty_stream() {
-    let parsed = ParsedContent::parse(b"").expect("empty stream parses");
+fn page_sequence_accepts_the_empty_stream() {
+    let parsed = sequence(&[b""]).expect("empty stream parses");
     assert!(parsed.bytes().is_empty());
     assert!(parsed.tokens().is_empty());
     assert!(parsed.records().is_empty());
 }
 
 #[test]
-fn parsed_content_refuses_a_malformed_token() {
+fn page_sequence_refuses_a_malformed_token() {
     // Unterminated literal string: tokenization fails.
-    assert!(ParsedContent::parse(b"(never closed").is_none());
+    assert!(sequence(&[b"(never closed"]).is_none());
 }
 
 #[test]
-fn parsed_content_refuses_a_failed_assembly() {
+fn page_sequence_refuses_a_failed_assembly() {
     // Trailing operands with no operator: assembly fails.
-    assert!(ParsedContent::parse(b"1 0 0\n").is_none());
+    assert!(sequence(&[b"1 0 0\n"]).is_none());
+}
+
+#[test]
+fn carried_color_source_localizes_to_its_originating_occurrence() {
+    let parsed = sequence(&[&b"1 0 0 rg\n"[..], &b"0 0 m\n"[..]]).expect("page sequence");
+    let ops: Vec<_> = PaintProgram::new(parsed.bytes(), parsed.records(), ColorSpaceEnv::empty())
+        .ops()
+        .collect::<Result<_, _>>()
+        .expect("walk succeeds");
+    let source = ops[1]
+        .state
+        .nonstroking_color
+        .source
+        .expect("carried color source");
+    let localized = parsed.localize(source).expect("source remains physical");
+    assert_eq!(localized.stream_ordinal, 0);
+    assert_eq!(localized.content_object.object_number, 1);
+}
+
+fn sequence(parts: &[&[u8]]) -> Option<PageContentSequence> {
+    let inputs: Vec<_> = parts
+        .iter()
+        .enumerate()
+        .map(|(ordinal, decoded)| OccurrenceInput {
+            stream_ordinal: ordinal,
+            content_object: IndirectRef {
+                object_number: u32::try_from(ordinal + 1).expect("small test ordinal"),
+                generation: 0,
+            },
+            decoded,
+            disposition: IndirectObjectEditDisposition::InPlaceMutation,
+        })
+        .collect();
+    PageContentSequence::new(&inputs, 1024 * 1024)
 }
 
 // --- Exact shortcut-byte eligibility ----------------------------------------

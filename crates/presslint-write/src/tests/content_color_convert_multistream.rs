@@ -1,27 +1,18 @@
-//! Multi-content-stream DeviceLink conversion (T136).
+//! Multi-content-stream DeviceLink conversion.
 //!
-//! Since T136 a page whose `/Contents` names more than one content-stream object
-//! is converted by editing each stream OBJECT independently and emitting N dirty
-//! objects in one incremental revision, instead of being skipped whole as
-//! `MultipleContentStreams`. These SYNTHETIC cases cover: both streams of a page
-//! converting; one stream editing while its sibling is analysed-but-unchanged; a
-//! shared stream object ownership-skipped while its private sibling converts; the
-//! same stream object referenced twice merging into ONE dirty object (no
-//! `DuplicateDirtyObject`); and the classic + xref-stream backends. Every case
-//! asserts `output.bytes[..input.len()] == input` and that the output reopens.
-//!
-//! KNOWN LIMITATION (pinned below): each physical stream is still walked
-//! independently, so graphics state does NOT propagate across a page's
-//! `/Contents` sequence. Explicit device shortcuts stay independently
-//! convertible, but a `q` in one stream with its `Q` in the next underflows the
-//! second stream's fresh interpreter and conservatively refuses THAT stream. A
-//! logical concatenated page-stream walk is a follow-up slice.
+//! A page's ordered `/Contents` occurrences are interpreted as one exact decoded
+//! sequence while approved replacements remain local to one physical stream.
+//! These synthetic cases cover global graphics state and operands, atomic
+//! refusal, raw and Flate elements, ownership-vetoed participation, repeated
+//! object reconciliation, and both classic and xref-stream backends.
 
 // "DeviceLink" is the ICC domain term used as prose here, matching the module
 // under test.
 #![allow(clippy::doc_markdown)]
 
-use presslint_pdf::DocumentAccessBackend;
+use presslint_pdf::{
+    DocumentAccessBackend, FlateDecodeParameters, decode_flate_stream, encode_flate_stream,
+};
 use presslint_types::PageIndex;
 
 use crate::{
@@ -36,6 +27,7 @@ use super::content_color_convert::{
 use super::{reopen, xref_record};
 
 const CATALOG: &[u8] = b"<< /Type /Catalog /Pages 2 0 R >>";
+const FLATE_LIMIT: usize = 1 << 20;
 
 /// Convert every page of `input` through one RGB->CMYK link, no black overlay.
 fn convert_all(input: &[u8]) -> crate::ConvertContentColorsOutput {
@@ -167,6 +159,37 @@ fn one_stream_edits_while_its_sibling_is_analysed_but_unchanged() {
 }
 
 #[test]
+fn mixed_raw_and_flate_occurrences_convert_and_reopen() {
+    let compressed = encode_flate_stream(b"0 0 1 RG\n", FLATE_LIMIT).expect("encode");
+    let input = assemble_classic(&[
+        CATALOG.to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        page_body("[4 0 R 5 0 R]"),
+        stream_body("", b"1 0 0 rg\n"),
+        stream_body(" /Filter /FlateDecode", &compressed),
+    ]);
+    let output = convert_all(&input);
+
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    assert!(output.skipped.is_empty());
+    assert_eq!(output.converted.len(), 1);
+    assert_eq!(output.converted[0].operators_converted, 2);
+    assert_eq!(content_object_numbers(&output.converted[0]), vec![4, 5]);
+
+    let raw = page_encoded_stream_at(&output.bytes, 0, 0);
+    let flate = page_encoded_stream_at(&output.bytes, 0, 1);
+    let decoded_flate = decode_flate_stream(&flate, FlateDecodeParameters::default(), FLATE_LIMIT)
+        .expect("decode rewritten Flate stream");
+    assert!(!contains(&raw, b"rg"));
+    assert!(contains(&raw, b"k"));
+    assert!(!contains(&decoded_flate, b"RG"));
+    assert!(contains(&decoded_flate, b"K"));
+    assert_eq!(occurrence_count(&output.bytes, b"4 0 obj"), 2);
+    assert_eq!(occurrence_count(&output.bytes, b"5 0 obj"), 2);
+    assert_eq!(reopen(&output.bytes).page_leaves.leaves.len(), 1);
+}
+
+#[test]
 fn shared_stream_object_is_ownership_skipped_while_private_sibling_converts() {
     // Page A (obj 3) names [4 0 R 5 0 R]; page B (obj 6) names 5 0 R, so object 5
     // is shared (two owners) and object 4 is private to page A.
@@ -236,34 +259,102 @@ fn same_stream_object_referenced_twice_merges_to_one_dirty_object() {
 }
 
 #[test]
-fn cross_stream_save_restore_conservatively_refuses_the_second_stream() {
-    // The page's graphics state legally spans its /Contents sequence
-    // (ISO 32000-1 §7.8.2), but each physical stream is walked independently:
-    // the `q` stream converts (an unclosed save is not an error), while the
-    // sibling opening with `Q` underflows its fresh interpreter and is refused
-    // whole. Pinned as the documented conservative limitation of this slice.
+fn cross_stream_save_restore_walks_as_one_logical_sequence() {
     let input = classic_two_stream_pdf(b"q 1 0 0 rg\n", b"Q 0 0 1 rg\n");
     let output = convert_all(&input);
 
     assert_eq!(&output.bytes[..input.len()], input.as_slice());
     assert_eq!(output.converted.len(), 1);
     let page = &output.converted[0];
-    assert_eq!(page.operators_converted, 1);
-    assert_eq!(content_object_numbers(page), vec![4]);
-
-    assert_eq!(output.skipped.len(), 1);
-    let skip = &output.skipped[0];
-    assert_eq!(skip.content_object.map(|r| r.object_number), Some(5));
-    assert_eq!(skip.reason, ConvertPageSkipReason::ContentRoundTripMismatch);
-
-    // Stream 4 was rewritten; the refused stream 5 keeps its original bytes.
+    assert_eq!(page.operators_converted, 2);
+    assert_eq!(content_object_numbers(page), vec![4, 5]);
+    assert!(output.skipped.is_empty());
     assert!(!contains(
         &page_encoded_stream_at(&output.bytes, 0, 0),
         b"rg"
     ));
-    assert_eq!(page_encoded_stream_at(&output.bytes, 0, 1), b"Q 0 0 1 rg\n");
+    assert!(!contains(
+        &page_encoded_stream_at(&output.bytes, 0, 1),
+        b"rg"
+    ));
     assert_eq!(occurrence_count(&output.bytes, b"4 0 obj"), 2);
+    assert_eq!(occurrence_count(&output.bytes, b"5 0 obj"), 2);
+}
+
+#[test]
+fn composite_operand_and_operator_may_span_occurrences() {
+    let input = classic_two_stream_pdf(b"[1 2", b"] 0 d\n1 0 0 rg\n");
+    let output = convert_all(&input);
+
+    assert!(output.skipped.is_empty());
+    assert_eq!(output.converted[0].operators_converted, 1);
+    assert_eq!(content_object_numbers(&output.converted[0]), vec![4, 5]);
+    assert_eq!(page_encoded_stream_at(&output.bytes, 0, 0), b"[1 2");
+    assert!(!contains(
+        &page_encoded_stream_at(&output.bytes, 0, 1),
+        b"rg"
+    ));
+}
+
+#[test]
+fn selected_cross_occurrence_replacement_refuses_the_page_atomically() {
+    let input = classic_two_stream_pdf(b"1 0 ", b"0 rg\n");
+    let output = convert_all(&input);
+
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    assert!(output.converted.is_empty());
+    assert_eq!(output.skipped.len(), 1);
+    assert_eq!(
+        output.skipped[0].reason,
+        ConvertPageSkipReason::ContentRoundTripMismatch
+    );
+    assert_eq!(occurrence_count(&output.bytes, b"4 0 obj"), 1);
     assert_eq!(occurrence_count(&output.bytes, b"5 0 obj"), 1);
+}
+
+#[test]
+fn later_unwalkable_occurrence_rolls_back_an_early_candidate() {
+    let input = classic_two_stream_pdf(b"1 0 0 rg\n", b"Q\n");
+    let output = convert_all(&input);
+
+    assert!(output.converted.is_empty());
+    assert_eq!(output.skipped.len(), 1);
+    assert_eq!(
+        output.skipped[0].reason,
+        ConvertPageSkipReason::ContentRoundTripMismatch
+    );
+    assert_eq!(occurrence_count(&output.bytes, b"4 0 obj"), 1);
+    assert_eq!(occurrence_count(&output.bytes, b"5 0 obj"), 1);
+}
+
+#[test]
+fn ownership_vetoed_occurrence_still_carries_graphics_state() {
+    let input = assemble_classic(&[
+        CATALOG.to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>".to_vec(),
+        page_body("[5 0 R 4 0 R]"),
+        stream_body("", b"Q\n1 0 0 rg\n"),
+        stream_body("", b"q\n"),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R >>".to_vec(),
+    ]);
+    let output = convert_content_colors_incremental(
+        &input,
+        &ConvertContentColorsRequest {
+            pages: PageSelection::Indices(vec![PageIndex(0)]),
+            device_links: one_link(RGB_TO_CMYK_LINK),
+            black_preservation: BlackPreservationPolicy::None,
+            target: None,
+        },
+    )
+    .expect("convert succeeds");
+
+    assert_eq!(output.converted[0].operators_converted, 1);
+    assert_eq!(content_object_numbers(&output.converted[0]), vec![4]);
+    assert_eq!(output.skipped.len(), 1);
+    assert!(matches!(
+        output.skipped[0].reason,
+        ConvertPageSkipReason::OwnershipNotInPlace { .. }
+    ));
 }
 
 #[test]

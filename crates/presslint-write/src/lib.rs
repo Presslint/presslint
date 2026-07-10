@@ -60,7 +60,7 @@ mod extgstate_page_guard;
 mod link_routing;
 mod page_box_serialize;
 mod page_boxes;
-mod parsed_content;
+mod page_content_sequence;
 mod pdf_number_serialize;
 mod planned;
 mod reencode_content;

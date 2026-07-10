@@ -27,7 +27,7 @@ fn assert_stream_refused(stream: &[u8]) {
     assert_eq!(output.skipped.len(), 1);
     let skip = &output.skipped[0];
     assert_eq!(skip.reason, ConvertPageSkipReason::ContentRoundTripMismatch);
-    assert_eq!(skip.content_object.map(|r| r.object_number), Some(4));
+    assert_eq!(skip.content_object, None);
     // No revision object was appended for the content stream: the original
     // "4 0 obj" is the only copy, so the stream bytes are untouched.
     assert_eq!(occurrence_count(&output.bytes, b"4 0 obj"), 1);

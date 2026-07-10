@@ -17,6 +17,7 @@ mod extgstate_page_guard;
 mod link_routing;
 mod page_boxes;
 mod page_boxes_xref_stream;
+mod page_content_sequence;
 mod planned;
 mod reencode_content;
 mod reject;

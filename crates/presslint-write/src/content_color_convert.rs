@@ -19,23 +19,21 @@
 //! colour-space lookups are out of scope (no resource-space conversion here) and
 //! are left byte-verbatim.
 //!
-//! Candidate discovery is PAINT-DRIVEN: each physical content stream is parsed
-//! once by the shared pipeline seam and walked once through
-//! [`presslint_paint::PaintProgram`]. An emitted colour event is eligible only
+//! Candidate discovery is PAINT-DRIVEN: each page's exact decoded `/Contents`
+//! sequence is parsed and walked once through [`presslint_paint::PaintProgram`].
+//! An emitted colour event is eligible only
 //! when the EXACT bytes at its operator range are one of the six direct device
 //! shortcuts; the event's already-parsed colour components and its record range
-//! drive the splice. This converter is FAIL-CLOSED per stream: any graphics-walk
+//! drive the splice. This converter is FAIL-CLOSED per page: any graphics-walk
 //! error (stack underflow, malformed operands of ANY supported operator)
-//! refuses the entire physical stream through the existing round-trip mismatch
-//! skip — no partial conversion of a stream the shared interpreter cannot walk.
+//! refuses the entire page through the existing round-trip mismatch skip.
 
 // "DeviceLink" is the ICC profile-class domain term used throughout these docs
 // as prose, not always as a code identifier; mirror the `presslint-color-lcms`
 // crate and do not force backticks on it.
 #![allow(clippy::doc_markdown)]
 
-use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use presslint_color_lcms::{ColorEngine, DeviceLinkSpace, LcmsColorEngine, LcmsError};
 use presslint_paint::{ColorSpaceEnv, PaintOpKind, PaintProgram};
@@ -43,20 +41,19 @@ use presslint_pdf::{
     DictionaryValueKind, DocumentAccessError, IndirectObjectEditDisposition, IndirectRef,
 };
 use presslint_selectors::Selector;
-use presslint_types::{ByteRange, ColorUsage, PageIndex};
+use presslint_types::{ColorUsage, PageIndex};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     PlannedWriteError, WriteError,
     black_preservation::{BlackPreservationPolicy, black_preservation_replacement},
     content_edit_pipeline::{
-        EditPageContentError, EditedContent, PagePreflight, PageSelection, PipelinePageSkip,
-        PipelineSkipReason, edit_page_content_incremental_parsed_with_preflight,
+        EditPageContentError, PageSelection, PageSequenceEdit, PipelinePageSkip,
+        PipelineSkipReason, edit_page_content_incremental_sequence,
     },
-    content_stream_plan::StreamMode,
     extgstate_page_guard::{extgstate_page_skip_reason, transparency_group_page_skip_reason},
     link_routing::{DeviceLinkInput, LinkConversionCounts, LinkRouting, build_link_routing},
-    parsed_content::ParsedContent,
+    page_content_sequence::{LocalSplice, PageContentSequence},
     pdf_number_serialize::serialize_color_component,
     selector_match::{
         UnsupportedTargetLeaf, collect_unsupported_leaves, selector_matches_operator,
@@ -104,12 +101,12 @@ pub struct OperatorSkipCounts {
     ///
     /// Retained for report-shape compatibility: since candidate discovery moved
     /// to the shared paint walk, a malformed direct device operator refuses its
-    /// WHOLE content stream (reported as a stream skip), so this stays `0`.
+    /// WHOLE page content sequence (reported as a page skip), so this stays `0`.
     pub wrong_operand_count: usize,
     /// Direct device operators with a non-number / multi-token operand.
     ///
     /// Retained for report-shape compatibility: like `wrong_operand_count`,
-    /// the paint walk now refuses the whole stream instead, so this stays `0`.
+    /// the paint walk now refuses the whole page instead, so this stays `0`.
     pub non_number_operand: usize,
     /// Direct device operators with an operand outside `[0.0, 1.0]`.
     pub operand_out_of_range: usize,
@@ -186,7 +183,8 @@ pub enum ConvertPageSkipReason {
     /// Decoded content did not re-serialize byte-identically, could not be
     /// decoded/re-encoded, could not be assembled into operator records, or
     /// could not be walked whole by the shared graphics interpreter (any
-    /// graphics-walk error refuses the entire physical stream, fail-closed).
+    /// graphics-walk error refuses the entire page content sequence,
+    /// fail-closed).
     ContentRoundTripMismatch,
     /// Content-stream ownership was not a single-use in-place mutation.
     OwnershipNotInPlace {
@@ -404,56 +402,35 @@ pub fn convert_content_colors_incremental(
         }
     }
 
-    let tallies: RefCell<Vec<PageTally>> = RefCell::new(Vec::new());
     let target = request.target.as_ref();
 
-    let output = edit_page_content_incremental_parsed_with_preflight(
+    let output = edit_page_content_incremental_sequence(
         input,
         &request.pages,
-        StreamMode::MultiStream,
         // Page streams share graphics state, so any unsafe `gs` activation
         // poisons the whole page. Harmless declared or unused resources do not
         // block conversion.
-        |_page, extgstate_page, group_page, decoded_streams| {
+        |_page, extgstate_page, group_page, sequence| {
             transparency_group_page_skip_reason(group_page)
-                .or_else(|| extgstate_page_skip_reason(extgstate_page, decoded_streams))
-                .map_or(PagePreflight::Continue, PagePreflight::SkipPage)
+                .or_else(|| extgstate_page_skip_reason(extgstate_page, sequence))
         },
-        |page_index, parsed| {
-            match convert_parsed(
+        |page_index, sequence| {
+            convert_sequence(
                 page_index,
-                parsed,
+                sequence,
                 &routing,
                 request.black_preservation,
                 target,
-            ) {
-                Some((edited, tally)) => {
-                    let edit_count = tally.converted + tally.black_preserved;
-                    let has_splices = !edited.is_empty();
-                    tallies.borrow_mut().push(tally);
-                    if has_splices {
-                        EditedContent::Rewritten {
-                            decoded: edited,
-                            edit_count,
-                        }
-                    } else {
-                        // Analysed but no real byte splice: no revision object, but
-                        // the tally is still recorded above for honest reporting.
-                        EditedContent::Unchanged
-                    }
-                }
-                None => EditedContent::Rejected(PipelineSkipReason::ContentRoundTripMismatch),
-            }
+            )
         },
     )
     .map_err(map_error)?;
 
-    let converted = attach_tallies(
-        &output.edited,
-        &output.skipped,
-        tallies.into_inner(),
-        &routing,
-    );
+    let converted = output
+        .pages
+        .into_iter()
+        .filter(|page| !page.content_objects.is_empty())
+        .collect();
     let skipped = output
         .skipped
         .into_iter()
@@ -468,8 +445,8 @@ pub fn convert_content_colors_incremental(
     })
 }
 
-/// Convert one parsed content stream, routing each eligible operator to its
-/// source link.
+/// Convert one parsed logical page-content sequence, routing each eligible
+/// operator to its source link.
 ///
 /// Candidate discovery is paint-driven: one fresh [`PaintProgram`] walk over
 /// the already-assembled records yields the colour events, and an event is
@@ -488,27 +465,30 @@ pub fn convert_content_colors_incremental(
 /// skip. Candidate splice metadata stays bounded to eligible operators; the
 /// walk is not materialized.
 ///
-/// Returns `Some((edited, tally))` when the whole stream walked. `edited` is
-/// empty when no real byte splice is needed; `tally` still records conversions,
-/// black-preserved operators, and skips.
-fn convert_parsed(
+/// Returns a page-scoped edit plan and tally metadata when the whole sequence
+/// walks successfully. Occurrence plans without splices still participate in
+/// repeated-object reconciliation; metadata is published only after the caller
+/// stages and validates the complete page transaction.
+#[allow(clippy::too_many_lines)]
+fn convert_sequence(
     page_index: PageIndex,
-    parsed: &ParsedContent<'_>,
+    sequence: &PageContentSequence,
     routing: &LinkRouting,
     black_preservation: BlackPreservationPolicy,
     target: Option<&Selector>,
-) -> Option<(Vec<u8>, PageTally)> {
-    let decoded = parsed.bytes();
-    let program = PaintProgram::new(decoded, parsed.records(), ColorSpaceEnv::empty());
-
-    let mut tally = PageTally {
-        link_converted: vec![0; routing.links().len()],
-        ..PageTally::default()
-    };
-    let mut splices: Vec<(ByteRange, Vec<u8>)> = Vec::new();
+) -> Option<PageSequenceEdit<ConvertedPage>> {
+    let decoded = sequence.bytes();
+    let program = PaintProgram::new(decoded, sequence.records(), ColorSpaceEnv::empty());
+    let mut tallies: Vec<PageTally> = (0..sequence.occurrence_count())
+        .map(|_| PageTally {
+            link_converted: vec![0; routing.links().len()],
+            ..PageTally::default()
+        })
+        .collect();
+    let mut occurrence_plans = vec![Vec::new(); sequence.occurrence_count()];
 
     for op in program.ops() {
-        // A walk error refuses the ENTIRE stream: all candidates are discarded.
+        // A walk error refuses the ENTIRE page: all candidates are discarded.
         let op = op.ok()?;
         let (PaintOpKind::SetStrokingColor { color } | PaintOpKind::SetNonstrokingColor { color }) =
             &op.kind
@@ -521,8 +501,13 @@ fn convert_parsed(
         let Some((space, stroking)) = classify_operator(operator) else {
             continue;
         };
+        let operator_location = sequence.localize(op.operator_range)?;
+        if operator_location.disposition != IndirectObjectEditDisposition::InPlaceMutation {
+            continue;
+        }
+        let tally = &mut tallies[operator_location.occurrence_index];
         // The walker already guarantees the shortcut's operand count and finite
-        // numbers (anything else refused the stream above); the `[0,1]` range
+        // numbers (anything else refused the page above); the `[0,1]` range
         // gate stays converter-local and per-operator, exactly as before.
         let operands = color.components.as_slice();
         if !operands.iter().all(|value| (0.0..=1.0).contains(value)) {
@@ -550,6 +535,7 @@ fn convert_parsed(
             continue;
         };
         let range = op.record_range.into_byte_range();
+        let location = sequence.localize(op.record_range)?;
         if let Some(replacement) = black_preservation_replacement(
             operands,
             space,
@@ -559,7 +545,10 @@ fn convert_parsed(
         ) {
             tally.black_preserved += 1;
             if decoded.get(range.start..range.end) != Some(replacement.as_slice()) {
-                splices.push((range, replacement));
+                occurrence_plans[location.occurrence_index].push(LocalSplice {
+                    range: location.local_range,
+                    replacement,
+                });
             }
             continue;
         }
@@ -568,26 +557,48 @@ fn convert_parsed(
             // (channel count and range are already guaranteed); leave verbatim.
             continue;
         };
-        splices.push((
-            range,
-            replacement_bytes(&components, link.destination, stroking),
-        ));
+        occurrence_plans[location.occurrence_index].push(LocalSplice {
+            range: location.local_range,
+            replacement: replacement_bytes(&components, link.destination, stroking),
+        });
         tally.converted += 1;
         tally.link_converted[link.index] += 1;
     }
 
-    if splices.is_empty() {
-        return Some((Vec::new(), tally));
+    let plans = sequence.reconcile(occurrence_plans)?;
+    let mut content_objects = Vec::new();
+    let mut total = PageTally {
+        link_converted: vec![0; routing.links().len()],
+        ..PageTally::default()
+    };
+    let mut seen = BTreeSet::new();
+    for (index, tally) in tallies.iter().enumerate() {
+        let object = sequence.occurrence_object(index)?;
+        if !seen.insert(object)
+            || sequence.occurrence_disposition(index)?
+                != IndirectObjectEditDisposition::InPlaceMutation
+        {
+            continue;
+        }
+        content_objects.push(object);
+        total.converted += tally.converted;
+        total.black_preserved += tally.black_preserved;
+        add_operator_skips(&mut total.skips, &tally.skips);
+        for (slot, count) in total.link_converted.iter_mut().zip(&tally.link_converted) {
+            *slot += count;
+        }
     }
-
-    // Apply splices DESCENDING by start offset so earlier ranges stay valid
-    // (T126 precedent).
-    splices.sort_by_key(|(range, _)| range.start);
-    let mut edited = decoded.to_vec();
-    for (range, replacement) in splices.iter().rev() {
-        edited.splice(range.start..range.end, replacement.iter().copied());
-    }
-    Some((edited, tally))
+    Some(PageSequenceEdit {
+        plans,
+        metadata: ConvertedPage {
+            page_index,
+            content_objects,
+            operators_converted: total.converted,
+            black_preserved: total.black_preserved,
+            operator_skips: total.skips,
+            links: link_counts(routing, &total.link_converted),
+        },
+    })
 }
 
 /// Build `<serialized components joined by single spaces> <dest operator>`.
@@ -599,97 +610,6 @@ fn replacement_bytes(components: &[f64], destination: DeviceColorSpace, stroking
     }
     bytes.extend_from_slice(destination.operator(stroking));
     bytes
-}
-
-/// One analysed content-stream object of a page, in closure-invocation order.
-struct AnalysedStream {
-    page_index: PageIndex,
-    stream_ordinal: usize,
-    content_object: IndirectRef,
-}
-
-/// Per-page accumulator that aggregates every analysed stream of one page.
-struct PageAccumulator {
-    content_objects: Vec<IndirectRef>,
-    converted: usize,
-    black_preserved: usize,
-    skips: OperatorSkipCounts,
-    link_converted: Vec<usize>,
-}
-
-/// Associate the per-invocation tallies with the analysed content-stream objects
-/// and AGGREGATE them per page.
-///
-/// The edit closure is invoked once per content-stream OBJECT reaching operator
-/// analysis, in `(page index, stream ordinal)` order, pushing exactly one tally
-/// each time. Each analysed stream surfaces either as an edited stream (a splice
-/// happened) or as an `Unchanged` skip (analysed, zero splices). Collecting both
-/// and ordering by `(page index, stream ordinal)` reproduces the closure-
-/// invocation order, so a positional zip is exact; the streams are then folded
-/// into one [`ConvertedPage`] per page (deterministic page order via `BTreeMap`),
-/// with `content_objects` in stream-ordinal order and every count summed.
-fn attach_tallies(
-    edited: &[crate::content_edit_pipeline::PipelineEditedPage],
-    skipped: &[PipelinePageSkip],
-    tallies: Vec<PageTally>,
-    routing: &LinkRouting,
-) -> Vec<ConvertedPage> {
-    let mut analysed: Vec<AnalysedStream> = Vec::new();
-    for page in edited {
-        analysed.push(AnalysedStream {
-            page_index: page.page_index,
-            stream_ordinal: page.stream_ordinal,
-            content_object: page.content_object,
-        });
-    }
-    for skip in skipped {
-        if skip.reason == PipelineSkipReason::Unchanged {
-            if let Some(content_object) = skip.content_object {
-                analysed.push(AnalysedStream {
-                    page_index: skip.page_index,
-                    stream_ordinal: skip.stream_ordinal,
-                    content_object,
-                });
-            }
-        }
-    }
-    analysed.sort_by_key(|stream| (stream.page_index.0, stream.stream_ordinal));
-
-    let mut pages: BTreeMap<u32, PageAccumulator> = BTreeMap::new();
-    for (stream, tally) in analysed.into_iter().zip(tallies) {
-        let accumulator = pages
-            .entry(stream.page_index.0)
-            .or_insert_with(|| PageAccumulator {
-                content_objects: Vec::new(),
-                converted: 0,
-                black_preserved: 0,
-                skips: OperatorSkipCounts::default(),
-                link_converted: vec![0; routing.links().len()],
-            });
-        accumulator.content_objects.push(stream.content_object);
-        accumulator.converted += tally.converted;
-        accumulator.black_preserved += tally.black_preserved;
-        add_operator_skips(&mut accumulator.skips, &tally.skips);
-        for (slot, count) in accumulator
-            .link_converted
-            .iter_mut()
-            .zip(&tally.link_converted)
-        {
-            *slot += count;
-        }
-    }
-
-    pages
-        .into_iter()
-        .map(|(page_index, accumulator)| ConvertedPage {
-            page_index: PageIndex(page_index),
-            content_objects: accumulator.content_objects,
-            operators_converted: accumulator.converted,
-            black_preserved: accumulator.black_preserved,
-            operator_skips: accumulator.skips,
-            links: link_counts(routing, &accumulator.link_converted),
-        })
-        .collect()
 }
 
 /// Add one stream's operator-skip counts into a per-page aggregate.
