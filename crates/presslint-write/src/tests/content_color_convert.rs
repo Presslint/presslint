@@ -521,31 +521,9 @@ fn xref_stream_black_preservation_rewrites_rgb_black_and_reopens() {
     assert_eq!(page_decoded_stream(&output.bytes, false), b"0 0 0 1 k\n");
 }
 
-#[test]
-fn wrong_operand_count_is_skipped_and_counted() {
-    let input = classic_raw_pdf(b"0 0 rg\n");
-    let output = convert(&input, RGB_TO_CMYK_LINK);
-
-    assert_eq!(output.converted[0].operators_converted, 0);
-    assert_eq!(output.converted[0].operator_skips.wrong_operand_count, 1);
-    assert!(contains(
-        &page_decoded_stream(&output.bytes, false),
-        b"0 0 rg"
-    ));
-}
-
-#[test]
-fn non_number_operand_is_skipped_and_counted() {
-    let input = classic_raw_pdf(b"1 0 /X rg\n");
-    let output = convert(&input, RGB_TO_CMYK_LINK);
-
-    assert_eq!(output.converted[0].operators_converted, 0);
-    assert_eq!(output.converted[0].operator_skips.non_number_operand, 1);
-    assert!(contains(
-        &page_decoded_stream(&output.bytes, false),
-        b"1 0 /X rg"
-    ));
-}
+// Malformed direct device operands (wrong count, non-number, non-finite) now
+// refuse the WHOLE physical stream through the shared paint walk instead of
+// skipping one operator; see `content_color_convert_malformed`.
 
 #[test]
 fn out_of_range_operand_is_skipped_and_counted() {

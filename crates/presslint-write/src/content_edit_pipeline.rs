@@ -11,6 +11,15 @@
 //! legacy single-stream taxonomy (a >1-stream page is skipped whole) for callers
 //! that have not adopted the per-stream model. The page-aware and re-encode
 //! callers drive [`StreamMode::MultiStream`] and edit every stream object.
+//!
+//! Two edit-callback flavours exist behind one loop. Raw byte callbacks keep
+//! the historical `&[u8]` contract and the tokenize + byte-identical
+//! serialization precheck. Operator-interpreting callers use the crate-private
+//! parse-once seam ([`edit_page_content_incremental_parsed_with_preflight`]):
+//! the pipeline builds one validated [`ParsedContent`] per stream (tokenize,
+//! round-trip check, operator assembly — each exactly once) and the callback
+//! consumes it directly. Both flavours retain the independent post-edit
+//! round-trip validation of the edited bytes.
 
 use std::collections::BTreeSet;
 
@@ -43,6 +52,7 @@ use crate::{
         LocatedContentStream, PageStreamsPlan, StreamMode, StreamOutcome, page_index_of,
         plan_page_streams,
     },
+    parsed_content::ParsedContent,
     stream_object_body::build_stream_object_body,
     write_incremental_revision, write_incremental_revision_plan,
 };
@@ -212,6 +222,21 @@ where
     })
 }
 
+/// The two edit-callback flavours the per-stream edit loop can drive.
+///
+/// `Raw` preserves the historical byte contract for existing callers: the
+/// decoded bytes pass the tokenize + byte-identical-serialization check and the
+/// callback receives `&[u8]` exactly as before. `Parsed` is the crate-private
+/// parse-once seam: the pipeline builds one validated [`ParsedContent`]
+/// (tokenize + round-trip check + operator assembly, all exactly once) and the
+/// operator-interpreting callback consumes it without re-parsing.
+enum StreamEditCallback<'a> {
+    /// Historical raw byte callback (public wrappers).
+    Raw(&'a dyn Fn(PageIndex, &[u8]) -> EditedContent),
+    /// Parse-once callback (crate-private converter seam).
+    Parsed(&'a dyn Fn(PageIndex, &ParsedContent<'_>) -> EditedContent),
+}
+
 /// Page-aware, MULTI-stream-capable content edit: the edit closure receives the
 /// zero-based document [`PageIndex`] of the page whose decoded content-stream
 /// bytes it is editing (the same page index is passed once per content-stream
@@ -236,16 +261,30 @@ where
 {
     // Existing callers stay behaviourally identical: a no-op preflight that never
     // poisons a page and does not pay the preflight decode pass.
-    edit_page_content_incremental_indexed_inner(input, pages, mode, None, edit)
+    edit_page_content_incremental_indexed_inner(
+        input,
+        pages,
+        mode,
+        None,
+        &StreamEditCallback::Raw(&edit),
+    )
 }
 
-/// Page-aware, MULTI-stream-capable content edit with a GENERIC, OPT-IN page-level
-/// PREFLIGHT hook: before any dirty object is emitted for a selected page, the
-/// pipeline decodes that page's editable content streams once and calls
-/// `preflight(page_index, &decoded_streams)`. On [`PagePreflight::SkipPage`] the
-/// whole page is left byte-verbatim and reported as one [`PipelinePageSkip`]
-/// (`stream_ordinal: 0`, `content_object: None`); on [`PagePreflight::Continue`]
-/// the existing per-stream edit loop runs unchanged.
+/// Page-aware, MULTI-stream-capable, PARSE-ONCE content edit with a GENERIC,
+/// OPT-IN page-level PREFLIGHT hook: before any dirty object is emitted for a
+/// selected page, the pipeline decodes that page's editable content streams once
+/// and calls `preflight(page_index, &decoded_streams)`. On
+/// [`PagePreflight::SkipPage`] the whole page is left byte-verbatim and reported
+/// as one [`PipelinePageSkip`] (`stream_ordinal: 0`, `content_object: None`); on
+/// [`PagePreflight::Continue`] the per-stream edit loop runs.
+///
+/// The edit callback receives one validated [`ParsedContent`] per stream: the
+/// pipeline tokenizes, verifies byte-identical token serialization, and
+/// assembles the operator records exactly once, so an operator-interpreting
+/// callback never re-parses the same bytes. A stream that fails any of those
+/// steps is skipped as [`PipelineSkipReason::ContentRoundTripMismatch`] before
+/// the callback runs. The independent post-edit round-trip validation of the
+/// edited bytes is retained unchanged.
 ///
 /// The preflight is deliberately whole-page (ISO 32000 §7.8.2: a page's content
 /// streams share graphics state), so a poisoned page converts NONE of its streams
@@ -258,7 +297,7 @@ where
 ///
 /// Returns [`EditPageContentError`] under the same conditions as
 /// [`edit_page_content_incremental_indexed`].
-pub fn edit_page_content_incremental_indexed_with_preflight<P, F>(
+pub fn edit_page_content_incremental_parsed_with_preflight<P, F>(
     input: &[u8],
     pages: &PageSelection,
     mode: StreamMode,
@@ -272,21 +311,24 @@ where
         Option<&PageTransparencyGroupInspection>,
         &[Vec<u8>],
     ) -> PagePreflight,
-    F: Fn(PageIndex, &[u8]) -> EditedContent,
+    F: Fn(PageIndex, &ParsedContent<'_>) -> EditedContent,
 {
-    edit_page_content_incremental_indexed_inner(input, pages, mode, Some(&preflight), edit)
+    edit_page_content_incremental_indexed_inner(
+        input,
+        pages,
+        mode,
+        Some(&preflight),
+        &StreamEditCallback::Parsed(&edit),
+    )
 }
 
-fn edit_page_content_incremental_indexed_inner<F>(
+fn edit_page_content_incremental_indexed_inner(
     input: &[u8],
     pages: &PageSelection,
     mode: StreamMode,
     preflight: Option<&PagePreflightCallback<'_>>,
-    edit: F,
-) -> Result<EditPageContentOutput, EditPageContentError>
-where
-    F: Fn(PageIndex, &[u8]) -> EditedContent,
-{
+    edit: &StreamEditCallback<'_>,
+) -> Result<EditPageContentOutput, EditPageContentError> {
     let access = inspect_document_access(input).map_err(|error| EditPageContentError::Open {
         error: Box::new(error),
     })?;
@@ -365,7 +407,7 @@ where
                             reason,
                         }),
                         StreamOutcome::Located(located) => {
-                            match plan_stream(input, &located, &ownership, &edit) {
+                            match plan_stream(input, &located, &ownership, edit) {
                                 StreamPlan::Edit { report, planned } => {
                                     edited.push(report);
                                     dirty_objects.push(planned);
@@ -622,15 +664,12 @@ enum StreamPlan {
 }
 
 /// Ownership-gate, decode, edit, re-encode, and build one located stream object.
-fn plan_stream<F>(
+fn plan_stream(
     input: &[u8],
     located: &LocatedContentStream<'_>,
     ownership: &ContentObjectOwnershipIndex,
-    edit: &F,
-) -> StreamPlan
-where
-    F: Fn(PageIndex, &[u8]) -> EditedContent,
-{
+    edit: &StreamEditCallback<'_>,
+) -> StreamPlan {
     let page_index = located.page_index;
     let stream_ordinal = located.stream_ordinal;
     let content_object = located.content_object;
@@ -783,15 +822,12 @@ struct EditedStreamData {
     edit_count: usize,
 }
 
-fn edit_stream_data<F>(
+fn edit_stream_data(
     page_index: PageIndex,
     stream_data: &[u8],
     filter: PipelineFilterKind,
-    edit: &F,
-) -> Result<Option<EditedStreamData>, PipelineSkipReason>
-where
-    F: Fn(PageIndex, &[u8]) -> EditedContent,
-{
+    edit: &StreamEditCallback<'_>,
+) -> Result<Option<EditedStreamData>, PipelineSkipReason> {
     let decoded = match filter {
         PipelineFilterKind::Raw => stream_data.to_vec(),
         PipelineFilterKind::Flate => decode_flate_stream(
@@ -802,8 +838,21 @@ where
         .map_err(|_| PipelineSkipReason::ContentRoundTripMismatch)?,
     };
 
-    require_round_trip(&decoded)?;
-    let (edited, edit_count) = match edit(page_index, &decoded) {
+    let outcome = match edit {
+        StreamEditCallback::Raw(edit) => {
+            require_round_trip(&decoded)?;
+            edit(page_index, &decoded)
+        }
+        StreamEditCallback::Parsed(edit) => {
+            // Parse ONCE: tokenize + byte-identical serialization check +
+            // operator assembly. This subsumes `require_round_trip` for the
+            // parsed path and replaces the callback's own tokenize/assemble.
+            let parsed = ParsedContent::parse(&decoded)
+                .ok_or(PipelineSkipReason::ContentRoundTripMismatch)?;
+            edit(page_index, &parsed)
+        }
+    };
+    let (edited, edit_count) = match outcome {
         EditedContent::Unchanged => return Ok(None),
         EditedContent::Rejected(reason) => return Err(reason),
         EditedContent::Rewritten {

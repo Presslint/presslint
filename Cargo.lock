@@ -384,6 +384,8 @@ version = "0.0.1"
 dependencies = [
  "presslint-actions",
  "presslint-color-lcms",
+ "presslint-inventory",
+ "presslint-paint",
  "presslint-pdf",
  "presslint-selectors",
  "presslint-syntax",

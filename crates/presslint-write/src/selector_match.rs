@@ -1,44 +1,36 @@
 //! Operator-local selector evaluation for targeted colour conversion (F4-4).
 //!
-//! This is a small, self-contained evaluator that decides — for ONE direct
-//! device colour-setting operator — whether a caller-supplied
-//! [`presslint_selectors::Selector`] matches it. It deliberately does NOT build
-//! an `presslint_inventory::InventoryEntry`, does NOT track graphics state, and
-//! does NOT call the inventory-backed `presslint_selectors::matches`. Instead it
-//! evaluates the selector boolean tree against a tiny borrowed [`OperatorView`]
-//! synthesised from what is knowable locally at the operator: the page index, the
-//! operator's declared device colour space, its fill/stroke usage, and its
-//! already-parsed operand components (borrowed, never copied).
+//! Two pieces cooperate. [`collect_unsupported_leaves`] walks a caller-supplied
+//! [`presslint_selectors::Selector`] UP FRONT — recursively under `Not`, `And`,
+//! and `Or` — and reports every leaf that cannot be answered from what a single
+//! direct device colour-setting operator makes locally available, so the caller
+//! rejects the whole request before any page traversal rather than silently
+//! under-converting.
 //!
-//! Selector leaves that require associating a colour with a painted object
-//! ([`Predicate::ObjectKind`], [`Predicate::Editable`], [`Predicate::Scope`]) or a
-//! non-operator-local colour usage/space (image/shading usage, ICCBased/Lab/spot
-//! colour spaces) cannot be answered here. They are detected UP FRONT by
-//! [`collect_unsupported_leaves`] so the caller can reject the whole request
-//! before any page traversal, rather than silently under-converting.
+//! Once that total precheck has passed, [`selector_matches_operator`] evaluates
+//! the selector through the CANONICAL inventory matcher
+//! ([`presslint_selectors::matches`]) over a private, ephemeral, single-
+//! observation `InventoryEntry` synthesised from the operator's page index,
+//! declared device colour space, fill/stroke usage, and parsed components. The
+//! entry's identity fields (sequence, digest, kind, scope, capabilities,
+//! provenance range) are inert sentinels: the precheck guarantees the accepted
+//! selector subset can only observe the page index and the one real colour
+//! observation, so the sentinels are unobservable. The entry is never exposed,
+//! serialized, cached, or treated as a real inventory object — it exists only
+//! for the duration of one boolean evaluation.
 
-use presslint_selectors::{CompareOp, PageMatcher, PageParity, Predicate, Selector};
-use presslint_types::{ColorSpace, ColorUsage, PageIndex};
+use presslint_inventory::InventoryEntry;
+use presslint_selectors::{Predicate, Selector};
+use presslint_types::{
+    ColorObservation, ColorSpace, ColorUsage, ContentScope, ObjectId, ObjectKind, PageIndex,
+    Provenance,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::content_color_convert::DeviceColorSpace;
 
-/// A synthetic per-operator view over the facts a colour operator makes locally
-/// available. All fields are cheap: `components` borrows the caller's already
-/// parsed operand slice, so building a view allocates nothing.
-pub struct OperatorView<'a> {
-    /// Zero-based document page index of the page being converted.
-    pub page_index: PageIndex,
-    /// The operator's declared direct device colour space.
-    pub color_space: DeviceColorSpace,
-    /// Fill for lowercase `g`/`rg`/`k`, Stroke for uppercase `G`/`RG`/`K`.
-    pub usage: ColorUsage,
-    /// The operator's parsed operand components, in source-space order.
-    pub components: &'a [f64],
-}
-
-/// A supported-in-principle predicate that this operator-local evaluator cannot
-/// answer, surfaced up front so the whole request is rejected honestly.
+/// A supported-in-principle predicate that this operator-local evaluation
+/// cannot answer, surfaced up front so the whole request is rejected honestly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "leaf", rename_all = "snake_case")]
 pub enum UnsupportedTargetLeaf {
@@ -88,7 +80,7 @@ pub enum UnsupportedTargetLeaf {
     },
 }
 
-/// Walk `selector` and collect every leaf this operator-local evaluator cannot
+/// Walk `selector` and collect every leaf this operator-local evaluation cannot
 /// answer, in pre-order. An empty result means the selector is fully supported.
 pub fn collect_unsupported_leaves(selector: &Selector) -> Vec<UnsupportedTargetLeaf> {
     let mut out = Vec::new();
@@ -159,120 +151,65 @@ const fn is_supported_component_leaf(space: &ColorSpace, usage: Option<ColorUsag
         }
 }
 
-/// Evaluate `selector`'s boolean tree against one operator view.
+/// Evaluate `selector` for ONE direct device colour-setting operator through
+/// the canonical inventory matcher.
 ///
-/// Callers must have already rejected any unsupported leaf up front (see
-/// [`collect_unsupported_leaves`]); an unsupported leaf reaching this evaluator
-/// is treated as a non-match for totality.
+/// PRECONDITION: the caller has already run [`collect_unsupported_leaves`] over
+/// the WHOLE selector and rejected any unsupported leaf. Only then is the
+/// private, ephemeral single-observation entry built here safe: every field the
+/// accepted selector subset can observe (the page index and the one colour
+/// observation) is real, and every other field is an inert sentinel that no
+/// accepted leaf reads. The entry lives only for this call; it is never
+/// exposed, serialized, cached, or reported as a real inventory object.
 #[must_use]
-pub fn selector_matches(selector: &Selector, view: &OperatorView) -> bool {
-    match selector {
-        Selector::All => true,
-        Selector::None => false,
-        Selector::Not { expr } => !selector_matches(expr, view),
-        Selector::And { exprs } => exprs.iter().all(|expr| selector_matches(expr, view)),
-        Selector::Or { exprs } => exprs.iter().any(|expr| selector_matches(expr, view)),
-        Selector::Predicate { predicate } => predicate_matches(predicate, view),
-    }
+pub fn selector_matches_operator(
+    selector: &Selector,
+    page_index: PageIndex,
+    space: DeviceColorSpace,
+    usage: ColorUsage,
+    components: &[f64],
+) -> bool {
+    let entry = ephemeral_operator_entry(page_index, space, usage, components);
+    presslint_selectors::matches(selector, &entry)
 }
 
-fn predicate_matches(predicate: &Predicate, view: &OperatorView) -> bool {
-    match predicate {
-        Predicate::ColorSpace { space } => device_color_space(view.color_space) == *space,
-        Predicate::Page { page } => view.page_index == *page,
-        Predicate::PageMatch { matcher } => page_matches(matcher, view.page_index),
-        Predicate::ColorUsage { usage } => view.usage == *usage,
-        Predicate::ColorComponents {
-            space,
-            usage,
-            components,
-            tolerance,
-        } => {
-            device_color_space(view.color_space) == *space
-                && usage.is_none_or(|usage| view.usage == usage)
-                && components_match(components, view.components, *tolerance)
-        }
-        Predicate::ComponentCompare {
-            space,
-            usage,
-            component_index,
-            op,
-            value,
-        } => {
-            device_color_space(view.color_space) == *space
-                && usage.is_none_or(|usage| view.usage == usage)
-                && component_compare_matches(view.components.get(*component_index), *op, *value)
-        }
-        // Unsupported leaves are rejected up front; never reached here.
-        Predicate::ObjectKind { .. } | Predicate::Editable { .. } | Predicate::Scope { .. } => {
-            false
-        }
-    }
-}
-
-/// Reimplements the selector crate's private page-match semantics locally, so we
-/// never route a synthetic entry through the inventory matcher.
-fn page_matches(matcher: &PageMatcher, page: PageIndex) -> bool {
-    match matcher {
-        PageMatcher::Parity { parity } => {
-            // One-based page number and zero-based index have opposite low bits,
-            // so test the index directly (panic-free even at `u32::MAX`).
-            let index_is_even = page.0.is_multiple_of(2);
-            match parity {
-                PageParity::Odd => index_is_even,
-                PageParity::Even => !index_is_even,
-            }
-        }
-        PageMatcher::Range { start, end } => start.0 <= page.0 && page.0 <= end.0,
-        PageMatcher::Set { pages } => pages.contains(&page),
-    }
-}
-
-/// Reimplements the selector crate's private component-match semantics locally.
-fn components_match(expected: &[f64], actual: &[f64], tolerance: Option<f64>) -> bool {
-    if expected.len() != actual.len() {
-        return false;
-    }
-    match tolerance {
-        None => expected.iter().zip(actual).all(|(expected, actual)| {
-            expected.is_finite()
-                && actual.is_finite()
-                && expected.partial_cmp(actual) == Some(std::cmp::Ordering::Equal)
-        }),
-        Some(tolerance) if tolerance.is_finite() && tolerance >= 0.0 => {
-            expected.iter().zip(actual).all(|(expected, actual)| {
-                expected.is_finite() && actual.is_finite() && (expected - actual).abs() <= tolerance
-            })
-        }
-        Some(_) => false,
-    }
-}
-
-/// Reimplements the selector crate's private component-compare semantics locally.
+/// Build the private single-observation adapter entry for one operator.
 ///
-/// A missing component (index out of range), a non-finite `value`, or a
-/// non-finite `actual` is a clean non-match — never a panic.
-#[must_use]
-fn component_compare_matches(actual: Option<&f64>, op: CompareOp, value: f64) -> bool {
-    let Some(&actual) = actual else {
-        return false;
-    };
-    if !actual.is_finite() || !value.is_finite() {
-        return false;
-    }
-    compare_op(actual, op, value)
-}
-
-/// Apply one [`CompareOp`] to two finite `f64`s (`Eq` is exact, no tolerance).
-#[must_use]
-#[allow(clippy::float_cmp)]
-fn compare_op(actual: f64, op: CompareOp, value: f64) -> bool {
-    match op {
-        CompareOp::Ge => actual >= value,
-        CompareOp::Gt => actual > value,
-        CompareOp::Le => actual <= value,
-        CompareOp::Lt => actual < value,
-        CompareOp::Eq => actual == value,
+/// Real fields: `id.page`, `provenance.page`, and exactly one
+/// [`ColorObservation`] carrying the operator's declared device space,
+/// fill/stroke usage, and components (copied once; at most four `f64`s). Inert
+/// sentinel fields, unobservable by the accepted selector subset: zero
+/// sequence, zero digest, `Vector` kind, `Page` scope, no provenance range, no
+/// bounds, no capabilities.
+fn ephemeral_operator_entry(
+    page_index: PageIndex,
+    space: DeviceColorSpace,
+    usage: ColorUsage,
+    components: &[f64],
+) -> InventoryEntry {
+    InventoryEntry {
+        id: ObjectId {
+            page: page_index,
+            sequence: 0,
+            digest: [0; 32],
+        },
+        kind: ObjectKind::Vector,
+        provenance: Provenance {
+            page: page_index,
+            scope: ContentScope::Page,
+            range: None,
+            invocation: None,
+        },
+        bounds: None,
+        colors: vec![ColorObservation {
+            usage,
+            space: device_color_space(space),
+            components: components.to_vec(),
+            spot_name: None,
+            spot_names: Vec::new(),
+            source: None,
+        }],
+        capabilities: Vec::new(),
     }
 }
 

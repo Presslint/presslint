@@ -9,6 +9,13 @@
 //! same stream object referenced twice merging into ONE dirty object (no
 //! `DuplicateDirtyObject`); and the classic + xref-stream backends. Every case
 //! asserts `output.bytes[..input.len()] == input` and that the output reopens.
+//!
+//! KNOWN LIMITATION (pinned below): each physical stream is still walked
+//! independently, so graphics state does NOT propagate across a page's
+//! `/Contents` sequence. Explicit device shortcuts stay independently
+//! convertible, but a `q` in one stream with its `Q` in the next underflows the
+//! second stream's fresh interpreter and conservatively refuses THAT stream. A
+//! logical concatenated page-stream walk is a follow-up slice.
 
 // "DeviceLink" is the ICC domain term used as prose here, matching the module
 // under test.
@@ -23,7 +30,7 @@ use crate::{
 };
 
 use super::content_color_convert::{
-    RGB_TO_CMYK_LINK, assemble_classic, occurrence_count, one_link, page_body,
+    RGB_TO_CMYK_LINK, assemble_classic, contains, convert, occurrence_count, one_link, page_body,
     page_encoded_stream_at, stream_body,
 };
 use super::{reopen, xref_record};
@@ -32,16 +39,7 @@ const CATALOG: &[u8] = b"<< /Type /Catalog /Pages 2 0 R >>";
 
 /// Convert every page of `input` through one RGB->CMYK link, no black overlay.
 fn convert_all(input: &[u8]) -> crate::ConvertContentColorsOutput {
-    convert_content_colors_incremental(
-        input,
-        &ConvertContentColorsRequest {
-            pages: PageSelection::All,
-            device_links: one_link(RGB_TO_CMYK_LINK),
-            black_preservation: BlackPreservationPolicy::None,
-            target: None,
-        },
-    )
-    .expect("convert succeeds")
+    convert(input, RGB_TO_CMYK_LINK)
 }
 
 /// Object numbers of a page's analysed content-stream objects.
@@ -238,6 +236,37 @@ fn same_stream_object_referenced_twice_merges_to_one_dirty_object() {
 }
 
 #[test]
+fn cross_stream_save_restore_conservatively_refuses_the_second_stream() {
+    // The page's graphics state legally spans its /Contents sequence
+    // (ISO 32000-1 §7.8.2), but each physical stream is walked independently:
+    // the `q` stream converts (an unclosed save is not an error), while the
+    // sibling opening with `Q` underflows its fresh interpreter and is refused
+    // whole. Pinned as the documented conservative limitation of this slice.
+    let input = classic_two_stream_pdf(b"q 1 0 0 rg\n", b"Q 0 0 1 rg\n");
+    let output = convert_all(&input);
+
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    assert_eq!(output.converted.len(), 1);
+    let page = &output.converted[0];
+    assert_eq!(page.operators_converted, 1);
+    assert_eq!(content_object_numbers(page), vec![4]);
+
+    assert_eq!(output.skipped.len(), 1);
+    let skip = &output.skipped[0];
+    assert_eq!(skip.content_object.map(|r| r.object_number), Some(5));
+    assert_eq!(skip.reason, ConvertPageSkipReason::ContentRoundTripMismatch);
+
+    // Stream 4 was rewritten; the refused stream 5 keeps its original bytes.
+    assert!(!contains(
+        &page_encoded_stream_at(&output.bytes, 0, 0),
+        b"rg"
+    ));
+    assert_eq!(page_encoded_stream_at(&output.bytes, 0, 1), b"Q 0 0 1 rg\n");
+    assert_eq!(occurrence_count(&output.bytes, b"4 0 obj"), 2);
+    assert_eq!(occurrence_count(&output.bytes, b"5 0 obj"), 1);
+}
+
+#[test]
 fn xref_stream_multi_stream_page_converts_both_and_reopens_as_chain() {
     let input = xref_stream_two_stream_pdf(b"1 0 0 rg\n", b"0 0 1 RG\n");
     let output = convert_all(&input);
@@ -259,10 +288,4 @@ fn xref_stream_multi_stream_page_converts_both_and_reopens_as_chain() {
         &page_encoded_stream_at(&output.bytes, 0, 1),
         b"RG"
     ));
-}
-
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
 }

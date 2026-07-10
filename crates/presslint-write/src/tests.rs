@@ -8,7 +8,9 @@
 
 mod append;
 mod content_color_convert;
+mod content_color_convert_malformed;
 mod content_color_convert_multistream;
+mod content_color_convert_paint_adapter;
 mod content_color_rewrite;
 mod content_object_ownership;
 mod extgstate_page_guard;
@@ -19,6 +21,7 @@ mod planned;
 mod reencode_content;
 mod reject;
 mod selector_match;
+mod selector_match_paint_adapter;
 mod xref_stream_writer;
 
 use presslint_pdf::{

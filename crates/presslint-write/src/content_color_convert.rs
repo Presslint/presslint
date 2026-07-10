@@ -16,8 +16,18 @@
 //! byte-verbatim and counted as `no_matching_link`. Only direct device operators
 //! `g/G`, `rg/RG`, `k/K` are handled; `cs/CS`, `sc/scn`, `SC/SCN`,
 //! ICCBased/Separation/DeviceN/Indexed/Pattern colour spaces, and resource
-//! colour-space lookups are out of scope (they need graphics-state tracking) and
-//! are simply not matched here.
+//! colour-space lookups are out of scope (no resource-space conversion here) and
+//! are left byte-verbatim.
+//!
+//! Candidate discovery is PAINT-DRIVEN: each physical content stream is parsed
+//! once by the shared pipeline seam and walked once through
+//! [`presslint_paint::PaintProgram`]. An emitted colour event is eligible only
+//! when the EXACT bytes at its operator range are one of the six direct device
+//! shortcuts; the event's already-parsed colour components and its record range
+//! drive the splice. This converter is FAIL-CLOSED per stream: any graphics-walk
+//! error (stack underflow, malformed operands of ANY supported operator)
+//! refuses the entire physical stream through the existing round-trip mismatch
+//! skip — no partial conversion of a stream the shared interpreter cannot walk.
 
 // "DeviceLink" is the ICC profile-class domain term used throughout these docs
 // as prose, not always as a code identifier; mirror the `presslint-color-lcms`
@@ -28,11 +38,11 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use presslint_color_lcms::{ColorEngine, DeviceLinkSpace, LcmsColorEngine, LcmsError};
+use presslint_paint::{ColorSpaceEnv, PaintOpKind, PaintProgram};
 use presslint_pdf::{
     DictionaryValueKind, DocumentAccessError, IndirectObjectEditDisposition, IndirectRef,
 };
 use presslint_selectors::Selector;
-use presslint_syntax::{OperandRecord, Token, TokenKind, assemble_operators, tokenize};
 use presslint_types::{ByteRange, ColorUsage, PageIndex};
 use serde::{Deserialize, Serialize};
 
@@ -41,14 +51,15 @@ use crate::{
     black_preservation::{BlackPreservationPolicy, black_preservation_replacement},
     content_edit_pipeline::{
         EditPageContentError, EditedContent, PagePreflight, PageSelection, PipelinePageSkip,
-        PipelineSkipReason, edit_page_content_incremental_indexed_with_preflight,
+        PipelineSkipReason, edit_page_content_incremental_parsed_with_preflight,
     },
     content_stream_plan::StreamMode,
     extgstate_page_guard::{extgstate_page_skip_reason, transparency_group_page_skip_reason},
     link_routing::{DeviceLinkInput, LinkConversionCounts, LinkRouting, build_link_routing},
+    parsed_content::ParsedContent,
     pdf_number_serialize::serialize_color_component,
     selector_match::{
-        OperatorView, UnsupportedTargetLeaf, collect_unsupported_leaves, selector_matches,
+        UnsupportedTargetLeaf, collect_unsupported_leaves, selector_matches_operator,
     },
 };
 
@@ -71,9 +82,11 @@ pub struct ConvertContentColorsRequest {
     /// operators are converted.
     ///
     /// `None` (the default) converts every matching-source operator, exactly as
-    /// F4-2/F4-3 did. `Some(selector)` converts only operators whose synthetic
-    /// per-operator view matches; non-matching operators are left byte-verbatim
-    /// and counted as [`OperatorSkipCounts::selector_excluded`]. Selector leaves
+    /// F4-2/F4-3 did. `Some(selector)` converts only operators the canonical
+    /// selector matcher accepts, evaluated per operator over the facts the
+    /// operator makes locally available; non-matching operators are left
+    /// byte-verbatim and counted as
+    /// [`OperatorSkipCounts::selector_excluded`]. Selector leaves
     /// that are not operator-local (object kind, editability, scope, image/shading
     /// usage, non-device colour spaces) are rejected up front — see
     /// [`ConvertContentColorsError::UnsupportedTargetSelector`].
@@ -88,8 +101,15 @@ pub struct OperatorSkipCounts {
     /// link's source space (a coverage gap; left byte-verbatim).
     pub no_matching_link: usize,
     /// Direct device operators whose operand count did not match the space.
+    ///
+    /// Retained for report-shape compatibility: since candidate discovery moved
+    /// to the shared paint walk, a malformed direct device operator refuses its
+    /// WHOLE content stream (reported as a stream skip), so this stays `0`.
     pub wrong_operand_count: usize,
     /// Direct device operators with a non-number / multi-token operand.
+    ///
+    /// Retained for report-shape compatibility: like `wrong_operand_count`,
+    /// the paint walk now refuses the whole stream instead, so this stays `0`.
     pub non_number_operand: usize,
     /// Direct device operators with an operand outside `[0.0, 1.0]`.
     pub operand_out_of_range: usize,
@@ -164,7 +184,9 @@ pub enum ConvertPageSkipReason {
         predictor: u16,
     },
     /// Decoded content did not re-serialize byte-identically, could not be
-    /// decoded/re-encoded, or could not be assembled into operator records.
+    /// decoded/re-encoded, could not be assembled into operator records, or
+    /// could not be walked whole by the shared graphics interpreter (any
+    /// graphics-walk error refuses the entire physical stream, fail-closed).
     ContentRoundTripMismatch,
     /// Content-stream ownership was not a single-use in-place mutation.
     OwnershipNotInPlace {
@@ -299,15 +321,6 @@ pub enum DeviceColorSpace {
 }
 
 impl DeviceColorSpace {
-    /// Operand / channel count for this space.
-    const fn channels(self) -> usize {
-        match self {
-            Self::Gray => 1,
-            Self::Rgb => 3,
-            Self::Cmyk => 4,
-        }
-    }
-
     /// Narrow a DeviceLink space to a directly-convertible device space.
     /// Lab and unsupported spaces have no direct device operator.
     pub const fn from_link(space: DeviceLinkSpace) -> Option<Self> {
@@ -394,7 +407,7 @@ pub fn convert_content_colors_incremental(
     let tallies: RefCell<Vec<PageTally>> = RefCell::new(Vec::new());
     let target = request.target.as_ref();
 
-    let output = edit_page_content_incremental_indexed_with_preflight(
+    let output = edit_page_content_incremental_parsed_with_preflight(
         input,
         &request.pages,
         StreamMode::MultiStream,
@@ -406,10 +419,10 @@ pub fn convert_content_colors_incremental(
                 .or_else(|| extgstate_page_skip_reason(extgstate_page, decoded_streams))
                 .map_or(PagePreflight::Continue, PagePreflight::SkipPage)
         },
-        |page_index, decoded| {
-            match convert_decoded(
+        |page_index, parsed| {
+            match convert_parsed(
                 page_index,
-                decoded,
+                parsed,
                 &routing,
                 request.black_preservation,
                 target,
@@ -455,22 +468,38 @@ pub fn convert_content_colors_incremental(
     })
 }
 
-/// Convert one decoded content stream, routing each operator to its source link.
+/// Convert one parsed content stream, routing each eligible operator to its
+/// source link.
 ///
-/// Returns `Some((edited, tally))` when the stream tokenized and assembled.
-/// `edited` is empty when no real splice is needed, otherwise it is the spliced
-/// buffer; `tally` still records conversions, black-preserved operators, and
-/// skips. Returns `None` when operators could not be assembled (a round-trip
-/// rejection, no tally recorded).
-fn convert_decoded(
+/// Candidate discovery is paint-driven: one fresh [`PaintProgram`] walk over
+/// the already-assembled records yields the colour events, and an event is
+/// eligible only when the EXACT bytes at its operator range are one of the
+/// direct device shortcuts (`g`/`G`, `rg`/`RG`, `k`/`K`). Resource colour
+/// selection (`cs`/`CS` + `sc`/`scn`/`SC`/`SCN`) also emits colour events but
+/// never has shortcut operator bytes, so it stays byte-verbatim; eligibility is
+/// never inferred from device state or a resource name. The event's parsed
+/// [`presslint_paint::GraphicsColor`] components and its record range drive the
+/// splice.
+///
+/// FAIL-CLOSED: any graphics-walk error (stack underflow, malformed operands of
+/// ANY supported operator, invalid ranges) returns `None` — every candidate
+/// collected before the error is discarded, no splice is applied, and no tally
+/// is recorded. The caller maps `None` to the existing round-trip mismatch
+/// skip. Candidate splice metadata stays bounded to eligible operators; the
+/// walk is not materialized.
+///
+/// Returns `Some((edited, tally))` when the whole stream walked. `edited` is
+/// empty when no real byte splice is needed; `tally` still records conversions,
+/// black-preserved operators, and skips.
+fn convert_parsed(
     page_index: PageIndex,
-    decoded: &[u8],
+    parsed: &ParsedContent<'_>,
     routing: &LinkRouting,
     black_preservation: BlackPreservationPolicy,
     target: Option<&Selector>,
 ) -> Option<(Vec<u8>, PageTally)> {
-    let tokens = tokenize(decoded).ok()?;
-    let assembled = assemble_operators(&tokens).ok()?;
+    let decoded = parsed.bytes();
+    let program = PaintProgram::new(decoded, parsed.records(), ColorSpaceEnv::empty());
 
     let mut tally = PageTally {
         link_converted: vec![0; routing.links().len()],
@@ -478,45 +507,38 @@ fn convert_decoded(
     };
     let mut splices: Vec<(ByteRange, Vec<u8>)> = Vec::new();
 
-    for record in assembled.records {
-        let operator = tokens[record.operator.token_index].source_bytes(decoded)?;
-        let Some((space, stroking)) = classify_operator(operator) else {
-            // Not a direct device colour operator: leave verbatim, do not count.
+    for op in program.ops() {
+        // A walk error refuses the ENTIRE stream: all candidates are discarded.
+        let op = op.ok()?;
+        let (PaintOpKind::SetStrokingColor { color } | PaintOpKind::SetNonstrokingColor { color }) =
+            &op.kind
+        else {
             continue;
         };
-        // Operand count/number/range validation happens BEFORE route lookup, so a
-        // malformed operator is attributed to the precise operand skip rather than
-        // to `no_matching_link` (which is reserved for well-formed coverage gaps).
-        if record.operands.len() != space.channels() {
-            tally.skips.wrong_operand_count += 1;
+        let operator = decoded.get(op.operator_range.start()..op.operator_range.end())?;
+        // Exact shortcut bytes decide eligibility. A colour event whose
+        // operator is not one of the six shortcuts is left verbatim, uncounted.
+        let Some((space, stroking)) = classify_operator(operator) else {
+            continue;
+        };
+        // The walker already guarantees the shortcut's operand count and finite
+        // numbers (anything else refused the stream above); the `[0,1]` range
+        // gate stays converter-local and per-operator, exactly as before.
+        let operands = color.components.as_slice();
+        if !operands.iter().all(|value| (0.0..=1.0).contains(value)) {
+            tally.skips.operand_out_of_range += 1;
             continue;
         }
-        let operands = match read_operands(&record.operands, decoded, &tokens) {
-            Ok(operands) => operands,
-            Err(OperandError::NonNumber) => {
-                tally.skips.non_number_operand += 1;
-                continue;
-            }
-            Err(OperandError::OutOfRange) => {
-                tally.skips.operand_out_of_range += 1;
-                continue;
-            }
-        };
-        // Selector check (F4-4): a cheap per-operator boolean eval over a
-        // borrowed operator view, BEFORE routing and the heavier
-        // black-preservation / DeviceLink apply. A non-match leaves it verbatim.
+        // Selector check (F4-4): a cheap per-operator boolean eval through the
+        // canonical matcher, BEFORE routing and the heavier black-preservation
+        // / DeviceLink apply. A non-match leaves it verbatim.
         if let Some(selector) = target {
-            let view = OperatorView {
-                page_index,
-                color_space: space,
-                usage: if stroking {
-                    ColorUsage::Stroke
-                } else {
-                    ColorUsage::Fill
-                },
-                components: &operands,
+            let usage = if stroking {
+                ColorUsage::Stroke
+            } else {
+                ColorUsage::Fill
             };
-            if !selector_matches(selector, &view) {
+            if !selector_matches_operator(selector, page_index, space, usage, operands) {
                 tally.skips.selector_excluded += 1;
                 continue;
             }
@@ -527,26 +549,27 @@ fn convert_decoded(
             tally.skips.no_matching_link += 1;
             continue;
         };
+        let range = op.record_range.into_byte_range();
         if let Some(replacement) = black_preservation_replacement(
-            &operands,
+            operands,
             space,
             link.destination,
             stroking,
             black_preservation,
         ) {
             tally.black_preserved += 1;
-            if decoded.get(record.range.start..record.range.end) != Some(replacement.as_slice()) {
-                splices.push((record.range, replacement));
+            if decoded.get(range.start..range.end) != Some(replacement.as_slice()) {
+                splices.push((range, replacement));
             }
             continue;
         }
-        let Ok(components) = LcmsColorEngine.apply_device_link(&link.prepared, &operands) else {
-            // Unreachable after the source-space route + per-operand validation
+        let Ok(components) = LcmsColorEngine.apply_device_link(&link.prepared, operands) else {
+            // Unreachable after the source-space route + walker validation
             // (channel count and range are already guaranteed); leave verbatim.
             continue;
         };
         splices.push((
-            record.range,
+            range,
             replacement_bytes(&components, link.destination, stroking),
         ));
         tally.converted += 1;
@@ -565,43 +588,6 @@ fn convert_decoded(
         edited.splice(range.start..range.end, replacement.iter().copied());
     }
     Some((edited, tally))
-}
-
-/// Why a source-space operator's operands could not be used.
-enum OperandError {
-    NonNumber,
-    OutOfRange,
-}
-
-/// Read every operand as exactly one finite `[0.0, 1.0]` number token.
-fn read_operands(
-    operands: &[OperandRecord],
-    decoded: &[u8],
-    tokens: &[Token],
-) -> Result<Vec<f64>, OperandError> {
-    let mut values = Vec::with_capacity(operands.len());
-    for operand in operands {
-        let value = operand_number(operand, decoded, tokens).ok_or(OperandError::NonNumber)?;
-        if !(0.0..=1.0).contains(&value) {
-            return Err(OperandError::OutOfRange);
-        }
-        values.push(value);
-    }
-    Ok(values)
-}
-
-/// Parse one operand as exactly one `TokenKind::Number` finite `f64`.
-fn operand_number(operand: &OperandRecord, decoded: &[u8], tokens: &[Token]) -> Option<f64> {
-    let [token_ref] = operand.tokens.as_slice() else {
-        return None;
-    };
-    if !matches!(tokens[token_ref.token_index].kind, TokenKind::Number(_)) {
-        return None;
-    }
-    let bytes = tokens[token_ref.token_index].source_bytes(decoded)?;
-    let text = std::str::from_utf8(bytes).ok()?;
-    let value = text.parse::<f64>().ok()?;
-    value.is_finite().then_some(value)
 }
 
 /// Build `<serialized components joined by single spaces> <dest operator>`.
