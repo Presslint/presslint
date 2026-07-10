@@ -54,6 +54,7 @@ mod black_preservation;
 mod content_color_convert;
 mod content_color_rewrite;
 mod content_edit_pipeline;
+pub(crate) mod content_object_ownership;
 mod content_stream_plan;
 mod extgstate_page_guard;
 mod link_routing;

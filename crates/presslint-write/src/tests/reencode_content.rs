@@ -133,6 +133,29 @@ fn classic_shared_content_pdf() -> Vec<u8> {
     ])
 }
 
+/// Page 0 directly owns object 5, while page 1 reaches it only through a
+/// resource subtree. The old direct-owner map could not see the second user.
+fn classic_content_reached_from_second_page_subtree() -> Vec<u8> {
+    assemble_classic(&[
+        CATALOG.to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+        page_body("5 0 R"),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Extra 5 0 R >> /Contents 6 0 R >>".to_vec(),
+        stream_body("", RAW_CONTENT),
+        stream_body("", b"q Q\n"),
+    ])
+}
+
+/// Object 4 is both the page's direct content and a catalog top-level value.
+fn classic_content_reached_from_root_key() -> Vec<u8> {
+    assemble_classic(&[
+        b"<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        page_body("4 0 R"),
+        stream_body("", RAW_CONTENT),
+    ])
+}
+
 /// One-page PDF whose final section is a raw xref stream and whose object 4 is a
 /// raw content stream.
 fn xref_stream_raw_pdf(data: &[u8]) -> Vec<u8> {
@@ -444,6 +467,32 @@ fn shared_content_stream_is_skipped_as_unproven_ownership() {
         output.skipped[0].content_object.map(|r| r.object_number),
         Some(5)
     );
+}
+
+#[test]
+fn second_page_subtree_user_vetoes_the_single_direct_owner() {
+    let input = classic_content_reached_from_second_page_subtree();
+    let output = reencode(&input, PageSelection::Indices(vec![PageIndex(0)]));
+
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    assert!(output.reencoded.is_empty());
+    assert!(matches!(
+        output.skipped[0].reason,
+        ReencodePageSkipReason::OwnershipNotInPlace { occurrences: 1, .. }
+    ));
+}
+
+#[test]
+fn root_key_user_vetoes_the_single_direct_owner() {
+    let input = classic_content_reached_from_root_key();
+    let output = reencode(&input, PageSelection::All);
+
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    assert!(output.reencoded.is_empty());
+    assert!(matches!(
+        output.skipped[0].reason,
+        ReencodePageSkipReason::OwnershipNotInPlace { occurrences: 1, .. }
+    ));
 }
 
 #[test]

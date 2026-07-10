@@ -12,7 +12,7 @@
 //! that have not adopted the per-stream model. The page-aware and re-encode
 //! callers drive [`StreamMode::MultiStream`] and edit every stream object.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use presslint_actions::{
     IncrementalRevisionPlan, MutationBoundary, PlannedDirtyObject, PlannedValueProvenance,
@@ -20,17 +20,17 @@ use presslint_actions::{
 use presslint_pdf::{
     ContentStreamDataExtentInspection, ContentStreamFilterClassification, DictionaryEntrySpan,
     DictionaryValueKind, DocumentAccessBackend, DocumentAccessError, DocumentAccessRejection,
-    DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
-    DocumentPageExtGStateResourcesInspection, DocumentPageExtGStateResourcesInspectionError,
-    DocumentPageTransparencyGroupsInspection, DocumentPageTransparencyGroupsInspectionError,
-    FlateDecodeParameters, FlateDecodeParametersResolution, IndirectObjectEditDecision,
-    IndirectObjectEditDisposition, IndirectRef, ObjectLookup, PageExtGStateResourcesInspection,
-    PageTransparencyGroupInspection, classify_content_stream_filter, content_stream_data_slice,
-    decide_indirect_object_edit, decode_flate_stream, encode_flate_stream, inspect_document_access,
+    DocumentPageContentExtentInspection, DocumentPageExtGStateResourcesInspection,
+    DocumentPageExtGStateResourcesInspectionError, DocumentPageTransparencyGroupsInspection,
+    DocumentPageTransparencyGroupsInspectionError, FlateDecodeParameters,
+    FlateDecodeParametersResolution, IndirectObjectEditDecision, IndirectObjectEditDisposition,
+    IndirectRef, ObjectLookup, PageExtGStateResourcesInspection, PageTransparencyGroupInspection,
+    classify_content_stream_filter, content_stream_data_slice, decode_flate_stream,
+    encode_flate_stream, inspect_document_access,
     inspect_document_page_content_extents_with_lookup,
     inspect_document_page_extgstate_resources_with_lookup,
     inspect_document_page_transparency_groups_with_lookup, inspect_indirect_object_dictionary,
-    resolve_flate_decode_parameters,
+    inspect_object_consumer_index, resolve_flate_decode_parameters,
 };
 use presslint_syntax::{serialize_tokens_unmodified, tokenize};
 use presslint_types::{ByteRange, PageIndex};
@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     PlannedWriteError, WriteError,
+    content_object_ownership::ContentObjectOwnershipIndex,
     content_stream_plan::{
         LocatedContentStream, PageStreamsPlan, StreamMode, StreamOutcome, page_index_of,
         plan_page_streams,
@@ -303,7 +304,10 @@ where
     })?;
     let page_count = document.pages.len();
     let selected = select_indices(pages, page_count)?;
-    let owners = content_object_owners(&document.pages);
+    // One bounded document-wide traversal per request, from the same immutable
+    // input/access snapshot used by all subsequent ownership decisions.
+    let consumer_inspection = inspect_object_consumer_index(input, &access);
+    let ownership = ContentObjectOwnershipIndex::new(&document.pages, consumer_inspection);
     let extgstate_document = inspect_extgstate_document_for_preflight(
         input,
         lookup,
@@ -361,7 +365,7 @@ where
                             reason,
                         }),
                         StreamOutcome::Located(located) => {
-                            match plan_stream(input, &located, &owners, &edit) {
+                            match plan_stream(input, &located, &ownership, &edit) {
                                 StreamPlan::Edit { report, planned } => {
                                     edited.push(report);
                                     dirty_objects.push(planned);
@@ -601,34 +605,6 @@ fn select_indices(
     }
 }
 
-/// Build the per-content-object owner map from every enumerated page's
-/// `/Contents` references.
-///
-/// The key is the content-stream object; the value lists one owning leaf per
-/// direct `/Contents` occurrence (a page naming an object twice pushes it twice,
-/// so the ownership decision — which deduplicates — still proves single use).
-fn content_object_owners(
-    pages: &[DocumentPageContentExtentInspection],
-) -> BTreeMap<IndirectRef, Vec<IndirectRef>> {
-    let mut owners: BTreeMap<IndirectRef, Vec<IndirectRef>> = BTreeMap::new();
-    for page in pages {
-        // Only `Inspected` pages contribute `/Contents` owners here. Contents-failed
-        // and both compressed-leaf variants do not: the write pipeline never edits a
-        // compressed leaf (its dictionary has no editable source offset), so a
-        // `CompressedLeafInspected` page's resolved references are intentionally not
-        // threaded into ownership decisions by this READ-ONLY slice.
-        if let DocumentPageContentExtentResult::Inspected { contents, .. } = &page.result {
-            for reference in &contents.contents {
-                owners
-                    .entry(reference.reference)
-                    .or_default()
-                    .push(page.leaf.reference);
-            }
-        }
-    }
-    owners
-}
-
 /// Drop dirty objects that repeat an object number already planned, keeping the
 /// first. Same-object edits are identical, so this is a merge, not a loss.
 fn merge_duplicate_dirty_objects(dirty_objects: &mut Vec<PlannedDirtyObject>) {
@@ -649,7 +625,7 @@ enum StreamPlan {
 fn plan_stream<F>(
     input: &[u8],
     located: &LocatedContentStream<'_>,
-    owners: &BTreeMap<IndirectRef, Vec<IndirectRef>>,
+    ownership: &ContentObjectOwnershipIndex,
     edit: &F,
 ) -> StreamPlan
 where
@@ -670,11 +646,7 @@ where
     // OWNERSHIP unit = the content-stream OBJECT: an object referenced by more than
     // one page (or twice with distinct owners) is not a single-use in-place
     // mutation, so it is skipped (no private-copy yet).
-    let consumers = owners
-        .get(&content_object)
-        .map_or([].as_slice(), Vec::as_slice);
-    let occurrences = consumers.len();
-    let decision = decide_indirect_object_edit(content_object, consumers.iter().copied());
+    let (occurrences, decision) = ownership.decide(content_object);
     if decision.disposition != IndirectObjectEditDisposition::InPlaceMutation {
         return skip(PipelineSkipReason::OwnershipNotInPlace {
             occurrences,
