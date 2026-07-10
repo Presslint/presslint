@@ -2,6 +2,63 @@
 
 Earlier entries are preserved in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T177 - Page Device-Space Policy and Default-Colour Interlock
+
+One new private abstraction, `PageDeviceSpacePolicy`, is built once per
+analysed page: exact page DeviceGray/RGB/CMYK alias facts from the page
+`/Resources /ColorSpace` classification, plus one
+`Absent | Identity | Replaced | Unknown` status per device family from the
+`/Default*` classification. The two structural document inspections run ONCE
+per conversion request through the already-open `ObjectLookup`; their failure
+is advisory and never becomes a page or pipeline skip.
+
+Report pages join to content pages by EXACT leaf `IndirectRef` equality,
+corroborated by page object byte offset and document ordinal, never by
+compacted report vector position (inspectors may omit failed leaves). A
+missing, duplicate, or inconsistent match degrades to unknown facts.
+
+The converter's single paint walk now receives the policy's borrowed
+`ColorSpaceEnv` instead of the always-empty one, so exact page device aliases
+resolve in graphics state across ordered `/Contents`, `q`/`Q`, and carried
+colour state with no paint or PDF API change. Only aliases whose OWN
+classified terminal family is exactly a device family with component count
+1/3/4 enter the environment, and only while that family's default status is
+`Absent` or `Identity`; built-in names, abbreviations, and the `/Default*`
+keys are never alias candidates and can never shadow the built-ins. A
+duplicate alias name is retained only as an ineligible decision and never
+enters the environment.
+
+Exact numeric `sc`/`SC`/`scn`/`SCN` setters under classified page device
+aliases are counted READ-ONLY as `resource_alias_setters_eligible` /
+`resource_alias_setters_ineligible` (additive serde fields, omitted at zero).
+Eligibility requires the eligible alias decision, side/case agreement, the
+resolved policy family, exact component count, single finite numeric operand
+tokens in `[0,1]` with no trailing name/Pattern operand, and a record range
+that localizes to one physical occurrence. No alias, selection, or setter
+byte changes; no selector, routing, black-preservation, or LCMS dry-run is
+performed for aliases. The selected alias comes from the existing
+pre-operator paint snapshot, so a distinct trailing Pattern name is still
+counted as an ineligible setter rather than becoming uncounted.
+
+BEHAVIOUR CHANGE (fail-closed safety correction): a selected + routed direct
+`g/G`, `rg/RG`, `k/K` conversion now proceeds only when BOTH the source and
+the emitted destination device family are proven `Absent` or `Identity` for
+their matching `/Default*`; otherwise the operator stays byte-verbatim and is
+counted in the additive `OperatorSkipCounts::default_color_space_unsafe`.
+`MissingResources` alone proves absence; a general `Resources` failure
+poisons all families and takes precedence over it; a family-specific
+malformed/duplicate/unresolved/unclassified default poisons only its family.
+The interlock runs after selector and route (which keep their old counts) and
+before black preservation and the LCMS apply; safe families on the same page
+still convert. Public request, selector vocabulary, ownership, append-only
+prefix, page atomicity, and all zero-count serde shapes are unchanged.
+
+DEFERRED (closed-epoch contract for the next slices): no alias conversion, no
+`cs/CS/sc/scn` rewrite, no synthetic initial-colour insertion, no zero-width
+splice, no resource mutation or destination resource creation, and no form
+descent - the read-only eligibility counts are the input for the future
+closed alias-epoch proof/refusal abstraction and its dry-run/atomic apply.
+
 ## T176 - Exact Logical Page Content
 
 The direct-device converter now treats an ordered page `/Contents` array as one

@@ -31,7 +31,9 @@ use presslint_pdf::{
     IndirectObjectEditDisposition, IndirectRef, ObjectLookup, PageExtGStateResourcesInspection,
     PageTransparencyGroupInspection, classify_content_stream_filter, content_stream_data_slice,
     decode_flate_stream, encode_flate_stream, inspect_document_access,
+    inspect_document_page_color_space_resources_with_lookup,
     inspect_document_page_content_extents_with_lookup,
+    inspect_document_page_default_color_spaces_with_lookup,
     inspect_document_page_extgstate_resources_with_lookup,
     inspect_document_page_transparency_groups_with_lookup, inspect_indirect_object_dictionary,
     inspect_object_consumer_index, resolve_flate_decode_parameters,
@@ -48,6 +50,7 @@ use crate::{
         plan_page_streams,
     },
     page_content_sequence::{OccurrenceInput, PageContentSequence, PhysicalObjectPlan},
+    page_device_space_policy::{PageColorFacts, PageColorFactsIndex},
     stream_object_body::build_stream_object_body,
     write_incremental_revision, write_incremental_revision_plan,
 };
@@ -261,6 +264,14 @@ struct PreparedSequenceObject<'a> {
 
 /// Decode, analyse, validate, encode, and publish each selected page atomically
 /// in exact logical `/Contents` order.
+///
+/// The edit closure additionally receives the page's advisory colour facts:
+/// the page `/Resources /ColorSpace` and `/Default*` structural inspections
+/// run ONCE per request through the same object lookup, and each report is
+/// matched to the content page by EXACT leaf page reference (corroborated by
+/// object offset and ordinal), never by compacted report vector position. A
+/// failed inspection or a failed match degrades to unknown facts and never
+/// skips the page.
 #[allow(clippy::too_many_lines)]
 pub fn edit_page_content_incremental_sequence<T, P, F>(
     input: &[u8],
@@ -275,7 +286,7 @@ where
         Option<&PageTransparencyGroupInspection>,
         &PageContentSequence,
     ) -> Option<PipelineSkipReason>,
-    F: Fn(PageIndex, &PageContentSequence) -> Option<PageSequenceEdit<T>>,
+    F: Fn(PageIndex, &PageContentSequence, &PageColorFacts<'_>) -> Option<PageSequenceEdit<T>>,
 {
     let access = inspect_document_access(input).map_err(|error| EditPageContentError::Open {
         error: Box::new(error),
@@ -309,6 +320,23 @@ where
         access.page_tree_root.object_byte_offset,
         true,
     );
+    // Advisory colour facts: both structural inspections run ONCE per request
+    // through the already-open lookup; a failed inspection degrades to unknown
+    // facts for every page rather than a new pipeline skip.
+    let color_space_document = inspect_document_page_color_space_resources_with_lookup(
+        input,
+        lookup,
+        access.page_tree_root.object_byte_offset,
+    )
+    .ok();
+    let default_document = inspect_document_page_default_color_spaces_with_lookup(
+        input,
+        lookup,
+        access.page_tree_root.object_byte_offset,
+    )
+    .ok();
+    let facts_index =
+        PageColorFactsIndex::new(color_space_document.as_ref(), default_document.as_ref());
     let mut published = Vec::new();
     let mut skipped = Vec::new();
     let mut dirty_objects = Vec::new();
@@ -406,7 +434,12 @@ where
             skipped.push(whole_page_skip(page_index, reason));
             continue;
         }
-        let Some(page_edit) = edit(page_index, &sequence) else {
+        let facts = facts_index.facts_for(
+            page.leaf.reference,
+            page.leaf.object_byte_offset,
+            page.ordinal,
+        );
+        let Some(page_edit) = edit(page_index, &sequence, &facts) else {
             skipped.push(whole_page_skip(
                 page_index,
                 PipelineSkipReason::ContentRoundTripMismatch,

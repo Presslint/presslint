@@ -23,6 +23,8 @@ fn convert_report_warns_on_zero_conversion_and_skips() {
             }],
             operators_converted: 0,
             black_preserved: 0,
+            resource_alias_setters_eligible: 0,
+            resource_alias_setters_ineligible: 0,
             operator_skips: OperatorSkipCounts {
                 no_matching_link: 2,
                 selector_excluded: 1,
@@ -62,9 +64,12 @@ fn human_convert_report_surfaces_page_coverage_counts() {
             }],
             operators_converted: 3,
             black_preserved: 1,
+            resource_alias_setters_eligible: 5,
+            resource_alias_setters_ineligible: 2,
             operator_skips: OperatorSkipCounts {
                 no_matching_link: 4,
                 selector_excluded: 2,
+                default_color_space_unsafe: 3,
                 ..OperatorSkipCounts::default()
             },
             links: Vec::<LinkConversionCounts>::new(),
@@ -80,24 +85,54 @@ fn human_convert_report_surfaces_page_coverage_counts() {
     assert!(rendered.contains("black preserved: 1"));
     assert!(rendered.contains("no matching link: 4"));
     assert!(rendered.contains("selector excluded: 2"));
-    assert!(rendered.contains("page 2: converted=3 black_preserved=1"));
+    assert!(rendered.contains("alias setters eligible: 5"));
+    assert!(rendered.contains("alias setters ineligible: 2"));
+    assert!(rendered.contains("default color-space unsafe: 3"));
+    assert!(rendered.contains(
+        "page 2: converted=3 black_preserved=1 no_matching_link=4 selector_excluded=2 alias_eligible=5 alias_ineligible=2 default_unsafe=3"
+    ));
+}
+
+#[test]
+fn default_color_space_unsafe_is_a_deterministic_coverage_warning() {
+    let output = ConvertContentColorsOutput {
+        bytes: Vec::new(),
+        converted: vec![converted_page_with_counts(0, 0, 2)],
+        skipped: Vec::new(),
+    };
+
+    assert_eq!(
+        convert_warnings(&output),
+        vec![
+            "coverage gaps or skips observed: no_matching_link=0 selector_excluded=0 invalid_operands=0 default_color_space_unsafe=2 skipped_pages=0"
+                .to_owned()
+        ]
+    );
+}
+
+#[test]
+fn human_convert_report_renders_zero_alias_and_default_totals_deterministically() {
+    let output = ConvertContentColorsOutput {
+        bytes: Vec::new(),
+        converted: vec![converted_page_with_counts(0, 0, 0)],
+        skipped: Vec::new(),
+    };
+    let mut rendered = Vec::new();
+
+    render_convert_human(&mut rendered, &output, &[]).unwrap();
+    let rendered = String::from_utf8(rendered).unwrap();
+
+    assert!(rendered.contains("alias setters eligible: 0"));
+    assert!(rendered.contains("alias setters ineligible: 0"));
+    assert!(rendered.contains("default color-space unsafe: 0"));
+    assert!(rendered.contains("alias_eligible=0 alias_ineligible=0 default_unsafe=0"));
 }
 
 #[test]
 fn json_convert_report_wraps_library_output_and_omits_pdf_bytes() {
     let report = RunReport::convert(ConvertContentColorsOutput {
         bytes: b"%PDF bytes must not appear in JSON".to_vec(),
-        converted: vec![ConvertedPage {
-            page_index: PageIndex(0),
-            content_objects: vec![IndirectRef {
-                object_number: 4,
-                generation: 0,
-            }],
-            operators_converted: 2,
-            black_preserved: 1,
-            operator_skips: OperatorSkipCounts::default(),
-            links: Vec::<LinkConversionCounts>::new(),
-        }],
+        converted: vec![converted_page_with_counts(0, 0, 0)],
         skipped: Vec::new(),
     });
 
@@ -113,6 +148,45 @@ fn json_convert_report_wraps_library_output_and_omits_pdf_bytes() {
     let converted = &result["library_output"]["converted"][0];
     assert!(converted.get("content_objects").is_some());
     assert!(converted.get("content_object").is_none());
+}
+
+#[test]
+fn json_convert_report_omits_zero_alias_and_default_counts() {
+    // Additive counts at zero must not change the existing JSON shape.
+    let report = RunReport::convert(ConvertContentColorsOutput {
+        bytes: Vec::new(),
+        converted: vec![converted_page_with_counts(0, 0, 0)],
+        skipped: Vec::new(),
+    });
+
+    let rendered: Value = serde_json::from_str(&report.to_json_string().unwrap()).unwrap();
+    let converted = &rendered["result"]["library_output"]["converted"][0];
+
+    assert!(converted.get("resource_alias_setters_eligible").is_none());
+    assert!(converted.get("resource_alias_setters_ineligible").is_none());
+    assert!(
+        converted["operator_skips"]
+            .get("default_color_space_unsafe")
+            .is_none()
+    );
+    // The pre-existing skip counts keep their always-present shape.
+    assert_eq!(converted["operator_skips"]["no_matching_link"], 0);
+}
+
+#[test]
+fn json_convert_report_serializes_nonzero_alias_and_default_counts() {
+    let report = RunReport::convert(ConvertContentColorsOutput {
+        bytes: Vec::new(),
+        converted: vec![converted_page_with_counts(5, 2, 3)],
+        skipped: Vec::new(),
+    });
+
+    let rendered: Value = serde_json::from_str(&report.to_json_string().unwrap()).unwrap();
+    let converted = &rendered["result"]["library_output"]["converted"][0];
+
+    assert_eq!(converted["resource_alias_setters_eligible"], 5);
+    assert_eq!(converted["resource_alias_setters_ineligible"], 2);
+    assert_eq!(converted["operator_skips"]["default_color_space_unsafe"], 3);
 }
 
 #[test]
@@ -139,6 +213,30 @@ fn human_audit_report_surfaces_default_color_space_count() {
 
     assert!(rendered.contains("default color-space findings: 0"));
     assert!(rendered.contains("icc-based findings: 0"));
+}
+
+/// Public struct-literal shape lock for the additive per-page counts.
+fn converted_page_with_counts(
+    alias_eligible: usize,
+    alias_ineligible: usize,
+    default_unsafe: usize,
+) -> ConvertedPage {
+    ConvertedPage {
+        page_index: PageIndex(0),
+        content_objects: vec![IndirectRef {
+            object_number: 4,
+            generation: 0,
+        }],
+        operators_converted: 2,
+        black_preserved: 1,
+        resource_alias_setters_eligible: alias_eligible,
+        resource_alias_setters_ineligible: alias_ineligible,
+        operator_skips: OperatorSkipCounts {
+            default_color_space_unsafe: default_unsafe,
+            ..OperatorSkipCounts::default()
+        },
+        links: Vec::<LinkConversionCounts>::new(),
+    }
 }
 
 fn synthetic_audit() -> ColorUsageAudit {

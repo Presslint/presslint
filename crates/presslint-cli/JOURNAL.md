@@ -1,5 +1,21 @@
 # presslint-cli Journal
 
+## T177: convert report alias-eligibility and Default-safety counts
+
+- Human `presslint convert` totals now include three deterministic lines:
+  `alias setters eligible`, `alias setters ineligible`, and
+  `default color-space unsafe`; each per-page line appends
+  `alias_eligible=`, `alias_ineligible=`, and `default_unsafe=`.
+- JSON output stays the wrapped library report. The additive per-page fields
+  `resource_alias_setters_eligible` / `resource_alias_setters_ineligible` and
+  `operator_skips.default_color_space_unsafe` are omitted at zero, so every
+  existing zero-count JSON shape is byte-compatible.
+- Command names, flags, and selector help are unchanged: the converter still
+  converts only the six direct device shortcut operators and merely REPORTS
+  resource-alias eligibility and Default-safety refusals. The existing
+  coverage warning deterministically includes the nonzero/zero
+  `default_color_space_unsafe` tally alongside its other skip counters.
+
 ## T164: audit report default colour-space count
 
 - Human `presslint audit` output now includes the

@@ -5,9 +5,12 @@
 //! interpreter and splices at each event's record range. These tests pin the
 //! page-sequence invariants (exact token coverage, single
 //! assembly, refusal shapes) and that ONLY the six exact direct device shortcut
-//! operators (`g`/`G`, `rg`/`RG`, `k`/`K`) are eligible — resource colour
-//! operators, lookalike operator bytes, and payload text resembling a shortcut
-//! all stay byte-verbatim.
+//! operators (`g`/`G`, `rg`/`RG`, `k`/`K`) are eligible for CONVERSION —
+//! resource colour operators, lookalike operator bytes, and payload text
+//! resembling a shortcut all stay byte-verbatim. Setters that are not under a
+//! classified page device alias are also excluded from the read-only alias
+//! eligibility counts (the resource-aware counts themselves are pinned in
+//! `content_color_convert_resource_space`).
 
 use presslint_paint::{ColorSpaceEnv, PaintProgram};
 use presslint_pdf::{IndirectObjectEditDisposition, IndirectRef};
@@ -114,11 +117,15 @@ fn sc_at_default_device_gray_state_is_not_eligible() {
     // `0.5 sc` sets the default DeviceGray nonstroking colour, so the paint
     // walk emits a DeviceGray colour event — but the operator bytes are `sc`,
     // not `g`, so it is ineligible and UNCOUNTED even with a Gray link routed.
+    // Without a selecting page device alias it is also excluded from the
+    // read-only alias eligibility counts.
     let input = classic_raw_pdf(b"0.5 sc\n");
     let output = convert(&input, GRAY_TO_GRAY_LINK);
 
     assert_eq!(output.converted.len(), 1);
     assert_eq!(output.converted[0].operators_converted, 0);
+    assert_eq!(output.converted[0].resource_alias_setters_eligible, 0);
+    assert_eq!(output.converted[0].resource_alias_setters_ineligible, 0);
     assert_eq!(
         output.converted[0].operator_skips,
         OperatorSkipCounts::default()
@@ -137,6 +144,10 @@ fn resource_colour_space_operators_stay_verbatim_next_to_a_converted_shortcut() 
     let output = convert(&input, RGB_TO_CMYK_LINK);
 
     assert_eq!(output.converted[0].operators_converted, 1);
+    // `/CS0` is not a classified page device alias (the fixture has no
+    // resources), so no setter enters the alias eligibility counts either.
+    assert_eq!(output.converted[0].resource_alias_setters_eligible, 0);
+    assert_eq!(output.converted[0].resource_alias_setters_ineligible, 0);
     assert_eq!(
         output.converted[0].operator_skips,
         OperatorSkipCounts::default()
