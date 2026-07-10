@@ -2,6 +2,89 @@
 
 Earlier entries are preserved in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T178 - Closed Page-Alias Epoch Proof and Refusal Plan
+
+One new private abstraction, `AliasEpochPlan`, sits between the per-setter
+structural alias classification and the first alias conversion. It observes
+EVERY successfully walked op of the existing single logical-page paint walk —
+before the converter's colour-only branch — with no second tokenization,
+assembly, replay, or paint API change. The pre-op snapshot is now seeded
+explicitly from the exact PDF page-default graphics state; each later op
+carries the previous shared post-op snapshot by `Rc` reference.
+
+An epoch starts when an exact ELIGIBLE `/Alias cs`/`/Alias CS` selects a
+classified page device alias on one lane. Selecting the space resets the lane
+colour (ISO 32000-1 §8.6.3), so the selection record itself is the epoch's
+first symbolic candidate carrying the exact initial source tuple (`[0]`,
+`[0,0,0]`, `[0,0,0,1]`), retained untransformed even when a supported path
+paint consumes it before any explicit setter. Each epoch pairs symbolic
+source state (alias identity, device family, walker-carried tuple) with
+symbolic emitted state (the ONE prepared route fixed at selection:
+destination family plus link identity). Each live branch carries its own
+pending source tuple; an explicit eligible setter becomes the branch's new
+pending value. `q` copies both lane pairs — tuple included — and `Q` discards
+frame-local branches and restores the saved pairs exactly, so a paint after
+`Q` is proved against the RESTORED tuple, never against alias name and
+family alone. Every `q`-derived branch carrying a root epoch is proved or
+refused atomically with that root, a nested alias selection is an
+independent epoch, and independent root epochs never poison each other (even
+under the same alias name).
+
+A root epoch closes only when every candidate passes: exact source
+family/shape, canonical selector match on its SOURCE facts (one excluded
+candidate refuses the complete root, never a prefix), one prepared route,
+source+destination raw-device `/Default*` safety, whole-record localization
+to one physical occurrence with in-place ownership, repeated-reference
+consistency (identical candidate/no-candidate decisions and identical
+symbolic facts for every occurrence of the same physical record — EVERY root
+relying on a record is accumulated, one divergent occurrence refuses them
+all, and the record stays permanently poisoned for any later root), strict
+operator/consumer admission, and page-end closure at zero `q` depth. Path
+paint consumers map exactly (`S`/`s` stroke; `f`/`F`/`f*` fill; `B`/`B*`/
+`b`/`b*` both; `n` neither); `sh` is neutral to the current colour. A closed
+epoch with no consumer is a private no-op candidate and authorizes no byte
+change. Native transform construction and the LCMS apply are deliberately NOT
+proven: the dry-run of every retained candidate plus the atomic conversion is
+the next slice.
+
+Fail-closed boundaries while an alias is live anywhere (current lanes or
+saved frames): text showing regardless of `Tr` (no effective font/subtype in
+the snapshot; Type3 glyphs inherit state), `Do`, `BI`/`ID`/`EI`, `d0`/`d1`,
+`BX`/`EX`, Pattern-name or otherwise ineligible/unclassifiable setters inside
+an active epoch, unknown/non-allowlisted operators, known-invalid
+graphics-object placement per ISO 32000-1 §8.2 (both the text-object AND the
+path-object lifecycle are tracked: unbalanced `BT`/`ET`, `EMC` underflow,
+`q`/`Q`/`cm`/path/shading operators inside a text object, path continuation
+or clipping without an open path, any non-path operator — colour selection
+and setters included — inside an open `m`/`re` path object, and a text or
+path object left open at page end), and any raw-operator/plan/snapshot
+disagreement. The colour-neutral allowlist admits exactly: path
+construction/clipping, `sh`, line/rendering parameters, `cm`, `gs` (after the
+existing whole-page ExtGState/transparency-group preflight), `Tr`, text state
+and positioning without showing, and marked-content delimiters/points — each
+only in a graphics-object context that admits it. `Q`
+underflow remains the existing whole-page walk failure; a non-empty shadow
+`q` stack at page end refuses EVERY alias plan for the page (§8.4.2 requires
+balance), while structural counts keep their per-setter meaning.
+
+The plan replaces the isolated per-setter tally path as the SOLE production
+source of `resource_alias_setters_eligible/ineligible`, delegating to the
+unchanged `PageDeviceSpacePolicy::classify_alias_setter`, so both fields keep
+exactly their prior structural per-setter meaning (a structurally eligible
+setter may sit inside a refused epoch). The policy gains one crate-private
+exact-name `alias_decision` lookup; classification and `/Default*` authority
+are unchanged. Closed/refused epoch status stays crate-private (no public
+count, refusal list, serde, CLI, or report change) until a converted alias
+byte exists. Direct-device conversion bytes, decision order, skip/link
+counts, page atomicity, selector vocabulary, and the append-only prefix are
+byte-for-byte unchanged.
+
+KNOWN CONSERVATIVE LIMITS (deliberate): every text show is a refusal
+boundary (no font inspection), every `Do` refuses a live epoch (no
+form/image classification), inline images and Type3 metrics always refuse,
+and a boundary refuses a root even while its only live branch is suspended
+in a saved frame. Later slices relax these case by case.
+
 ## T177 - Page Device-Space Policy and Default-Colour Interlock
 
 One new private abstraction, `PageDeviceSpacePolicy`, is built once per

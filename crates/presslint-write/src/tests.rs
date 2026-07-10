@@ -6,6 +6,7 @@
     clippy::too_many_lines
 )]
 
+mod alias_epoch_plan;
 mod append;
 mod content_color_convert;
 mod content_color_convert_malformed;

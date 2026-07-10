@@ -50,6 +50,7 @@
 
 #![forbid(unsafe_code)]
 
+mod alias_epoch_plan;
 mod black_preservation;
 mod content_color_convert;
 mod content_color_rewrite;

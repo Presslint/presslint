@@ -44,9 +44,10 @@
 #![allow(clippy::doc_markdown)]
 
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 use presslint_color_lcms::{ColorEngine, DeviceLinkSpace, LcmsColorEngine, LcmsError};
-use presslint_paint::{PaintOp, PaintOpKind, PaintProgram};
+use presslint_paint::{GraphicsStateSnapshot, PaintOpKind, PaintProgram};
 use presslint_pdf::{
     DictionaryValueKind, DocumentAccessError, IndirectObjectEditDisposition, IndirectRef,
 };
@@ -56,6 +57,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     PlannedWriteError, WriteError,
+    alias_epoch_plan::AliasEpochPlan,
     black_preservation::{BlackPreservationPolicy, black_preservation_replacement},
     content_edit_pipeline::{
         EditPageContentError, PageSelection, PageSequenceEdit, PipelinePageSkip,
@@ -64,9 +66,7 @@ use crate::{
     extgstate_page_guard::{extgstate_page_skip_reason, transparency_group_page_skip_reason},
     link_routing::{DeviceLinkInput, LinkConversionCounts, LinkRouting, build_link_routing},
     page_content_sequence::{LocalSplice, PageContentSequence},
-    page_device_space_policy::{
-        AliasSetterClass, AliasSetterEvent, PageColorFacts, PageDeviceSpacePolicy,
-    },
+    page_device_space_policy::{PageColorFacts, PageDeviceSpacePolicy},
     pdf_number_serialize::serialize_color_component,
     selector_match::{
         UnsupportedTargetLeaf, collect_unsupported_leaves, selector_matches_operator,
@@ -379,7 +379,7 @@ impl DeviceColorSpace {
 }
 
 /// Classify an operator token's source bytes as a direct device colour operator.
-const fn classify_operator(operator: &[u8]) -> Option<(DeviceColorSpace, bool)> {
+pub const fn classify_operator(operator: &[u8]) -> Option<(DeviceColorSpace, bool)> {
     match operator {
         b"g" => Some((DeviceColorSpace::Gray, false)),
         b"G" => Some((DeviceColorSpace::Gray, true)),
@@ -491,9 +491,11 @@ pub fn convert_content_colors_incremental(
 /// eligible only when the EXACT bytes at its operator range are one of the
 /// direct device shortcuts (`g`/`G`, `rg`/`RG`, `k`/`K`). Resource colour
 /// selection (`cs`/`CS` + `sc`/`scn`/`SC`/`SCN`) also emits colour events but
-/// never has shortcut operator bytes, so it stays byte-verbatim (setters under
-/// page device aliases are counted read-only); conversion eligibility is
-/// never inferred from device state or a resource name. The event's parsed
+/// never has shortcut operator bytes, so it stays byte-verbatim; conversion
+/// eligibility is never inferred from device state or a resource name. Every
+/// walked op is first observed by the private [`AliasEpochPlan`], which owns
+/// the read-only structural alias-setter tallies and the private closed/
+/// refused epoch statuses without changing any byte. The event's parsed
 /// [`presslint_paint::GraphicsColor`] components and its record range drive the
 /// splice.
 ///
@@ -523,6 +525,11 @@ fn convert_sequence(
     // the per-family /Default* statuses gate the direct shortcut route.
     let policy = PageDeviceSpacePolicy::from_page_facts(facts);
     let program = PaintProgram::new(decoded, sequence.records(), policy.color_space_env());
+    // The alias-epoch plan observes EVERY walked op before the colour-only
+    // branch below. It is the sole producer of the structural alias-setter
+    // tallies (unchanged T177 per-setter meaning) and privately retains
+    // closed/refused epoch candidates; it changes no byte and runs no LCMS.
+    let mut plan = AliasEpochPlan::new(&policy, routing, target, page_index, sequence);
     let mut tallies: Vec<PageTally> = (0..sequence.occurrence_count())
         .map(|_| PageTally {
             link_converted: vec![0; routing.links().len()],
@@ -530,33 +537,27 @@ fn convert_sequence(
         })
         .collect();
     let mut occurrence_plans = vec![Vec::new(); sequence.occurrence_count()];
-    // Retain only the immediately preceding shared snapshot. This is the
-    // selected colour-space state before the current operator and costs one
-    // `Rc` bump per record, not a deep graphics-state clone or second walk.
-    let mut previous_state = None;
+    // Retain only the immediately preceding shared snapshot, seeded with the
+    // exact PDF page-default graphics state. This is the selected colour-space
+    // state before the current operator and costs one `Rc` bump per record,
+    // not a deep graphics-state clone or second walk.
+    let mut previous_state = Rc::new(GraphicsStateSnapshot::page_default());
 
     for op in program.ops() {
         // A walk error refuses the ENTIRE page: all candidates are discarded.
         let op = op.ok()?;
-        let state_before = previous_state.replace(op.state.clone());
+        let state_before = std::mem::replace(&mut previous_state, Rc::clone(&op.state));
+        let operator = decoded.get(op.operator_range.start()..op.operator_range.end())?;
+        plan.observe(&op, operator, &state_before, sequence);
         let (PaintOpKind::SetStrokingColor { color } | PaintOpKind::SetNonstrokingColor { color }) =
             &op.kind
         else {
             continue;
         };
-        let operator = decoded.get(op.operator_range.start()..op.operator_range.end())?;
         // Exact shortcut bytes decide eligibility. A colour event whose
         // operator is not one of the six shortcuts is left verbatim; exact
-        // alias setters are additionally classified READ-ONLY for reporting.
+        // alias setters were already classified READ-ONLY by the plan above.
         let Some((space, stroking)) = classify_operator(operator) else {
-            tally_alias_setter(
-                &policy,
-                sequence,
-                &op,
-                operator,
-                state_before.as_deref(),
-                &mut tallies,
-            );
             continue;
         };
         let operator_location = sequence.localize(op.operator_range)?;
@@ -631,6 +632,15 @@ fn convert_sequence(
         tally.link_converted[link.index] += 1;
     }
 
+    // Close the plan BEFORE physical reconciliation: page-end closure decides
+    // the private epoch statuses, and only the structural per-occurrence
+    // setter tallies feed the public report in this slice.
+    let alias_outcome = plan.finish();
+    for (index, tally) in tallies.iter_mut().enumerate() {
+        tally.alias_setters_eligible = alias_outcome.eligible_setters[index];
+        tally.alias_setters_ineligible = alias_outcome.ineligible_setters[index];
+    }
+
     let plans = sequence.reconcile(occurrence_plans)?;
     let mut content_objects = Vec::new();
     let mut total = PageTally {
@@ -669,59 +679,6 @@ fn convert_sequence(
             links: link_counts(routing, &total.link_converted),
         },
     })
-}
-
-/// Classify one non-shortcut colour event as a page-alias setter, read-only.
-///
-/// Only exact `sc`/`SC`/`scn`/`SCN` bytes whose current colour was selected
-/// through a classified page device alias are counted; every other colour
-/// event stays uncounted exactly as before. The count is attributed to the
-/// physical occurrence holding the operator token; occurrences suppressed by
-/// ownership or repetition drop their tallies during aggregation like every
-/// other per-occurrence count. No splice is ever produced here.
-fn tally_alias_setter(
-    policy: &PageDeviceSpacePolicy,
-    sequence: &PageContentSequence,
-    op: &PaintOp,
-    operator: &[u8],
-    state_before: Option<&presslint_paint::GraphicsStateSnapshot>,
-    tallies: &mut [PageTally],
-) {
-    let (stroking, color) = match &op.kind {
-        PaintOpKind::SetStrokingColor { color } => (true, color),
-        PaintOpKind::SetNonstrokingColor { color } => (false, color),
-        _ => return,
-    };
-    let selected_resource_name = state_before.and_then(|state| {
-        if stroking {
-            state.stroking_color.resource_name.as_ref()
-        } else {
-            state.nonstroking_color.resource_name.as_ref()
-        }
-    });
-    let Some(record) = sequence.records().get(op.index) else {
-        return;
-    };
-    let event = AliasSetterEvent {
-        operator,
-        stroking,
-        selected_resource_name,
-        color,
-        record,
-        tokens: sequence.tokens(),
-        localized: sequence.localize(op.record_range).is_some(),
-    };
-    let Some(class) = policy.classify_alias_setter(&event) else {
-        return;
-    };
-    let Some(location) = sequence.localize(op.operator_range) else {
-        return;
-    };
-    let tally = &mut tallies[location.occurrence_index];
-    match class {
-        AliasSetterClass::Eligible => tally.alias_setters_eligible += 1,
-        AliasSetterClass::Ineligible => tally.alias_setters_ineligible += 1,
-    }
 }
 
 /// Build `<serialized components joined by single spaces> <dest operator>`.

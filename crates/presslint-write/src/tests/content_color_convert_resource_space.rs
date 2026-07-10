@@ -409,6 +409,46 @@ fn ownership_vetoed_alias_selection_still_feeds_a_private_setter() {
     assert_eq!(occurrence_count(&output.bytes, b"5 0 obj"), 1);
 }
 
+#[test]
+fn conservative_epoch_boundaries_keep_counts_bytes_and_direct_conversion() {
+    // Text showing, XObject invocation, compatibility sections, and unknown
+    // operators refuse only the PRIVATE alias epoch: the structural setter
+    // counts, every alias byte, and the neighbouring direct shortcut
+    // conversion are all unchanged.
+    let stream = b"/GrayAlias cs 0.5 sc BT (x) Tj ET /Fm Do BX EX XY 1 0 0 rg\n";
+    let input = resource_pdf(stream, ALIAS_RESOURCES);
+    let output = convert(&input, RGB_TO_CMYK_LINK);
+
+    let page = &output.converted[0];
+    assert_eq!(page.resource_alias_setters_eligible, 1);
+    assert_eq!(page.resource_alias_setters_ineligible, 0);
+    assert_eq!(page.operators_converted, 1);
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    let decoded = page_decoded_stream(&output.bytes, false);
+    assert!(contains(&decoded, b"/GrayAlias cs 0.5 sc"));
+    assert!(contains(&decoded, b"BT (x) Tj ET /Fm Do BX EX XY"));
+    assert!(!contains(&decoded, b" rg"));
+}
+
+#[test]
+fn trailing_unmatched_save_keeps_counts_and_direct_conversion() {
+    // The walker tolerates a trailing unmatched q; the plan privately refuses
+    // every alias epoch for the page while the public structural counts and
+    // the direct shortcut conversion stay exactly as before.
+    let stream = b"q /GrayAlias cs 0.5 sc f 1 0 0 rg\n";
+    let input = resource_pdf(stream, ALIAS_RESOURCES);
+    let output = convert(&input, RGB_TO_CMYK_LINK);
+
+    let page = &output.converted[0];
+    assert_eq!(page.resource_alias_setters_eligible, 1);
+    assert_eq!(page.resource_alias_setters_ineligible, 0);
+    assert_eq!(page.operators_converted, 1);
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    let decoded = page_decoded_stream(&output.bytes, false);
+    assert!(contains(&decoded, b"q /GrayAlias cs 0.5 sc f"));
+    assert!(!contains(&decoded, b" rg"));
+}
+
 // --- The fail-closed /Default* interlock --------------------------------------
 
 #[test]

@@ -40,7 +40,11 @@ fn definition(family: ColorSpaceFamily, count: usize) -> ClassifiedColorSpaceDef
     }
 }
 
-fn resource(name: &str, family: ColorSpaceFamily, count: usize) -> ClassifiedColorSpaceResource {
+pub(super) fn resource(
+    name: &str,
+    family: ColorSpaceFamily,
+    count: usize,
+) -> ClassifiedColorSpaceResource {
     ClassifiedColorSpaceResource {
         name: PdfObjectName(name.as_bytes().to_vec()),
         family,
@@ -56,7 +60,7 @@ fn resource(name: &str, family: ColorSpaceFamily, count: usize) -> ClassifiedCol
     }
 }
 
-fn color_report(
+pub(super) fn color_report(
     color_spaces: Vec<ClassifiedColorSpaceResource>,
 ) -> PageColorSpaceResourcesInspection {
     PageColorSpaceResourcesInspection {
@@ -68,7 +72,7 @@ fn color_report(
     }
 }
 
-fn defaults_report(
+pub(super) fn defaults_report(
     defaults: Vec<DefaultColorSpaceFact>,
     skipped: Vec<SkippedDefaultColorSpace>,
 ) -> PageDefaultColorSpacesInspection {
@@ -81,7 +85,10 @@ fn defaults_report(
     }
 }
 
-fn default_fact(kind: DefaultColorSpaceKind, family: ColorSpaceFamily) -> DefaultColorSpaceFact {
+pub(super) fn default_fact(
+    kind: DefaultColorSpaceKind,
+    family: ColorSpaceFamily,
+) -> DefaultColorSpaceFact {
     DefaultColorSpaceFact {
         kind,
         color_space: definition(family, 3),
@@ -191,11 +198,11 @@ fn classify_setters(
     classes
 }
 
-fn absent_defaults() -> PageDefaultColorSpacesInspection {
+pub(super) fn absent_defaults() -> PageDefaultColorSpacesInspection {
     defaults_report(Vec::new(), vec![missing_resources()])
 }
 
-fn three_aliases() -> PageColorSpaceResourcesInspection {
+pub(super) fn three_aliases() -> PageColorSpaceResourcesInspection {
     color_report(vec![
         resource("CmykAlias", ColorSpaceFamily::DeviceCmyk, 4),
         resource("GrayAlias", ColorSpaceFamily::DeviceGray, 1),
@@ -421,6 +428,84 @@ fn duplicate_device_alias_is_retained_only_as_ineligible() {
         classify_setters(&policy, b"/GrayAlias cs 0.5 sc\n", true),
         vec![Some(AliasSetterClass::Ineligible)]
     );
+}
+
+// --- Exact alias-decision lookup ------------------------------------------------
+
+#[test]
+fn alias_decision_lookup_is_exact_name_identity() {
+    let color_spaces = three_aliases();
+    let defaults = absent_defaults();
+    let policy = policy(Some(&color_spaces), Some(&defaults));
+
+    let decision = policy
+        .alias_decision(&PdfName(b"GrayAlias".to_vec()))
+        .expect("gray decision");
+    assert_eq!(decision.space, DeviceColorSpace::Gray);
+    assert!(decision.eligible);
+    let decision = policy
+        .alias_decision(&PdfName(b"CmykAlias".to_vec()))
+        .expect("cmyk decision");
+    assert_eq!(decision.space, DeviceColorSpace::Cmyk);
+
+    // Exact identity only: case variants and near-names never match.
+    assert!(
+        policy
+            .alias_decision(&PdfName(b"grayalias".to_vec()))
+            .is_none()
+    );
+    assert!(
+        policy
+            .alias_decision(&PdfName(b"GrayAlias2".to_vec()))
+            .is_none()
+    );
+    assert!(
+        policy
+            .alias_decision(&PdfName(b"GrayAlia".to_vec()))
+            .is_none()
+    );
+}
+
+#[test]
+fn alias_decision_excludes_reserved_and_non_device_names() {
+    let color_spaces = color_report(vec![
+        resource("DefaultRGB", ColorSpaceFamily::DeviceRgb, 3),
+        resource("DeviceRGB", ColorSpaceFamily::DeviceCmyk, 4),
+        resource("Icc", ColorSpaceFamily::IccBased, 3),
+        resource("Sep", ColorSpaceFamily::Separation, 1),
+    ]);
+    let defaults = absent_defaults();
+    let policy = policy(Some(&color_spaces), Some(&defaults));
+    for name in ["DefaultRGB", "DeviceRGB", "Icc", "Sep"] {
+        assert!(
+            policy
+                .alias_decision(&PdfName(name.as_bytes().to_vec()))
+                .is_none(),
+            "{name} never has a decision"
+        );
+    }
+}
+
+#[test]
+fn alias_decision_keeps_an_unsafe_family_alias_as_ineligible_fact() {
+    let color_spaces = three_aliases();
+    let defaults = defaults_report(
+        vec![default_fact(
+            DefaultColorSpaceKind::DefaultGray,
+            ColorSpaceFamily::DeviceCmyk,
+        )],
+        Vec::new(),
+    );
+    let policy = policy(Some(&color_spaces), Some(&defaults));
+    let decision = policy
+        .alias_decision(&PdfName(b"GrayAlias".to_vec()))
+        .expect("retained ineligible fact");
+    assert!(!decision.eligible);
+    // The sibling family with a safe default stays eligible.
+    let decision = policy
+        .alias_decision(&PdfName(b"RgbAlias".to_vec()))
+        .expect("rgb decision");
+    assert!(decision.eligible);
 }
 
 // --- Exact setter classification ----------------------------------------------

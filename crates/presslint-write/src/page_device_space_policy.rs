@@ -157,6 +157,19 @@ impl PageDeviceSpacePolicy {
             && self.default_status(destination).is_raw_device()
     }
 
+    /// Exact-name lookup of one page device-alias decision.
+    ///
+    /// This is the crate-private fact a lane epoch starts from: the alias's
+    /// OWN classified terminal device family plus whether it entered the
+    /// paint environment. Built-in names, `/Default*` keys, and non-device
+    /// families never have a decision, so they can never start an epoch.
+    #[must_use]
+    pub fn alias_decision(&self, name: &PdfName) -> Option<&AliasDecision> {
+        self.alias_decisions
+            .iter()
+            .find(|decision| &decision.name == name)
+    }
+
     /// Classify one exact `sc`/`SC`/`scn`/`SCN` event under a page alias.
     ///
     /// Returns `None` when the event is not an alias setter at all: wrong
@@ -171,11 +184,7 @@ impl PageDeviceSpacePolicy {
             b"SC" | b"SCN" => true,
             _ => return None,
         };
-        let name = event.selected_resource_name?;
-        let decision = self
-            .alias_decisions
-            .iter()
-            .find(|decision| &decision.name == name)?;
+        let decision = self.alias_decision(event.selected_resource_name?)?;
         let expected = family_component_count(decision.space);
         let structurally_eligible = decision.eligible
             && uppercase == event.stroking
@@ -448,7 +457,7 @@ const fn family_component_count(space: DeviceColorSpace) -> usize {
 }
 
 /// The paint colour space a device alias resolves to.
-const fn paint_color_space(space: DeviceColorSpace) -> ColorSpace {
+pub const fn paint_color_space(space: DeviceColorSpace) -> ColorSpace {
     match space {
         DeviceColorSpace::Gray => ColorSpace::DeviceGray,
         DeviceColorSpace::Rgb => ColorSpace::DeviceRgb,
