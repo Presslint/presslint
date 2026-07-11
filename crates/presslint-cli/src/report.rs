@@ -176,6 +176,18 @@ pub fn render_convert_human(
     .map_err(stderr_error)?;
     writeln!(
         out,
+        "  alias candidates converted: {}",
+        totals.alias_candidates_converted
+    )
+    .map_err(stderr_error)?;
+    writeln!(
+        out,
+        "  alias candidates refused: {}",
+        totals.alias_candidates_refused
+    )
+    .map_err(stderr_error)?;
+    writeln!(
+        out,
         "  default color-space unsafe: {}",
         totals.default_color_space_unsafe
     )
@@ -183,7 +195,7 @@ pub fn render_convert_human(
     for page in &output.converted {
         writeln!(
             out,
-            "  page {}: converted={} black_preserved={} no_matching_link={} selector_excluded={} alias_eligible={} alias_ineligible={} default_unsafe={}",
+            "  page {}: converted={} black_preserved={} no_matching_link={} selector_excluded={} alias_eligible={} alias_ineligible={} alias_converted={} alias_refused={} default_unsafe={}",
             page.page_index.0 + 1,
             page.operators_converted,
             page.black_preserved,
@@ -191,6 +203,8 @@ pub fn render_convert_human(
             page.operator_skips.selector_excluded,
             page.resource_alias_setters_eligible,
             page.resource_alias_setters_ineligible,
+            page.resource_alias_candidates_converted,
+            page.resource_alias_candidates_refused,
             page.operator_skips.default_color_space_unsafe
         )
         .map_err(stderr_error)?;
@@ -288,10 +302,11 @@ pub fn convert_warnings(output: &ConvertContentColorsOutput) -> Vec<String> {
     }
     if totals.coverage_gap_count() > 0 || !output.skipped.is_empty() {
         warnings.push(format!(
-            "coverage gaps or skips observed: no_matching_link={} selector_excluded={} invalid_operands={} default_color_space_unsafe={} skipped_pages={}",
+            "coverage gaps or skips observed: no_matching_link={} selector_excluded={} invalid_operands={} alias_candidates_refused={} default_color_space_unsafe={} skipped_pages={}",
             totals.no_matching_link,
             totals.selector_excluded,
             totals.invalid_operands,
+            totals.alias_candidates_refused,
             totals.default_color_space_unsafe,
             output.skipped.len()
         ));
@@ -308,6 +323,8 @@ struct ConvertTotals {
     invalid_operands: usize,
     alias_setters_eligible: usize,
     alias_setters_ineligible: usize,
+    alias_candidates_converted: usize,
+    alias_candidates_refused: usize,
     default_color_space_unsafe: usize,
 }
 
@@ -326,6 +343,8 @@ impl ConvertTotals {
                     + page.operator_skips.operand_out_of_range;
                 totals.alias_setters_eligible += page.resource_alias_setters_eligible;
                 totals.alias_setters_ineligible += page.resource_alias_setters_ineligible;
+                totals.alias_candidates_converted += page.resource_alias_candidates_converted;
+                totals.alias_candidates_refused += page.resource_alias_candidates_refused;
                 totals.default_color_space_unsafe += page.operator_skips.default_color_space_unsafe;
                 totals
             })
@@ -335,6 +354,7 @@ impl ConvertTotals {
         self.no_matching_link
             + self.selector_excluded
             + self.invalid_operands
+            + self.alias_candidates_refused
             + self.default_color_space_unsafe
     }
 }

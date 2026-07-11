@@ -1,4 +1,4 @@
-//! Closed page-alias epoch proof and refusal plan (read-only).
+//! Closed page-alias epoch proof and refusal plan.
 //!
 //! [`AliasEpochPlan`] is the ONE abstraction between the per-setter structural
 //! alias classification and the first alias conversion. It observes EVERY
@@ -6,9 +6,9 @@
 //! [`presslint_paint::PaintProgram`] walk — before the converter's colour-only
 //! branch — and proves, symbolically and byte-neutrally, which lane-specific
 //! alias epochs are CLOSED (every apply precondition holds structurally) and
-//! which are REFUSED (first reason in document order). It rewrites nothing:
-//! zero LCMS calls, zero black-preservation tuples, zero splices, zero
-//! resource mutation, and no public report field.
+//! which are REFUSED (first reason in document order). The plan itself rewrites
+//! nothing and runs no transform; its finished outcome is consumed once by the
+//! converter's root-atomic alias pass.
 //!
 //! An epoch starts when an exact eligible `/Alias cs` or `/Alias CS` selects a
 //! classified page device alias on one lane (stroking or nonstroking). Per ISO
@@ -23,9 +23,8 @@
 //! them exactly (a consumer after `Q` is proved against the restored value),
 //! and every `q`-derived branch carrying a root epoch is proved
 //! or refused atomically with that root. Native transform construction and the
-//! LCMS apply are deliberately NOT proven here — that dry-run plus the atomic
-//! conversion is the next slice; the plan only retains the candidates it would
-//! feed.
+//! LCMS apply are deliberately NOT proven here. The converter dry-runs every
+//! retained candidate before authorizing any splice for the root.
 //!
 //! The proof is FAIL-CLOSED at every boundary the walker cannot certify: text
 //! showing (the snapshot lacks the effective font/subtype, and Type3 glyph
@@ -187,9 +186,8 @@ pub struct EpochRoute {
 
 /// One retained symbolic conversion candidate.
 ///
-/// Fields are consumed by the focused epoch tests today and become the next
-/// slice's dry-run input; nothing here is published.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Fields are consumed directly by the converter's root dry-run and focused
+/// proof tests; nothing here is published.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EpochCandidate {
     /// How the candidate entered the epoch.
@@ -208,9 +206,7 @@ pub struct EpochCandidate {
 
 /// Private closed/refused report for one root epoch.
 ///
-/// Consumed by the focused epoch tests and retained as the next slice's
-/// dry-run input; no field feeds the public report in this slice.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Consumed directly by the converter; no field is published as an epoch API.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AliasEpochReport {
     /// Alias resource name that selected the epoch.
@@ -233,7 +229,6 @@ pub struct AliasEpochReport {
 /// Everything the plan proves for one analysed page.
 pub struct AliasEpochOutcome {
     /// Every root epoch in selection order with its private status.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub epochs: Vec<AliasEpochReport>,
     /// Structurally eligible setter tally per physical occurrence — exactly
     /// the per-setter classification the public counts have carried so far.

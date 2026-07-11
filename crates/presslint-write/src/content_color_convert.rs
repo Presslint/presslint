@@ -13,17 +13,15 @@
 //! Routing keeps the exact source-space gate: an RGB->CMYK link touches only
 //! `rg`/`RG`, a CMYK->CMYK link only `k`/`K`, a Gray link only `g`/`G`. An
 //! operator whose declared space matches NO supplied link's source is left
-//! byte-verbatim and counted as `no_matching_link`. Only direct device operators
-//! `g/G`, `rg/RG`, `k/K` are handled; `cs/CS`, `sc/scn`, `SC/SCN`,
-//! ICCBased/Separation/DeviceN/Indexed/Pattern colour spaces, and resource
-//! colour-space lookups are out of scope (no resource-space conversion here) and
-//! are left byte-verbatim.
+//! byte-verbatim and counted as `no_matching_link`. Proven exact page aliases
+//! of DeviceGray/RGB/CMYK are converted root-atomically after the same paint
+//! walk; ICCBased/Separation/DeviceN/Indexed/Pattern spaces remain out of scope.
 //!
 //! Each analysed page consults a private
 //! [`crate::page_device_space_policy::PageDeviceSpacePolicy`]: exact page
 //! DeviceGray/RGB/CMYK aliases resolve in the single paint walk, exact numeric
-//! alias setters are counted READ-ONLY as structurally eligible/ineligible for
-//! a future closed epoch, and a selected + routed direct shortcut converts only
+//! alias setters retain their structural eligible/ineligible counts, and a
+//! selected + routed direct shortcut converts only
 //! when the matching effective `/DefaultGray`/`/DefaultRGB`/`/DefaultCMYK` is
 //! proven absent or identity for BOTH the source and the emitted destination
 //! family; otherwise the operator stays byte-verbatim and is counted as
@@ -43,7 +41,7 @@
 // crate and do not force backticks on it.
 #![allow(clippy::doc_markdown)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use presslint_color_lcms::{ColorEngine, DeviceLinkSpace, LcmsColorEngine, LcmsError};
@@ -57,14 +55,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     PlannedWriteError, WriteError,
-    alias_epoch_plan::AliasEpochPlan,
-    black_preservation::{BlackPreservationPolicy, black_preservation_replacement},
+    alias_epoch_plan::{AliasEpochOutcome, AliasEpochPlan, EpochStatus, LaneSide},
+    black_preservation::{BlackPreservationPolicy, black_preservation_components},
     content_edit_pipeline::{
         EditPageContentError, PageSelection, PageSequenceEdit, PipelinePageSkip,
         PipelineSkipReason, edit_page_content_incremental_sequence,
     },
     extgstate_page_guard::{extgstate_page_skip_reason, transparency_group_page_skip_reason},
-    link_routing::{DeviceLinkInput, LinkConversionCounts, LinkRouting, build_link_routing},
+    link_routing::{
+        DeviceLinkInput, LinkConversionCounts, LinkRouting, RoutedLink, build_link_routing,
+    },
     page_content_sequence::{LocalSplice, PageContentSequence},
     page_device_space_policy::{PageColorFacts, PageDeviceSpacePolicy},
     pdf_number_serialize::serialize_color_component,
@@ -153,14 +153,23 @@ pub struct ConvertedPage {
     /// Number of neutral-black operators preserved before the routed link.
     pub black_preserved: usize,
     /// Exact numeric `sc`/`SC`/`scn`/`SCN` setters under classified page
-    /// device aliases that are structurally eligible for a future closed
-    /// alias-conversion epoch. Read-only: no alias byte is modified.
+    /// device aliases that are structurally eligible for a closed
+    /// alias-conversion epoch.
     #[serde(default, skip_serializing_if = "count_is_zero")]
     pub resource_alias_setters_eligible: usize,
     /// Setters under classified page device aliases that failed a structural
-    /// eligibility requirement. Read-only: no alias byte is modified.
+    /// eligibility requirement. This structural count is independent of later
+    /// root execution or shared-record refusal.
     #[serde(default, skip_serializing_if = "count_is_zero")]
     pub resource_alias_setters_ineligible: usize,
+    /// Unique physical retained alias-candidate records replaced by canonical
+    /// direct destination operators.
+    #[serde(default, skip_serializing_if = "count_is_zero")]
+    pub resource_alias_candidates_converted: usize,
+    /// Unique physical retained alias-candidate records held verbatim because
+    /// a consumed root or its shared-record component was non-executable.
+    #[serde(default, skip_serializing_if = "count_is_zero")]
+    pub resource_alias_candidates_refused: usize,
     /// Aggregate per-page operator-skip counts.
     pub operator_skips: OperatorSkipCounts,
     /// Per-link conversion counts, one entry per supplied link in request order.
@@ -376,6 +385,14 @@ impl DeviceColorSpace {
             (Self::Cmyk, true) => b"K",
         }
     }
+
+    const fn component_count(self) -> usize {
+        match self {
+            Self::Gray => 1,
+            Self::Rgb => 3,
+            Self::Cmyk => 4,
+        }
+    }
 }
 
 /// Classify an operator token's source bytes as a direct device colour operator.
@@ -391,6 +408,41 @@ pub const fn classify_operator(operator: &[u8]) -> Option<(DeviceColorSpace, boo
     }
 }
 
+/// Execute the one shared component path used by direct and retained alias
+/// candidates. Exact black preservation precedes one prepared-link apply.
+fn execute_components(
+    operands: &[f64],
+    source: DeviceColorSpace,
+    link: &RoutedLink,
+    black_preservation: BlackPreservationPolicy,
+) -> Option<ComponentExecution> {
+    let info = link.prepared.info();
+    if operands.len() != source.component_count()
+        || operands.len() != info.input_channels
+        || link.destination.component_count() != info.output_channels
+        || DeviceColorSpace::from_link(info.source_space) != Some(source)
+        || DeviceColorSpace::from_link(info.destination_space) != Some(link.destination)
+        || !operands.iter().all(|value| (0.0..=1.0).contains(value))
+    {
+        return None;
+    }
+    if let Some(components) =
+        black_preservation_components(operands, source, link.destination, black_preservation)
+    {
+        return Some(ComponentExecution {
+            components,
+            attribution: ComponentAttribution::BlackPreserved,
+        });
+    }
+    let components = LcmsColorEngine
+        .apply_device_link(&link.prepared, operands)
+        .ok()?;
+    (components.len() == link.destination.component_count()).then_some(ComponentExecution {
+        components,
+        attribution: ComponentAttribution::Link(link.index),
+    })
+}
+
 /// Per-page running tally captured by the edit closure.
 #[derive(Default)]
 struct PageTally {
@@ -400,6 +452,34 @@ struct PageTally {
     alias_setters_ineligible: usize,
     skips: OperatorSkipCounts,
     /// Conversions attributed to each link, indexed by `link_index`.
+    link_converted: Vec<usize>,
+}
+
+type PhysicalCandidateKey = (IndirectRef, usize, usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComponentAttribution {
+    BlackPreserved,
+    Link(usize),
+}
+
+struct ComponentExecution {
+    components: Vec<f64>,
+    attribution: ComponentAttribution,
+}
+
+struct AliasCandidateLocation {
+    key: PhysicalCandidateKey,
+    occurrence_index: usize,
+    range: presslint_types::ByteRange,
+}
+
+#[derive(Default)]
+struct AliasExecutionTally {
+    converted: usize,
+    refused: usize,
+    operators_converted: usize,
+    black_preserved: usize,
     link_converted: Vec<usize>,
 }
 
@@ -489,13 +569,11 @@ pub fn convert_content_colors_incremental(
 /// the already-assembled records (with the page policy's borrowed alias
 /// environment) yields the colour events, and an event is
 /// eligible only when the EXACT bytes at its operator range are one of the
-/// direct device shortcuts (`g`/`G`, `rg`/`RG`, `k`/`K`). Resource colour
-/// selection (`cs`/`CS` + `sc`/`scn`/`SC`/`SCN`) also emits colour events but
-/// never has shortcut operator bytes, so it stays byte-verbatim; conversion
-/// eligibility is never inferred from device state or a resource name. Every
-/// walked op is first observed by the private [`AliasEpochPlan`], which owns
-/// the read-only structural alias-setter tallies and the private closed/
-/// refused epoch statuses without changing any byte. The event's parsed
+/// direct device shortcuts (`g`/`G`, `rg`/`RG`, `k`/`K`). Every walked op is
+/// first observed by the private [`AliasEpochPlan`], which owns the structural
+/// alias-setter tallies and retains exact closed/refused roots for one
+/// post-walk execution pass. Conversion eligibility is never reconstructed
+/// from raw bytes, device state, or a resource name. The event's parsed
 /// [`presslint_paint::GraphicsColor`] components and its record range drive the
 /// splice.
 ///
@@ -528,7 +606,7 @@ fn convert_sequence(
     // The alias-epoch plan observes EVERY walked op before the colour-only
     // branch below. It is the sole producer of the structural alias-setter
     // tallies (unchanged T177 per-setter meaning) and privately retains
-    // closed/refused epoch candidates; it changes no byte and runs no LCMS.
+    // closed/refused epoch candidates; execution happens once after the walk.
     let mut plan = AliasEpochPlan::new(&policy, routing, target, page_index, sequence);
     let mut tallies: Vec<PageTally> = (0..sequence.occurrence_count())
         .map(|_| PageTally {
@@ -556,7 +634,7 @@ fn convert_sequence(
         };
         // Exact shortcut bytes decide eligibility. A colour event whose
         // operator is not one of the six shortcuts is left verbatim; exact
-        // alias setters were already classified READ-ONLY by the plan above.
+        // alias setters were already retained by the plan above.
         let Some((space, stroking)) = classify_operator(operator) else {
             continue;
         };
@@ -603,43 +681,48 @@ fn convert_sequence(
         }
         let range = op.record_range.into_byte_range();
         let location = sequence.localize(op.record_range)?;
-        if let Some(replacement) = black_preservation_replacement(
-            operands,
-            space,
-            link.destination,
-            stroking,
-            black_preservation,
-        ) {
-            tally.black_preserved += 1;
-            if decoded.get(range.start..range.end) != Some(replacement.as_slice()) {
-                occurrence_plans[location.occurrence_index].push(LocalSplice {
-                    range: location.local_range,
-                    replacement,
-                });
-            }
-            continue;
-        }
-        let Ok(components) = LcmsColorEngine.apply_device_link(&link.prepared, operands) else {
+        let Some(execution) = execute_components(operands, space, link, black_preservation) else {
             // Unreachable after the source-space route + walker validation
             // (channel count and range are already guaranteed); leave verbatim.
             continue;
         };
-        occurrence_plans[location.occurrence_index].push(LocalSplice {
-            range: location.local_range,
-            replacement: replacement_bytes(&components, link.destination, stroking),
-        });
-        tally.converted += 1;
-        tally.link_converted[link.index] += 1;
+        let replacement = replacement_bytes(&execution.components, link.destination, stroking);
+        match execution.attribution {
+            ComponentAttribution::BlackPreserved => {
+                tally.black_preserved += 1;
+                if decoded.get(range.start..range.end) != Some(replacement.as_slice()) {
+                    occurrence_plans[location.occurrence_index].push(LocalSplice {
+                        range: location.local_range,
+                        replacement,
+                    });
+                }
+            }
+            ComponentAttribution::Link(link_index) => {
+                occurrence_plans[location.occurrence_index].push(LocalSplice {
+                    range: location.local_range,
+                    replacement,
+                });
+                tally.converted += 1;
+                tally.link_converted[link_index] += 1;
+            }
+        }
     }
 
-    // Close the plan BEFORE physical reconciliation: page-end closure decides
-    // the private epoch statuses, and only the structural per-occurrence
-    // setter tallies feed the public report in this slice.
+    // Close and consume the plan BEFORE physical reconciliation. This is one
+    // ordered candidate pass over retained proof facts, not another content
+    // interpretation or selector/resource replay.
     let alias_outcome = plan.finish();
     for (index, tally) in tallies.iter_mut().enumerate() {
         tally.alias_setters_eligible = alias_outcome.eligible_setters[index];
         tally.alias_setters_ineligible = alias_outcome.ineligible_setters[index];
     }
+    let alias_tally = execute_alias_epochs(
+        alias_outcome,
+        sequence,
+        routing,
+        black_preservation,
+        &mut occurrence_plans,
+    )?;
 
     let plans = sequence.reconcile(occurrence_plans)?;
     let mut content_objects = Vec::new();
@@ -666,6 +749,15 @@ fn convert_sequence(
             *slot += count;
         }
     }
+    total.converted += alias_tally.operators_converted;
+    total.black_preserved += alias_tally.black_preserved;
+    for (slot, count) in total
+        .link_converted
+        .iter_mut()
+        .zip(&alias_tally.link_converted)
+    {
+        *slot += count;
+    }
     Some(PageSequenceEdit {
         plans,
         metadata: ConvertedPage {
@@ -675,10 +767,215 @@ fn convert_sequence(
             black_preserved: total.black_preserved,
             resource_alias_setters_eligible: total.alias_setters_eligible,
             resource_alias_setters_ineligible: total.alias_setters_ineligible,
+            resource_alias_candidates_converted: alias_tally.converted,
+            resource_alias_candidates_refused: alias_tally.refused,
             operator_skips: total.skips,
             links: link_counts(routing, &total.link_converted),
         },
     })
+}
+
+/// Dry-run every structurally executable alias root, propagate any
+/// non-executability through shared physical records, then publish only whole
+/// executable connected components into the existing occurrence plans.
+#[allow(clippy::too_many_lines)]
+fn execute_alias_epochs(
+    outcome: AliasEpochOutcome,
+    sequence: &PageContentSequence,
+    routing: &LinkRouting,
+    black_preservation: BlackPreservationPolicy,
+    occurrence_plans: &mut [Vec<LocalSplice>],
+) -> Option<AliasExecutionTally> {
+    let epochs = outcome.epochs;
+    let mut root_records = vec![BTreeSet::<PhysicalCandidateKey>::new(); epochs.len()];
+    let mut record_roots = BTreeMap::<PhysicalCandidateKey, BTreeSet<usize>>::new();
+    let mut root_failed = vec![false; epochs.len()];
+
+    // Build the complete deterministic root-to-record relation before any
+    // execution result can authorize a splice.
+    for (root, epoch) in epochs.iter().enumerate() {
+        for candidate in &epoch.candidates {
+            let Some(object) = sequence.occurrence_object(candidate.occurrence_index) else {
+                root_failed[root] = true;
+                continue;
+            };
+            if candidate.local_range.start >= candidate.local_range.end {
+                root_failed[root] = true;
+                continue;
+            }
+            let key = (
+                object,
+                candidate.local_range.start,
+                candidate.local_range.end,
+            );
+            root_records[root].insert(key);
+            record_roots.entry(key).or_default().insert(root);
+        }
+    }
+
+    let mut root_candidates: Vec<Option<Vec<AliasCandidateLocation>>> =
+        epochs.iter().map(|_| None).collect();
+    let mut record_executions =
+        BTreeMap::<PhysicalCandidateKey, (Vec<u8>, ComponentAttribution, usize)>::new();
+    for (root, epoch) in epochs.iter().enumerate() {
+        let initially_executable = matches!(epoch.status, EpochStatus::Closed)
+            && epoch.has_consumer
+            && epoch.route.is_some();
+        if !initially_executable || root_failed[root] || epoch.candidates.is_empty() {
+            root_failed[root] = true;
+            continue;
+        }
+        let Some(route) = epoch.route else {
+            root_failed[root] = true;
+            continue;
+        };
+        let Some(link) = routing.links().get(route.link_index) else {
+            root_failed[root] = true;
+            continue;
+        };
+        if link.index != route.link_index {
+            root_failed[root] = true;
+            continue;
+        }
+        if link.destination != route.destination {
+            root_failed[root] = true;
+            continue;
+        }
+        if routing.route(epoch.source).map(|item| item.index) != Some(route.link_index) {
+            root_failed[root] = true;
+            continue;
+        }
+
+        let stroking = epoch.side == LaneSide::Stroking;
+        let mut temporary = Vec::with_capacity(epoch.candidates.len());
+        let mut root_executions =
+            BTreeMap::<PhysicalCandidateKey, (Vec<u8>, ComponentAttribution)>::new();
+        for candidate in &epoch.candidates {
+            let Some(object) = sequence.occurrence_object(candidate.occurrence_index) else {
+                root_failed[root] = true;
+                break;
+            };
+            if !candidate.selector_matched {
+                root_failed[root] = true;
+                break;
+            }
+            let Some(execution) = execute_components(
+                &candidate.components,
+                epoch.source,
+                link,
+                black_preservation,
+            ) else {
+                root_failed[root] = true;
+                break;
+            };
+            let key = (
+                object,
+                candidate.local_range.start,
+                candidate.local_range.end,
+            );
+            let replacement = replacement_bytes(&execution.components, route.destination, stroking);
+            if let Some((known_replacement, known_attribution)) = root_executions.get(&key) {
+                if known_replacement != &replacement || known_attribution != &execution.attribution
+                {
+                    root_failed[root] = true;
+                    break;
+                }
+            } else {
+                root_executions.insert(key, (replacement, execution.attribution));
+            }
+            temporary.push(AliasCandidateLocation {
+                key,
+                occurrence_index: candidate.occurrence_index,
+                range: candidate.local_range,
+            });
+        }
+        if root_failed[root] {
+            continue;
+        }
+        for (key, (replacement, attribution)) in root_executions {
+            if let Some((known_replacement, known_attribution, known_root)) =
+                record_executions.get(&key)
+            {
+                if known_replacement != &replacement || known_attribution != &attribution {
+                    root_failed[root] = true;
+                    root_failed[*known_root] = true;
+                }
+            } else {
+                record_executions.insert(key, (replacement, attribution, root));
+            }
+        }
+        root_candidates[root] = Some(temporary);
+    }
+
+    // One queue traversal computes the fixed point across root-record-root
+    // adjacency. Closed no-consumer roots seed non-executability but remain
+    // silent when their retained records are unique.
+    let mut queue: VecDeque<usize> = root_failed
+        .iter()
+        .enumerate()
+        .filter_map(|(root, failed)| failed.then_some(root))
+        .collect();
+    while let Some(root) = queue.pop_front() {
+        for key in &root_records[root] {
+            let owners = record_roots.get(key)?;
+            for &owner in owners {
+                if !root_failed[owner] {
+                    root_failed[owner] = true;
+                    queue.push_back(owner);
+                }
+            }
+        }
+    }
+
+    let mut tally = AliasExecutionTally {
+        link_converted: vec![0; routing.links().len()],
+        ..AliasExecutionTally::default()
+    };
+    let mut converted_keys = BTreeSet::new();
+    let mut staged_occurrences = BTreeSet::new();
+    for root in 0..epochs.len() {
+        if root_failed[root] {
+            continue;
+        }
+        let candidates = root_candidates[root].as_ref()?;
+        for candidate in candidates {
+            let (replacement, attribution, _) = record_executions.get(&candidate.key)?;
+            let occurrence_key = (
+                candidate.occurrence_index,
+                candidate.range.start,
+                candidate.range.end,
+            );
+            if staged_occurrences.insert(occurrence_key) {
+                occurrence_plans
+                    .get_mut(candidate.occurrence_index)?
+                    .push(LocalSplice {
+                        range: candidate.range,
+                        replacement: replacement.clone(),
+                    });
+            }
+            if converted_keys.insert(candidate.key) {
+                tally.converted += 1;
+                match *attribution {
+                    ComponentAttribution::BlackPreserved => tally.black_preserved += 1,
+                    ComponentAttribution::Link(link_index) => {
+                        tally.operators_converted += 1;
+                        *tally.link_converted.get_mut(link_index)? += 1;
+                    }
+                }
+            }
+        }
+    }
+    tally.refused = record_roots
+        .iter()
+        .filter(|(key, roots)| {
+            !converted_keys.contains(key)
+                && roots.iter().any(|&root| {
+                    epochs[root].has_consumer
+                        || matches!(epochs[root].status, EpochStatus::Refused { .. })
+                })
+        })
+        .count();
+    Some(tally)
 }
 
 /// Build `<serialized components joined by single spaces> <dest operator>`.

@@ -2,6 +2,49 @@
 
 Earlier entries are preserved in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T179 - Root-Atomic Page-Alias Conversion
+
+Finished `AliasEpochOutcome` values are now consumed directly after the one
+logical-page `PaintProgram` walk. A root is initially executable exactly when
+its status is `Closed`, it has a supported consumer, and it retains a route.
+Every candidate in such a root is dry-run through one shared component path:
+exact neutral-black preservation returns `[0,0,0,1]`, otherwise the already
+prepared DeviceLink is applied once. The direct-device path uses the same
+component seam and canonical serializer, preserving its bytes, identical
+K-only no-splice rule, attribution, counts, and leave-verbatim apply failure.
+
+No alias splice is staged until every candidate in its root succeeds. Both an
+alias selection (including its PDF initial colour) and an explicit numeric
+setter are replaced as a whole record by canonical destination `g/G`, `rg/RG`,
+or `k/K` bytes. Candidate execution uses only retained family, lane, route,
+components, occurrence, and local range; it does not tokenize, walk, resolve
+resources or defaults, or evaluate selectors again.
+
+Root atomicity is followed by physical-record atomicity. Candidates key by
+content object plus local range. Structurally refused, closed-no-consumer,
+missing-route, inconsistent, or transform-failed roots seed one deterministic
+queue traversal over the root-record graph. Non-executability propagates to a
+fixed point through co-tenant records, including transitive components. A
+unique closed-no-consumer root stays a silent no-op; when it shares a record
+with a consumed root, the shared component remains verbatim.
+
+Only fully executable components append splices to the existing occurrence
+plans. Repeated occurrences still require identical complete plans through
+`PageContentSequence::reconcile`, and the unchanged edited-page validation,
+temporary encoding/dirty-object staging, and append transaction remain the
+page-atomic publication gate.
+
+`ConvertedPage` adds zero-omitted
+`resource_alias_candidates_converted` and
+`resource_alias_candidates_refused`. Both count unique physical retained
+candidate records. Successful non-black records also feed existing total/link
+operator counts; black-overlay records feed `black_preserved`. Structural alias
+setter counts keep their earlier per-setter meaning even inside refused roots.
+
+Conservative refusals remain: font-unaware text showing, unclassified `Do`
+invocations (forms, images, and stencils), inline images, Type3 operators,
+patterns and other non-device resource spaces, and recursive form conversion.
+
 ## T178 - Closed Page-Alias Epoch Proof and Refusal Plan
 
 One new private abstraction, `AliasEpochPlan`, sits between the per-setter

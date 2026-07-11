@@ -63,27 +63,31 @@ fn convert_links(input: &[u8], links: &[&str]) -> ConvertContentColorsOutput {
     .expect("convert succeeds")
 }
 
-// --- Alias eligibility counts, bytes verbatim ---------------------------------
+// --- Alias conversion and structural eligibility ------------------------------
 
 #[test]
-fn exact_alias_setters_count_eligible_while_all_alias_bytes_stay_verbatim() {
-    let stream = b"/GrayAlias cs 0.5 sc\n/GrayAlias CS 0.6 SC\n/RgbAlias cs 0.1 0.2 0.3 scn\n/CmykAlias CS 0 0 0 1 SCN\n1 0 0 rg\n";
+fn exact_consumed_alias_setters_convert_while_structural_counts_stay_stable() {
+    let stream = b"/GrayAlias cs 0.5 sc 0 0 m 1 1 l f\n/GrayAlias CS 0.6 SC 0 0 m 1 1 l S\n/RgbAlias cs 0.1 0.2 0.3 scn 0 0 m 1 1 l f\n/CmykAlias CS 0 0 0 1 SCN 0 0 m 1 1 l S\n1 0 0 rg\n";
     let input = resource_pdf(stream, ALIAS_RESOURCES);
-    let output = convert(&input, RGB_TO_CMYK_LINK);
+    let output = convert_links(
+        &input,
+        &[GRAY_TO_GRAY_LINK, RGB_TO_CMYK_LINK, CMYK_TO_CMYK_LINK],
+    );
 
     assert_eq!(&output.bytes[..input.len()], input.as_slice());
     let page = &output.converted[0];
     assert_eq!(page.resource_alias_setters_eligible, 4);
     assert_eq!(page.resource_alias_setters_ineligible, 0);
-    assert_eq!(page.operators_converted, 1);
+    assert_eq!(page.resource_alias_candidates_converted, 8);
+    assert_eq!(page.resource_alias_candidates_refused, 0);
+    assert_eq!(page.operators_converted, 9);
     assert_eq!(page.operator_skips.default_color_space_unsafe, 0);
 
-    // The direct rg shortcut converted; every alias byte is verbatim.
+    // Every selection/setter record and the neighbouring direct shortcut converted.
     let decoded = page_decoded_stream(&output.bytes, false);
-    assert!(contains(&decoded, b"/GrayAlias cs 0.5 sc"));
-    assert!(contains(&decoded, b"/GrayAlias CS 0.6 SC"));
-    assert!(contains(&decoded, b"/RgbAlias cs 0.1 0.2 0.3 scn"));
-    assert!(contains(&decoded, b"/CmykAlias CS 0 0 0 1 SCN"));
+    assert!(!contains(&decoded, b"Alias"));
+    assert!(!contains(&decoded, b" sc"));
+    assert!(!contains(&decoded, b" SC"));
     assert!(!contains(&decoded, b" rg"));
 }
 
@@ -93,17 +97,18 @@ fn indirect_alias_definition_counts_eligible() {
         CATALOG.to_vec(),
         PAGES.to_vec(),
         resource_page_body("4 0 R", "<< /ColorSpace << /GrayAlias 5 0 R >> >>"),
-        stream_body("", b"/GrayAlias cs 0.5 sc\n"),
+        stream_body("", b"/GrayAlias cs 0.5 sc 0 0 m 1 1 l f\n"),
         b"/DeviceGray".to_vec(),
     ]);
     let output = convert(&input, GRAY_TO_GRAY_LINK);
 
     assert_eq!(output.converted[0].resource_alias_setters_eligible, 1);
-    assert_eq!(output.converted[0].operators_converted, 0);
-    assert_eq!(
-        page_decoded_stream(&output.bytes, false),
-        b"/GrayAlias cs 0.5 sc\n"
-    );
+    assert_eq!(output.converted[0].operators_converted, 2);
+    assert_eq!(output.converted[0].resource_alias_candidates_converted, 2);
+    assert!(!contains(
+        &page_decoded_stream(&output.bytes, false),
+        b"Alias"
+    ));
 }
 
 #[test]
@@ -179,13 +184,15 @@ fn cross_stream_alias_selection_feeds_a_later_occurrence_setter() {
         PAGES.to_vec(),
         resource_page_body("[4 0 R 5 0 R]", ALIAS_RESOURCES),
         stream_body("", b"/GrayAlias cs\n"),
-        stream_body("", b"0.5 sc\n"),
+        stream_body("", b"0.5 sc 0 0 m 1 1 l f\n"),
     ]);
     let output = convert(&input, GRAY_TO_GRAY_LINK);
 
     let page = &output.converted[0];
     assert_eq!(page.resource_alias_setters_eligible, 1);
     assert_eq!(page.resource_alias_setters_ineligible, 0);
+    assert_eq!(page.resource_alias_candidates_converted, 2);
+    assert_eq!(page.operators_converted, 2);
     assert_eq!(&output.bytes[..input.len()], input.as_slice());
 }
 
@@ -351,18 +358,20 @@ fn form_local_alias_does_not_leak_into_the_page_policy_or_descend() {
 }
 
 #[test]
-fn repeated_content_reference_reconciles_alias_counts_once() {
+fn repeated_content_reference_reconciles_alias_conversion_and_counts_once() {
     let input = assemble_classic(&[
         CATALOG.to_vec(),
         PAGES.to_vec(),
         resource_page_body("[4 0 R 4 0 R]", ALIAS_RESOURCES),
-        stream_body("", b"/GrayAlias cs 0.5 sc\n"),
+        stream_body("", b"/GrayAlias cs 0.5 sc 0 0 m 1 1 l f\n"),
     ]);
     let output = convert(&input, GRAY_TO_GRAY_LINK);
 
     assert_eq!(output.converted[0].resource_alias_setters_eligible, 1);
     assert_eq!(output.converted[0].resource_alias_setters_ineligible, 0);
-    assert_eq!(occurrence_count(&output.bytes, b"4 0 obj"), 1);
+    assert_eq!(output.converted[0].resource_alias_candidates_converted, 2);
+    assert_eq!(output.converted[0].operators_converted, 2);
+    assert_eq!(occurrence_count(&output.bytes, b"4 0 obj"), 2);
 }
 
 #[test]
@@ -701,8 +710,8 @@ fn safe_family_still_converts_next_to_verbatim_aliases_and_unsafe_family() {
 // --- Encoding and backend round trips ------------------------------------------
 
 #[test]
-fn flate_resource_page_converts_and_keeps_aliases_verbatim() {
-    let decoded_input = b"/GrayAlias cs 0.5 sc\n1 0 0 rg\n";
+fn flate_resource_page_converts_aliases_and_direct_operators() {
+    let decoded_input = b"/GrayAlias cs 0.5 sc 0 0 m 1 1 l f\n1 0 0 rg\n";
     let compressed = encode_flate_stream(decoded_input, FLATE_LIMIT).expect("encode");
     let input = assemble_classic(&[
         CATALOG.to_vec(),
@@ -710,13 +719,14 @@ fn flate_resource_page_converts_and_keeps_aliases_verbatim() {
         resource_page_body("4 0 R", ALIAS_RESOURCES),
         stream_body(" /Filter /FlateDecode", &compressed),
     ]);
-    let output = convert(&input, RGB_TO_CMYK_LINK);
+    let output = convert_links(&input, &[GRAY_TO_GRAY_LINK, RGB_TO_CMYK_LINK]);
 
     assert_eq!(&output.bytes[..input.len()], input.as_slice());
     assert_eq!(output.converted[0].resource_alias_setters_eligible, 1);
-    assert_eq!(output.converted[0].operators_converted, 1);
+    assert_eq!(output.converted[0].resource_alias_candidates_converted, 2);
+    assert_eq!(output.converted[0].operators_converted, 3);
     let decoded = page_decoded_stream(&output.bytes, true);
-    assert!(contains(&decoded, b"/GrayAlias cs 0.5 sc"));
+    assert!(!contains(&decoded, b"Alias"));
     assert!(!contains(&decoded, b" rg"));
     reopen(&output.bytes);
 }
@@ -733,7 +743,10 @@ fn xref_stream_resource_page_converts_and_reopens() {
     page.extend_from_slice(b"\nendobj\n");
     let mut object4 = Vec::new();
     object4.extend_from_slice(b"4 0 obj\n");
-    object4.extend_from_slice(&stream_body("", b"/GrayAlias cs 0.5 sc\n1 0 0 rg\n"));
+    object4.extend_from_slice(&stream_body(
+        "",
+        b"/GrayAlias cs 0.5 sc 0 0 m 1 1 l f\n1 0 0 rg\n",
+    ));
     object4.extend_from_slice(b"\nendobj\n");
 
     let catalog_offset = buf.len();
@@ -764,16 +777,17 @@ fn xref_stream_resource_page_converts_and_reopens() {
     buf.extend_from_slice(b"\nendstream\nendobj\n");
     buf.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF").as_bytes());
 
-    let output = convert(&buf, RGB_TO_CMYK_LINK);
+    let output = convert_links(&buf, &[GRAY_TO_GRAY_LINK, RGB_TO_CMYK_LINK]);
 
     assert_eq!(&output.bytes[..buf.len()], buf.as_slice());
     assert_eq!(output.converted[0].resource_alias_setters_eligible, 1);
-    assert_eq!(output.converted[0].operators_converted, 1);
+    assert_eq!(output.converted[0].resource_alias_candidates_converted, 2);
+    assert_eq!(output.converted[0].operators_converted, 3);
     assert!(matches!(
         reopen(&output.bytes).backend,
         DocumentAccessBackend::XrefStreamChain { .. }
     ));
     let decoded = page_decoded_stream(&output.bytes, false);
-    assert!(contains(&decoded, b"/GrayAlias cs 0.5 sc"));
+    assert!(!contains(&decoded, b"Alias"));
     assert!(!contains(&decoded, b" rg"));
 }

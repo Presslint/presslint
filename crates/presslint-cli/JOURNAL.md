@@ -1,5 +1,17 @@
 # presslint-cli Journal
 
+## T179: convert report alias-candidate outcomes
+
+- Human conversion totals add `alias candidates converted` and
+  `alias candidates refused`; per-page lines add `alias_converted=` and
+  `alias_refused=` in deterministic order.
+- Candidate refusals participate in the existing coverage-gap warning as
+  `alias_candidates_refused=`. Command syntax, selector help, and exit policy
+  are unchanged.
+- JSON continues to carry the library page report directly. Both additive
+  candidate fields are omitted at zero and default to zero when older JSON is
+  deserialized; nonzero values are additive.
+
 ## T177: convert report alias-eligibility and Default-safety counts
 
 - Human `presslint convert` totals now include three deterministic lines:

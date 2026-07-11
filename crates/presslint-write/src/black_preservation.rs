@@ -2,9 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    content_color_convert::DeviceColorSpace, pdf_number_serialize::serialize_color_component,
-};
+use crate::content_color_convert::DeviceColorSpace;
 
 /// Optional black-preservation overlay for `DeviceLink` content conversion.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,21 +15,20 @@ pub enum BlackPreservationPolicy {
     NeutralBlackToK,
 }
 
-/// Return canonical K-only replacement bytes when the policy preserves black.
-pub fn black_preservation_replacement(
+/// Return exact destination K-only components when the policy preserves black.
+pub fn black_preservation_components(
     operands: &[f64],
     source: DeviceColorSpace,
     destination: DeviceColorSpace,
-    stroking: bool,
     policy: BlackPreservationPolicy,
-) -> Option<Vec<u8>> {
+) -> Option<Vec<f64>> {
     if policy != BlackPreservationPolicy::NeutralBlackToK || destination != DeviceColorSpace::Cmyk {
         return None;
     }
     if !is_neutral_black(operands, source) {
         return None;
     }
-    Some(cmyk_black_bytes(stroking))
+    Some(vec![0.0, 0.0, 0.0, 1.0])
 }
 
 fn is_neutral_black(operands: &[f64], source: DeviceColorSpace) -> bool {
@@ -42,85 +39,69 @@ fn is_neutral_black(operands: &[f64], source: DeviceColorSpace) -> bool {
     }
 }
 
-fn cmyk_black_bytes(stroking: bool) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for component in [0.0, 0.0, 0.0, 1.0] {
-        bytes.extend_from_slice(serialize_color_component(component).as_bytes());
-        bytes.push(b' ');
-    }
-    bytes.extend_from_slice(DeviceColorSpace::Cmyk.operator(stroking));
-    bytes
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::float_cmp)]
 
-    use super::{BlackPreservationPolicy, black_preservation_replacement};
+    use super::{BlackPreservationPolicy, black_preservation_components};
     use crate::content_color_convert::DeviceColorSpace;
 
     #[test]
     fn exact_neutral_black_sources_map_to_k_only_for_cmyk_destination() {
         assert_eq!(
-            black_preservation_replacement(
+            black_preservation_components(
                 &[0.0, 0.0, 0.0],
                 DeviceColorSpace::Rgb,
                 DeviceColorSpace::Cmyk,
-                false,
                 BlackPreservationPolicy::NeutralBlackToK,
             ),
-            Some(b"0 0 0 1 k".to_vec())
+            Some(vec![0.0, 0.0, 0.0, 1.0])
         );
         assert_eq!(
-            black_preservation_replacement(
+            black_preservation_components(
                 &[0.0],
                 DeviceColorSpace::Gray,
                 DeviceColorSpace::Cmyk,
-                true,
                 BlackPreservationPolicy::NeutralBlackToK,
             ),
-            Some(b"0 0 0 1 K".to_vec())
+            Some(vec![0.0, 0.0, 0.0, 1.0])
         );
         assert_eq!(
-            black_preservation_replacement(
+            black_preservation_components(
                 &[0.0, 0.0, 0.0, 1.0],
                 DeviceColorSpace::Cmyk,
                 DeviceColorSpace::Cmyk,
-                false,
                 BlackPreservationPolicy::NeutralBlackToK,
             ),
-            Some(b"0 0 0 1 k".to_vec())
+            Some(vec![0.0, 0.0, 0.0, 1.0])
         );
     }
 
     #[test]
     fn nonblack_policy_none_and_non_cmyk_destination_fall_through() {
         assert_eq!(
-            black_preservation_replacement(
+            black_preservation_components(
                 &[0.0, 0.0, 0.1],
                 DeviceColorSpace::Rgb,
                 DeviceColorSpace::Cmyk,
-                false,
                 BlackPreservationPolicy::NeutralBlackToK,
             ),
             None
         );
         assert_eq!(
-            black_preservation_replacement(
+            black_preservation_components(
                 &[0.0, 0.0, 0.0],
                 DeviceColorSpace::Rgb,
                 DeviceColorSpace::Cmyk,
-                false,
                 BlackPreservationPolicy::None,
             ),
             None
         );
         assert_eq!(
-            black_preservation_replacement(
+            black_preservation_components(
                 &[0.0],
                 DeviceColorSpace::Gray,
                 DeviceColorSpace::Gray,
-                false,
                 BlackPreservationPolicy::NeutralBlackToK,
             ),
             None

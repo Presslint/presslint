@@ -401,6 +401,8 @@ fn gray_link_converts_g_to_g() {
     let output = convert(&input, GRAY_TO_GRAY_LINK);
 
     assert_eq!(output.converted[0].operators_converted, 1);
+    assert_eq!(output.converted[0].resource_alias_candidates_converted, 0);
+    assert_eq!(output.converted[0].resource_alias_candidates_refused, 0);
     let decoded = page_decoded_stream(&output.bytes, false);
     let operands = operands_of(&decoded, b"g");
     assert_eq!(operands.len(), 1);
@@ -419,6 +421,8 @@ fn black_preservation_maps_rgb_black_to_k_before_device_link() {
     assert_eq!(&output.bytes[..input.len()], input.as_slice());
     assert_eq!(output.converted[0].operators_converted, 1);
     assert_eq!(output.converted[0].black_preserved, 1);
+    assert_eq!(output.converted[0].resource_alias_candidates_converted, 0);
+    assert_eq!(output.converted[0].resource_alias_candidates_refused, 0);
 
     let decoded = page_decoded_stream(&output.bytes, false);
     assert!(contains(&decoded, b"0 0 0 1 k"));
@@ -451,6 +455,8 @@ fn black_preservation_preserves_cmyk_k_only_without_identical_splice() {
 
     assert_eq!(output.converted[0].operators_converted, 0);
     assert_eq!(output.converted[0].black_preserved, 1);
+    assert_eq!(output.converted[0].resource_alias_candidates_converted, 0);
+    assert_eq!(output.converted[0].resource_alias_candidates_refused, 0);
     assert_eq!(occurrence_count(&output.bytes, b"4 0 obj"), 1);
     assert_eq!(page_decoded_stream(&output.bytes, false), b"0 0 0 1 k\n");
 }

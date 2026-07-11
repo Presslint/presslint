@@ -25,6 +25,8 @@ fn convert_report_warns_on_zero_conversion_and_skips() {
             black_preserved: 0,
             resource_alias_setters_eligible: 0,
             resource_alias_setters_ineligible: 0,
+            resource_alias_candidates_converted: 0,
+            resource_alias_candidates_refused: 0,
             operator_skips: OperatorSkipCounts {
                 no_matching_link: 2,
                 selector_excluded: 1,
@@ -66,6 +68,8 @@ fn human_convert_report_surfaces_page_coverage_counts() {
             black_preserved: 1,
             resource_alias_setters_eligible: 5,
             resource_alias_setters_ineligible: 2,
+            resource_alias_candidates_converted: 4,
+            resource_alias_candidates_refused: 3,
             operator_skips: OperatorSkipCounts {
                 no_matching_link: 4,
                 selector_excluded: 2,
@@ -87,9 +91,11 @@ fn human_convert_report_surfaces_page_coverage_counts() {
     assert!(rendered.contains("selector excluded: 2"));
     assert!(rendered.contains("alias setters eligible: 5"));
     assert!(rendered.contains("alias setters ineligible: 2"));
+    assert!(rendered.contains("alias candidates converted: 4"));
+    assert!(rendered.contains("alias candidates refused: 3"));
     assert!(rendered.contains("default color-space unsafe: 3"));
     assert!(rendered.contains(
-        "page 2: converted=3 black_preserved=1 no_matching_link=4 selector_excluded=2 alias_eligible=5 alias_ineligible=2 default_unsafe=3"
+        "page 2: converted=3 black_preserved=1 no_matching_link=4 selector_excluded=2 alias_eligible=5 alias_ineligible=2 alias_converted=4 alias_refused=3 default_unsafe=3"
     ));
 }
 
@@ -104,7 +110,26 @@ fn default_color_space_unsafe_is_a_deterministic_coverage_warning() {
     assert_eq!(
         convert_warnings(&output),
         vec![
-            "coverage gaps or skips observed: no_matching_link=0 selector_excluded=0 invalid_operands=0 default_color_space_unsafe=2 skipped_pages=0"
+            "coverage gaps or skips observed: no_matching_link=0 selector_excluded=0 invalid_operands=0 alias_candidates_refused=0 default_color_space_unsafe=2 skipped_pages=0"
+                .to_owned()
+        ]
+    );
+}
+
+#[test]
+fn alias_candidate_refusal_is_a_deterministic_coverage_warning() {
+    let mut page = converted_page_with_counts(0, 0, 0);
+    page.resource_alias_candidates_refused = 2;
+    let output = ConvertContentColorsOutput {
+        bytes: Vec::new(),
+        converted: vec![page],
+        skipped: Vec::new(),
+    };
+
+    assert_eq!(
+        convert_warnings(&output),
+        vec![
+            "coverage gaps or skips observed: no_matching_link=0 selector_excluded=0 invalid_operands=0 alias_candidates_refused=2 default_color_space_unsafe=0 skipped_pages=0"
                 .to_owned()
         ]
     );
@@ -124,8 +149,12 @@ fn human_convert_report_renders_zero_alias_and_default_totals_deterministically(
 
     assert!(rendered.contains("alias setters eligible: 0"));
     assert!(rendered.contains("alias setters ineligible: 0"));
+    assert!(rendered.contains("alias candidates converted: 0"));
+    assert!(rendered.contains("alias candidates refused: 0"));
     assert!(rendered.contains("default color-space unsafe: 0"));
-    assert!(rendered.contains("alias_eligible=0 alias_ineligible=0 default_unsafe=0"));
+    assert!(rendered.contains(
+        "alias_eligible=0 alias_ineligible=0 alias_converted=0 alias_refused=0 default_unsafe=0"
+    ));
 }
 
 #[test]
@@ -165,6 +194,12 @@ fn json_convert_report_omits_zero_alias_and_default_counts() {
     assert!(converted.get("resource_alias_setters_eligible").is_none());
     assert!(converted.get("resource_alias_setters_ineligible").is_none());
     assert!(
+        converted
+            .get("resource_alias_candidates_converted")
+            .is_none()
+    );
+    assert!(converted.get("resource_alias_candidates_refused").is_none());
+    assert!(
         converted["operator_skips"]
             .get("default_color_space_unsafe")
             .is_none()
@@ -175,9 +210,12 @@ fn json_convert_report_omits_zero_alias_and_default_counts() {
 
 #[test]
 fn json_convert_report_serializes_nonzero_alias_and_default_counts() {
+    let mut page = converted_page_with_counts(5, 2, 3);
+    page.resource_alias_candidates_converted = 4;
+    page.resource_alias_candidates_refused = 1;
     let report = RunReport::convert(ConvertContentColorsOutput {
         bytes: Vec::new(),
-        converted: vec![converted_page_with_counts(5, 2, 3)],
+        converted: vec![page],
         skipped: Vec::new(),
     });
 
@@ -186,7 +224,23 @@ fn json_convert_report_serializes_nonzero_alias_and_default_counts() {
 
     assert_eq!(converted["resource_alias_setters_eligible"], 5);
     assert_eq!(converted["resource_alias_setters_ineligible"], 2);
+    assert_eq!(converted["resource_alias_candidates_converted"], 4);
+    assert_eq!(converted["resource_alias_candidates_refused"], 1);
     assert_eq!(converted["operator_skips"]["default_color_space_unsafe"], 3);
+}
+
+#[test]
+fn older_converted_page_json_defaults_alias_candidate_counts_to_zero() {
+    let page = converted_page_with_counts(0, 0, 0);
+    let mut value = serde_json::to_value(page).unwrap();
+    let object = value.as_object_mut().unwrap();
+    object.remove("resource_alias_candidates_converted");
+    object.remove("resource_alias_candidates_refused");
+
+    let restored: ConvertedPage = serde_json::from_value(value).unwrap();
+
+    assert_eq!(restored.resource_alias_candidates_converted, 0);
+    assert_eq!(restored.resource_alias_candidates_refused, 0);
 }
 
 #[test]
@@ -231,6 +285,8 @@ fn converted_page_with_counts(
         black_preserved: 1,
         resource_alias_setters_eligible: alias_eligible,
         resource_alias_setters_ineligible: alias_ineligible,
+        resource_alias_candidates_converted: 0,
+        resource_alias_candidates_refused: 0,
         operator_skips: OperatorSkipCounts {
             default_color_space_unsafe: default_unsafe,
             ..OperatorSkipCounts::default()
