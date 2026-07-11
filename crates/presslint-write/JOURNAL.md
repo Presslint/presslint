@@ -2,6 +2,35 @@
 
 Earlier entries are preserved in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T180 - Page named-image and stencil alias admission
+
+One bounded shallow page-XObject inspection now runs per conversion request
+through the already-open object lookup. Its report pages are indexed by exact
+leaf reference; duplicate references are poisoned, and a match must also agree
+on object byte offset and document ordinal. The matched XObject report travels
+as a separate callback fact and does not extend the page colour-facts model.
+
+The new private `PageXObjectPolicy` builds one deterministic semantic-name map
+per analysed page. PDF `#xx` escapes are decoded for both report keys and `Do`
+operands; malformed escapes fail closed, names remain case-sensitive, decoded
+collisions poison the semantic name, and a named structural skip overrides a
+same-name target. Page-scoped inspection gaps make every name unknown, while an
+unused malformed declaration affects no unrelated invoked name.
+
+Named ordinary images (`/ImageMask` absent or false) are neutral to current
+graphics-state colour. A `/ImageMask true` target consumes only the
+nonstroking alias lane when width and height are positive, BitsPerComponent is
+absent or exactly 1, and ColorSpace is absent. Invalid images, Forms, missing
+or unknown names, and inline images remain refused; invocation inside a text
+or open path object refuses before XObject classification.
+
+`Do` creates no conversion candidate. The existing source selection and
+setter candidates, root/shared-record closure, component dry-run, direct
+conversion order and counts, reconciliation, edited-page validation, staging,
+selector decisions, page atomicity, and append-only source-prefix invariant are
+unchanged. Policy construction retains only small structural facts and name
+buffers; no image stream or pixel data is copied or decoded.
+
 ## T179 - Root-Atomic Page-Alias Conversion
 
 Finished `AliasEpochOutcome` values are now consumed directly after the one

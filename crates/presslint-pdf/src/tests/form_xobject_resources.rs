@@ -1,5 +1,5 @@
 use crate::{
-    ClassicXrefTableInspection, ImageColorSpaceMetadata, ImageIntegerMetadata,
+    ClassicXrefTableInspection, ImageColorSpaceMetadata, ImageIntegerMetadata, ImageMaskMetadata,
     ImageXObjectMetadata, IndirectRef, ObjectLookup, PageXObjectResourceTarget, PdfName,
     SkippedPageXObjectResourceReason, inspect_classic_xref_table, inspect_form_xobject_resources,
 };
@@ -91,6 +91,7 @@ fn wh_bpc_no_colorspace(width: u32, height: u32, bits_per_component: u32) -> Ima
             value: bits_per_component,
         },
         color_space: ImageColorSpaceMetadata::Missing,
+        image_mask: ImageMaskMetadata::Missing,
     }
 }
 
@@ -143,8 +144,43 @@ fn form_image_target_carries_direct_colorspace_metadata() {
                 height: ImageIntegerMetadata::Value { value: 2 },
                 bits_per_component: ImageIntegerMetadata::Value { value: 8 },
                 color_space: ImageColorSpaceMetadata::DeviceCmyk,
+                image_mask: ImageMaskMetadata::Missing,
             }
         )]
+    );
+}
+
+#[test]
+fn form_nested_stencil_target_carries_generic_metadata_without_form_admission() {
+    // The generic metadata (including the `/ImageMask` fact) propagates through
+    // the shared classifier for form-scope resources exactly as for pages;
+    // the enclosing Form target itself never carries image metadata.
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 7 /Resources << /XObject << /St 2 0 R /Fn 3 0 R >> >> >>\nstream\n/St Do\nendstream\nendobj\n",
+        b"2 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ImageMask true >>\nstream\nx\nendstream\nendobj\n",
+        b"3 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 >>\nstream\n\nendstream\nendobj\n",
+    ]);
+
+    let report = inspect_form_xobject_resources(&pdf.source, pdf.lookup(), pdf.object_offset(1));
+
+    assert_eq!(
+        report.image_xobjects,
+        vec![image_target(
+            b"St",
+            2,
+            pdf.object_offset(2),
+            ImageXObjectMetadata {
+                width: ImageIntegerMetadata::Value { value: 2 },
+                height: ImageIntegerMetadata::Value { value: 2 },
+                bits_per_component: ImageIntegerMetadata::Missing,
+                color_space: ImageColorSpaceMetadata::Missing,
+                image_mask: ImageMaskMetadata::True,
+            }
+        )]
+    );
+    assert_eq!(
+        report.form_xobjects,
+        vec![target(b"Fn", 3, pdf.object_offset(3))]
     );
 }
 

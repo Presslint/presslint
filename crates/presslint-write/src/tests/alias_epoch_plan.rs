@@ -25,6 +25,7 @@ use crate::content_color_convert::DeviceColorSpace;
 use crate::link_routing::{LinkRouting, build_link_routing};
 use crate::page_content_sequence::{OccurrenceInput, PageContentSequence};
 use crate::page_device_space_policy::{PageColorFacts, PageDeviceSpacePolicy};
+use crate::page_xobject_policy::PageXObjectPolicy;
 
 use super::content_color_convert::{
     CMYK_TO_CMYK_LINK, GRAY_TO_GRAY_LINK, RGB_TO_CMYK_LINK, link_bytes,
@@ -86,7 +87,9 @@ fn all_links() -> LinkRouting {
 }
 
 /// Drive the plan exactly as the converter's single walk does. `None` mirrors
-/// the converter's whole-page walk-failure refusal.
+/// the converter's whole-page walk-failure refusal. The `XObject` policy is the
+/// unmatched (`None`-report) one, so every named `Do` stays unknown/refused;
+/// admitted-image/stencil behaviour lives in the dedicated `XObject` matrix.
 fn run_plan(
     policy: &PageDeviceSpacePolicy,
     routing: &LinkRouting,
@@ -98,7 +101,8 @@ fn run_plan(
         sequence.records(),
         policy.color_space_env(),
     );
-    let mut plan = AliasEpochPlan::new(policy, routing, target, PageIndex(0), sequence);
+    let xobjects = PageXObjectPolicy::new(None);
+    let mut plan = AliasEpochPlan::new(policy, routing, &xobjects, target, PageIndex(0), sequence);
     let mut previous = Rc::new(GraphicsStateSnapshot::page_default());
     for op in program.ops() {
         let Ok(op) = op else {
@@ -539,13 +543,14 @@ fn colour_neutral_allowlist_operators_keep_the_epoch_provable() {
 
 #[test]
 fn conservative_boundaries_refuse_a_live_root_each_with_its_reason() {
-    let cases: [(&[u8], EpochRefusalReason); 12] = [
+    let cases: [(&[u8], EpochRefusalReason); 13] = [
         (b"(x) Tj", EpochRefusalReason::TextShow),
         (b"[(x)] TJ", EpochRefusalReason::TextShow),
         (b"(x) '", EpochRefusalReason::TextShow),
         (b"1 2 (x) \"", EpochRefusalReason::TextShow),
         (b"/Fm Do", EpochRefusalReason::XObjectInvoke),
         (b"BI", EpochRefusalReason::InlineImage),
+        (b"ID", EpochRefusalReason::InlineImage),
         (b"EI", EpochRefusalReason::InlineImage),
         (b"1 0 d0", EpochRefusalReason::Type3Operator),
         (b"1 0 0 0 0 0 d1", EpochRefusalReason::Type3Operator),

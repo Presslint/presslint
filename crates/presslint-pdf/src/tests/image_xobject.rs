@@ -1,5 +1,12 @@
+// The dependency-free serde value harness shared by shape-locking tests.
+#[path = "content_stream_extent/serde_harness.rs"]
+#[allow(clippy::duplicate_mod)]
+mod serde_harness;
+
+use serde_harness::{TestSerdeValue, from_serde_value, serde_value};
+
 use crate::{
-    ImageColorSpaceMetadata, ImageIntegerMetadata, ImageXObjectMetadata,
+    ImageColorSpaceMetadata, ImageIntegerMetadata, ImageMaskMetadata, ImageXObjectMetadata,
     inspect_image_xobject_metadata, inspect_indirect_object_dictionary,
 };
 
@@ -30,6 +37,7 @@ fn direct_device_gray_metadata_is_mapped() {
             height: ImageIntegerMetadata::Value { value: 50 },
             bits_per_component: ImageIntegerMetadata::Value { value: 8 },
             color_space: ImageColorSpaceMetadata::DeviceGray,
+            image_mask: ImageMaskMetadata::Missing,
         }
     );
 }
@@ -58,6 +66,7 @@ fn absent_entries_are_reported_missing() {
             height: ImageIntegerMetadata::Missing,
             bits_per_component: ImageIntegerMetadata::Missing,
             color_space: ImageColorSpaceMetadata::Missing,
+            image_mask: ImageMaskMetadata::Missing,
         }
     );
 }
@@ -141,6 +150,130 @@ fn duplicate_entries_are_reported_explicit() {
         metadata.color_space,
         ImageColorSpaceMetadata::Duplicate { .. }
     ));
+}
+
+#[test]
+fn explicit_image_mask_booleans_stay_distinct_from_missing() {
+    let missing = image_metadata(b"1 0 obj\n<< /Subtype /Image /Width 2 /Height 2 >>");
+    assert_eq!(missing.image_mask, ImageMaskMetadata::Missing);
+
+    let explicit_false = image_metadata(
+        b"1 0 obj\n<< /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ImageMask false >>",
+    );
+    assert_eq!(explicit_false.image_mask, ImageMaskMetadata::False);
+
+    let explicit_true =
+        image_metadata(b"1 0 obj\n<< /Subtype /Image /Width 2 /Height 2 /ImageMask true >>");
+    assert_eq!(explicit_true.image_mask, ImageMaskMetadata::True);
+}
+
+#[test]
+fn duplicate_image_mask_keys_are_reported_explicit() {
+    let metadata = image_metadata(
+        b"1 0 obj\n<< /Subtype /Image /Width 2 /Height 2 /ImageMask true /ImageMask false >>",
+    );
+
+    assert!(matches!(
+        metadata.image_mask,
+        ImageMaskMetadata::Duplicate { .. }
+    ));
+}
+
+#[test]
+fn non_boolean_and_indirect_image_mask_values_are_unsupported_not_guessed() {
+    let cases: [(&[u8], crate::DictionaryValueKind); 4] = [
+        (
+            b"1 0 obj\n<< /Subtype /Image /Width 2 /Height 2 /ImageMask 1 >>",
+            crate::DictionaryValueKind::NumberLike,
+        ),
+        (
+            b"1 0 obj\n<< /Subtype /Image /Width 2 /Height 2 /ImageMask /true >>",
+            crate::DictionaryValueKind::Name,
+        ),
+        (
+            b"1 0 obj\n<< /Subtype /Image /Width 2 /Height 2 /ImageMask null >>",
+            crate::DictionaryValueKind::Null,
+        ),
+        (
+            b"1 0 obj\n<< /Subtype /Image /Width 2 /Height 2 /ImageMask 9 0 R >>",
+            crate::DictionaryValueKind::IndirectReferenceLike,
+        ),
+    ];
+    for (dictionary, value_kind) in cases {
+        let metadata = image_metadata(dictionary);
+        assert_eq!(
+            metadata.image_mask,
+            ImageMaskMetadata::Unsupported { value_kind },
+            "{}",
+            String::from_utf8_lossy(dictionary)
+        );
+    }
+}
+
+/// The serialized field names of one metadata map value.
+#[allow(clippy::panic)]
+fn field_names(value: &TestSerdeValue) -> Vec<String> {
+    match value {
+        TestSerdeValue::Map(fields) => fields.iter().map(|(key, _)| key.clone()).collect(),
+        other => panic!("expected a map, got {other:?}"),
+    }
+}
+
+#[test]
+fn default_missing_image_mask_is_omitted_and_legacy_shapes_deserialize() {
+    let metadata = image_metadata(
+        b"1 0 obj\n<< /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray >>",
+    );
+    assert_eq!(metadata.image_mask, ImageMaskMetadata::Missing);
+
+    // Serialization omits the default fact: the legacy four-field JSON shape
+    // is preserved byte-for-byte for every pre-`/ImageMask` report.
+    let serialized = serde_value(&metadata).expect("metadata serializes");
+    assert_eq!(
+        field_names(&serialized),
+        vec!["width", "height", "bits_per_component", "color_space"]
+    );
+
+    // A legacy value without the field deserializes to the Missing default.
+    let legacy: ImageXObjectMetadata =
+        from_serde_value(serialized).expect("legacy shape deserializes");
+    assert_eq!(legacy, metadata);
+}
+
+#[test]
+#[allow(clippy::panic)]
+fn explicit_image_mask_facts_serialize_tagged_and_round_trip() {
+    let stencil =
+        image_metadata(b"1 0 obj\n<< /Subtype /Image /Width 2 /Height 2 /ImageMask true >>");
+    let serialized = serde_value(&stencil).expect("metadata serializes");
+    assert_eq!(
+        field_names(&serialized),
+        vec![
+            "width",
+            "height",
+            "bits_per_component",
+            "color_space",
+            "image_mask"
+        ]
+    );
+    let round_tripped: ImageXObjectMetadata =
+        from_serde_value(serialized.clone()).expect("shape round-trips");
+    assert_eq!(round_tripped, stencil);
+
+    let TestSerdeValue::Map(fields) = serialized else {
+        panic!("expected a map");
+    };
+    let (_, mask) = fields
+        .iter()
+        .find(|(key, _)| key == "image_mask")
+        .expect("image_mask field present");
+    assert_eq!(
+        *mask,
+        TestSerdeValue::Map(vec![(
+            "kind".to_string(),
+            TestSerdeValue::String("true".to_string())
+        )])
+    );
 }
 
 #[test]

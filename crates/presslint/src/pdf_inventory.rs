@@ -56,7 +56,11 @@ pub struct PdfInventoryPage {
     /// Top-level page-scope image `XObject` targets, each carrying the resolved
     /// image reference/offset and structural
     /// [`ImageXObjectMetadata`](presslint_pdf::ImageXObjectMetadata) (image
-    /// dimensions and colour-space family) without decoding image samples.
+    /// dimensions, colour-space family, and the explicit `/ImageMask`
+    /// stencil-mask fact via
+    /// [`ImageMaskMetadata`](presslint_pdf::ImageMaskMetadata)) without
+    /// decoding image samples. The default `Missing` mask fact is omitted from
+    /// serialized reports, so legacy JSON shapes stay byte-identical.
     pub image_xobjects: Vec<presslint_pdf::PageXObjectResourceTarget>,
     /// Page-local `XObject` resource diagnostics.
     pub xobject_resource_skipped: Vec<presslint_pdf::SkippedPageXObjectResource>,

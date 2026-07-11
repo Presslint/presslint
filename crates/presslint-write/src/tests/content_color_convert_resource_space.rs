@@ -419,13 +419,23 @@ fn ownership_vetoed_alias_selection_still_feeds_a_private_setter() {
 }
 
 #[test]
-fn conservative_epoch_boundaries_keep_counts_bytes_and_direct_conversion() {
-    // Text showing, XObject invocation, compatibility sections, and unknown
+fn form_and_other_conservative_boundaries_keep_counts_bytes_and_direct_conversion() {
+    // Text showing, Form invocation, compatibility sections, and unknown
     // operators refuse only the PRIVATE alias epoch: the structural setter
     // counts, every alias byte, and the neighbouring direct shortcut
-    // conversion are all unchanged.
+    // conversion are all unchanged. Ordinary images and valid stencils have
+    // narrower effects covered by the focused XObject matrix.
     let stream = b"/GrayAlias cs 0.5 sc BT (x) Tj ET /Fm Do BX EX XY 1 0 0 rg\n";
-    let input = resource_pdf(stream, ALIAS_RESOURCES);
+    let input = assemble_classic(&[
+        CATALOG.to_vec(),
+        PAGES.to_vec(),
+        resource_page_body(
+            "4 0 R",
+            "<< /ColorSpace << /GrayAlias /DeviceGray /RgbAlias /DeviceRGB /CmykAlias /DeviceCMYK >> /XObject << /Fm 5 0 R >> >>",
+        ),
+        stream_body("", stream),
+        stream_body(" /Type /XObject /Subtype /Form /BBox [0 0 1 1]", b""),
+    ]);
     let output = convert(&input, RGB_TO_CMYK_LINK);
 
     let page = &output.converted[0];

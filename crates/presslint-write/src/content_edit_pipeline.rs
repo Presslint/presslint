@@ -27,15 +27,17 @@ use presslint_pdf::{
     DictionaryValueKind, DocumentAccessBackend, DocumentAccessError, DocumentAccessRejection,
     DocumentPageExtGStateResourcesInspection, DocumentPageExtGStateResourcesInspectionError,
     DocumentPageTransparencyGroupsInspection, DocumentPageTransparencyGroupsInspectionError,
-    FlateDecodeParameters, FlateDecodeParametersResolution, IndirectObjectEditDecision,
-    IndirectObjectEditDisposition, IndirectRef, ObjectLookup, PageExtGStateResourcesInspection,
-    PageTransparencyGroupInspection, classify_content_stream_filter, content_stream_data_slice,
+    DocumentPageXObjectResourcesInspection, FlateDecodeParameters, FlateDecodeParametersResolution,
+    IndirectObjectEditDecision, IndirectObjectEditDisposition, IndirectRef, ObjectLookup,
+    PageExtGStateResourcesInspection, PageTransparencyGroupInspection,
+    PageXObjectResourcesInspection, classify_content_stream_filter, content_stream_data_slice,
     decode_flate_stream, encode_flate_stream, inspect_document_access,
     inspect_document_page_color_space_resources_with_lookup,
     inspect_document_page_content_extents_with_lookup,
     inspect_document_page_default_color_spaces_with_lookup,
     inspect_document_page_extgstate_resources_with_lookup,
-    inspect_document_page_transparency_groups_with_lookup, inspect_indirect_object_dictionary,
+    inspect_document_page_transparency_groups_with_lookup,
+    inspect_document_page_xobject_resources_with_lookup, inspect_indirect_object_dictionary,
     inspect_object_consumer_index, resolve_flate_decode_parameters,
 };
 use presslint_syntax::{serialize_tokens_unmodified, tokenize};
@@ -272,6 +274,14 @@ struct PreparedSequenceObject<'a> {
 /// object offset and ordinal), never by compacted report vector position. A
 /// failed inspection or a failed match degrades to unknown facts and never
 /// skips the page.
+///
+/// The page `/Resources /XObject` structural inspection also runs ONCE per
+/// request and is delivered as a SEPARATE callback fact (never folded into
+/// [`PageColorFacts`]): the exact identity-matched
+/// [`PageXObjectResourcesInspection`] of the page, or `None` when the
+/// inspection failed or the page-identity join (reference plus offset/ordinal
+/// corroboration, duplicate references poisoned) did not match. A `None` fact
+/// degrades the callback's `XObject` knowledge, never the page itself.
 #[allow(clippy::too_many_lines)]
 pub fn edit_page_content_incremental_sequence<T, P, F>(
     input: &[u8],
@@ -286,7 +296,12 @@ where
         Option<&PageTransparencyGroupInspection>,
         &PageContentSequence,
     ) -> Option<PipelineSkipReason>,
-    F: Fn(PageIndex, &PageContentSequence, &PageColorFacts<'_>) -> Option<PageSequenceEdit<T>>,
+    F: Fn(
+        PageIndex,
+        &PageContentSequence,
+        &PageColorFacts<'_>,
+        Option<&PageXObjectResourcesInspection>,
+    ) -> Option<PageSequenceEdit<T>>,
 {
     let access = inspect_document_access(input).map_err(|error| EditPageContentError::Open {
         error: Box::new(error),
@@ -337,6 +352,15 @@ where
     .ok();
     let facts_index =
         PageColorFactsIndex::new(color_space_document.as_ref(), default_document.as_ref());
+    // Advisory page-XObject facts: ONE bounded shallow document inspection per
+    // request; a failure degrades every page to a `None` fact, never a skip.
+    let xobject_document = inspect_document_page_xobject_resources_with_lookup(
+        input,
+        lookup,
+        access.page_tree_root.object_byte_offset,
+    )
+    .ok();
+    let xobject_index = PageXObjectReportIndex::new(xobject_document.as_ref());
     let mut published = Vec::new();
     let mut skipped = Vec::new();
     let mut dirty_objects = Vec::new();
@@ -439,7 +463,12 @@ where
             page.leaf.object_byte_offset,
             page.ordinal,
         );
-        let Some(page_edit) = edit(page_index, &sequence, &facts) else {
+        let xobject_page = xobject_index.matched(
+            page.leaf.reference,
+            page.leaf.object_byte_offset,
+            page.ordinal,
+        );
+        let Some(page_edit) = edit(page_index, &sequence, &facts, xobject_page) else {
             skipped.push(whole_page_skip(
                 page_index,
                 PipelineSkipReason::ContentRoundTripMismatch,
@@ -563,6 +592,130 @@ where
         pages: published,
         skipped,
     })
+}
+
+/// Request-local exact join from leaf page references to advisory page
+/// `XObject` reports.
+///
+/// Deliberately separate from [`PageColorFactsIndex`] (which stays a
+/// two-report colour join): the `XObject` fact travels as its own callback
+/// argument. Lookups are ordered (`BTreeMap`) by exact [`IndirectRef`]; a
+/// reference reported more than once is poisoned to a failed match, and every
+/// match is corroborated by page object byte offset and document ordinal.
+struct PageXObjectReportIndex<'a> {
+    slots: BTreeMap<IndirectRef, Option<&'a PageXObjectResourcesInspection>>,
+}
+
+impl<'a> PageXObjectReportIndex<'a> {
+    fn new(document: Option<&'a DocumentPageXObjectResourcesInspection>) -> Self {
+        let mut slots = BTreeMap::new();
+        if let Some(document) = document {
+            for page in &document.pages {
+                slots
+                    .entry(page.page_reference)
+                    .and_modify(|slot| *slot = None)
+                    .or_insert(Some(page));
+            }
+        }
+        Self { slots }
+    }
+
+    /// Resolve one uniquely matched, identity-corroborated report page; any
+    /// missing, duplicate, or inconsistent match is `None`, fail-closed.
+    fn matched(
+        &self,
+        reference: IndirectRef,
+        object_byte_offset: usize,
+        ordinal: usize,
+    ) -> Option<&'a PageXObjectResourcesInspection> {
+        let page = self.slots.get(&reference).copied().flatten()?;
+        (page.page_object_byte_offset == object_byte_offset && page.ordinal == ordinal)
+            .then_some(page)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod page_xobject_report_index_tests {
+    use super::*;
+
+    fn page(
+        ordinal: usize,
+        object_number: u32,
+        page_object_byte_offset: usize,
+    ) -> PageXObjectResourcesInspection {
+        PageXObjectResourcesInspection {
+            ordinal,
+            page_reference: IndirectRef {
+                object_number,
+                generation: 0,
+            },
+            page_object_byte_offset,
+            image_xobjects: Vec::new(),
+            form_xobjects: Vec::new(),
+            image_xobject_names: Vec::new(),
+            form_xobject_names: Vec::new(),
+            skipped: Vec::new(),
+        }
+    }
+
+    fn document(
+        pages: Vec<PageXObjectResourcesInspection>,
+    ) -> DocumentPageXObjectResourcesInspection {
+        DocumentPageXObjectResourcesInspection {
+            byte_len: 500,
+            pages,
+            page_tree_skipped: Vec::new(),
+            visited_node_count: 1,
+            truncated: None,
+        }
+    }
+
+    #[test]
+    fn exact_reference_match_requires_offset_and_ordinal_corroboration() {
+        let document = document(vec![page(2, 7, 70)]);
+        let index = PageXObjectReportIndex::new(Some(&document));
+        let reference = IndirectRef {
+            object_number: 7,
+            generation: 0,
+        };
+
+        assert!(index.matched(reference, 70, 2).is_some());
+        assert!(index.matched(reference, 71, 2).is_none());
+        assert!(index.matched(reference, 70, 1).is_none());
+        assert!(
+            index
+                .matched(
+                    IndirectRef {
+                        object_number: 7,
+                        generation: 1,
+                    },
+                    70,
+                    2,
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn duplicate_page_references_and_missing_documents_are_poisoned() {
+        let document = document(vec![page(0, 3, 30), page(1, 3, 30)]);
+        let reference = IndirectRef {
+            object_number: 3,
+            generation: 0,
+        };
+
+        assert!(
+            PageXObjectReportIndex::new(Some(&document))
+                .matched(reference, 30, 0)
+                .is_none()
+        );
+        assert!(
+            PageXObjectReportIndex::new(None)
+                .matched(reference, 30, 0)
+                .is_none()
+        );
+    }
 }
 
 fn prepare_sequence_object<'a>(

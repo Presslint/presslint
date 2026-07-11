@@ -4,6 +4,22 @@ Older accumulated journal history lives in [JOURNAL-archive-4.md](JOURNAL-archiv
 
 ## Current State
 
+### T180 - Image XObject stencil-mask metadata
+
+- `ImageXObjectMetadata` now carries additive `ImageMaskMetadata` with exact
+  `Missing`, `False`, `True`, `Duplicate`, and `Unsupported` structural facts.
+  `Missing` is the default and is omitted from serde output, so the earlier
+  four-field JSON shape serializes unchanged and deserializes with the absent
+  fact; explicit false remains distinct from absence.
+- The shallow image dictionary pass recognizes only direct boolean
+  `/ImageMask` values. Non-boolean scalars, containers, and indirect references
+  remain explicit unsupported shapes, while duplicate keys retain their byte
+  ranges. No sample, filter, stream, mask, decode-array, or profile data is
+  decoded or retained.
+- Page- and Form-scope XObject target reports carry the same generic image
+  metadata. This is descriptor propagation only: it does not admit Form
+  descent or attach image metadata to Form targets.
+
 ### T173 - Bounded ICCBased Profile Header Descriptor Facts (T168b)
 
 - New `icc_profile` module. The ONE new abstraction is
@@ -290,4 +306,3 @@ Older accumulated journal history lives in [JOURNAL-archive-4.md](JOURNAL-archiv
   interpretation guidance; ISO 32000-1 §7.8.3 (resource dictionaries + inheritance),
   §8.6.5 (ICCBased is profile-based, not device), §8.6.6 (Separation/DeviceN/Indexed/
   Pattern), §8.6.8 (`CS/cs`, `SC/SCN/sc/scn`).
-

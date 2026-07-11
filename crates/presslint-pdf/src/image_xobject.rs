@@ -7,12 +7,12 @@ use crate::{DictionaryEntryByteRange, DictionaryEntrySpan, DictionaryValueKind};
 /// `XObject`.
 ///
 /// This report is intentionally structural and copy-cheap: it carries only the
-/// four scalar image dictionary entries `/Width`, `/Height`,
-/// `/BitsPerComponent`, and `/ColorSpace`, each mapped to a value or an explicit
-/// unsupported shape. It never decodes image samples and never retains PDF
-/// bytes, object bodies, stream bodies, resource dictionaries, decoded image
-/// data, or ICC/profile bytes; the only owned bytes are a copied non-device
-/// `/ColorSpace` name.
+/// five scalar image dictionary entries `/Width`, `/Height`,
+/// `/BitsPerComponent`, `/ColorSpace`, and `/ImageMask`, each mapped to a value
+/// or an explicit unsupported shape. It never decodes image samples and never
+/// retains PDF bytes, object bodies, stream bodies, resource dictionaries,
+/// decoded image data, or ICC/profile bytes; the only owned bytes are a copied
+/// non-device `/ColorSpace` name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageXObjectMetadata {
     /// Direct `/Width` image dimension.
@@ -23,6 +23,14 @@ pub struct ImageXObjectMetadata {
     pub bits_per_component: ImageIntegerMetadata,
     /// Direct `/ColorSpace` device family or explicit unsupported shape.
     pub color_space: ImageColorSpaceMetadata,
+    /// Direct `/ImageMask` stencil-mask declaration (ISO 32000-1 §8.9.6.2).
+    ///
+    /// The default [`ImageMaskMetadata::Missing`] is omitted from serialized
+    /// reports and absent in legacy reports, so pre-existing JSON shapes stay
+    /// byte-identical and deserialize unchanged. `Missing` and `False` are
+    /// deliberately distinct structural facts and are never collapsed here.
+    #[serde(default, skip_serializing_if = "ImageMaskMetadata::is_missing")]
+    pub image_mask: ImageMaskMetadata,
 }
 
 /// A scalar integer image dictionary entry (`/Width`, `/Height`, or
@@ -65,7 +73,7 @@ pub enum ImageIntegerMetadata {
 /// Only the three direct device names are mapped. Any other direct name, and
 /// every non-name value (an array such as `[/ICCBased ...]`/`[/Indexed ...]`, an
 /// indirect reference, a dictionary, and so on) stays explicit rather than
-/// guessed, per the task's "no guessing" rule for unsupported, malformed,
+/// guessed, preserving fail-closed handling for unsupported, malformed,
 /// indirect, or unresolved colour-space shapes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -102,9 +110,50 @@ pub enum ImageColorSpaceMetadata {
     },
 }
 
+/// The `/ImageMask` image dictionary entry, mapped to an exact boolean fact or
+/// an explicit unsupported shape.
+///
+/// The scanner reports `True`/`False` only for the exact scalar keywords
+/// `true`/`false`; every other value shape (a number, name, string, array,
+/// dictionary, or an indirect reference — deliberately not resolved in this
+/// structural slice) stays an explicit `Unsupported` fact rather than a guess.
+/// There is no separate malformed variant: booleans are exact by construction.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImageMaskMetadata {
+    /// The `/ImageMask` key was absent (the PDF default: not a stencil mask).
+    #[default]
+    Missing,
+    /// An explicit direct `false` scalar.
+    False,
+    /// An explicit direct `true` scalar: the image declares itself a stencil
+    /// mask whose painted samples take the current nonstroking colour.
+    True,
+    /// The `/ImageMask` key occurred more than once.
+    Duplicate {
+        /// First `/ImageMask` key range observed.
+        first_key_range: DictionaryEntryByteRange,
+        /// Duplicate `/ImageMask` key range observed.
+        duplicate_key_range: DictionaryEntryByteRange,
+    },
+    /// The value was present but not an exact `true`/`false` scalar.
+    Unsupported {
+        /// Shallow value kind reported by dictionary entry inspection.
+        value_kind: DictionaryValueKind,
+    },
+}
+
+impl ImageMaskMetadata {
+    /// Whether this is the default absent fact (the serde omission gate).
+    #[must_use]
+    pub const fn is_missing(&self) -> bool {
+        matches!(self, Self::Missing)
+    }
+}
+
 /// Inspect an already-resolved image `XObject` dictionary's shallow entries for
-/// structural `/Width`, `/Height`, `/BitsPerComponent`, and `/ColorSpace`
-/// metadata.
+/// structural `/Width`, `/Height`, `/BitsPerComponent`, `/ColorSpace`, and
+/// `/ImageMask` metadata.
 ///
 /// The caller supplies the `entries` from
 /// [`crate::inspect_indirect_object_dictionary`] over the resolved
@@ -122,6 +171,7 @@ pub fn inspect_image_xobject_metadata(
         height: integer_metadata(input, entries, b"/Height"),
         bits_per_component: integer_metadata(input, entries, b"/BitsPerComponent"),
         color_space: color_space_metadata(input, entries),
+        image_mask: image_mask_metadata(input, entries),
     }
 }
 
@@ -165,6 +215,33 @@ fn parse_non_negative_u32(bytes: &[u8]) -> Option<u32> {
         value = value.checked_mul(10)?.checked_add(u32::from(byte - b'0'))?;
     }
     Some(value)
+}
+
+fn image_mask_metadata(input: &[u8], entries: &[DictionaryEntrySpan]) -> ImageMaskMetadata {
+    let entry = match unique_entry(input, entries, b"/ImageMask") {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return ImageMaskMetadata::Missing,
+        Err((first_key_range, duplicate_key_range)) => {
+            return ImageMaskMetadata::Duplicate {
+                first_key_range,
+                duplicate_key_range,
+            };
+        }
+    };
+
+    // Dictionary inspection classifies exactly the `true`/`false` keywords as
+    // `Boolean`, so the byte match below is total; the fallthrough only guards
+    // a future classifier drift and stays an explicit unsupported fact.
+    if entry.value_kind == DictionaryValueKind::Boolean {
+        match &input[entry.value_range.start..entry.value_range.end] {
+            b"true" => return ImageMaskMetadata::True,
+            b"false" => return ImageMaskMetadata::False,
+            _ => {}
+        }
+    }
+    ImageMaskMetadata::Unsupported {
+        value_kind: entry.value_kind,
+    }
 }
 
 fn color_space_metadata(input: &[u8], entries: &[DictionaryEntrySpan]) -> ImageColorSpaceMetadata {

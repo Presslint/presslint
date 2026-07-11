@@ -15,7 +15,10 @@
 //! operator whose declared space matches NO supplied link's source is left
 //! byte-verbatim and counted as `no_matching_link`. Proven exact page aliases
 //! of DeviceGray/RGB/CMYK are converted root-atomically after the same paint
-//! walk; ICCBased/Separation/DeviceN/Indexed/Pattern spaces remain out of scope.
+//! walk; a named `Do` of a proven ordinary image is colour-neutral to that
+//! proof and a proven stencil consumes the nonstroking alias lane, while
+//! forms, unknown/invalid images, and inline images keep refusing the epoch.
+//! ICCBased/Separation/DeviceN/Indexed/Pattern spaces remain out of scope.
 //!
 //! Each analysed page consults a private
 //! [`crate::page_device_space_policy::PageDeviceSpacePolicy`]: exact page
@@ -48,6 +51,7 @@ use presslint_color_lcms::{ColorEngine, DeviceLinkSpace, LcmsColorEngine, LcmsEr
 use presslint_paint::{GraphicsStateSnapshot, PaintOpKind, PaintProgram};
 use presslint_pdf::{
     DictionaryValueKind, DocumentAccessError, IndirectObjectEditDisposition, IndirectRef,
+    PageXObjectResourcesInspection,
 };
 use presslint_selectors::Selector;
 use presslint_types::{ColorUsage, PageIndex};
@@ -67,6 +71,7 @@ use crate::{
     },
     page_content_sequence::{LocalSplice, PageContentSequence},
     page_device_space_policy::{PageColorFacts, PageDeviceSpacePolicy},
+    page_xobject_policy::PageXObjectPolicy,
     pdf_number_serialize::serialize_color_component,
     selector_match::{
         UnsupportedTargetLeaf, collect_unsupported_leaves, selector_matches_operator,
@@ -530,11 +535,12 @@ pub fn convert_content_colors_incremental(
             transparency_group_page_skip_reason(group_page)
                 .or_else(|| extgstate_page_skip_reason(extgstate_page, sequence))
         },
-        |page_index, sequence, facts| {
+        |page_index, sequence, facts, xobjects| {
             convert_sequence(
                 page_index,
                 sequence,
                 facts,
+                xobjects,
                 &routing,
                 request.black_preservation,
                 target,
@@ -593,6 +599,7 @@ fn convert_sequence(
     page_index: PageIndex,
     sequence: &PageContentSequence,
     facts: &PageColorFacts<'_>,
+    xobject_report: Option<&PageXObjectResourcesInspection>,
     routing: &LinkRouting,
     black_preservation: BlackPreservationPolicy,
     target: Option<&Selector>,
@@ -602,12 +609,23 @@ fn convert_sequence(
     // environment: exact page device aliases resolve in graphics state, and
     // the per-family /Default* statuses gate the direct shortcut route.
     let policy = PageDeviceSpacePolicy::from_page_facts(facts);
+    // The page-exact XObject colour-effect map: one deterministic build per
+    // analysed page from the matched advisory report; a failed inspection or
+    // identity join classifies every named `Do` as unknown, fail-closed.
+    let xobject_policy = PageXObjectPolicy::new(xobject_report);
     let program = PaintProgram::new(decoded, sequence.records(), policy.color_space_env());
     // The alias-epoch plan observes EVERY walked op before the colour-only
     // branch below. It is the sole producer of the structural alias-setter
     // tallies (unchanged T177 per-setter meaning) and privately retains
     // closed/refused epoch candidates; execution happens once after the walk.
-    let mut plan = AliasEpochPlan::new(&policy, routing, target, page_index, sequence);
+    let mut plan = AliasEpochPlan::new(
+        &policy,
+        routing,
+        &xobject_policy,
+        target,
+        page_index,
+        sequence,
+    );
     let mut tallies: Vec<PageTally> = (0..sequence.occurrence_count())
         .map(|_| PageTally {
             link_converted: vec![0; routing.links().len()],

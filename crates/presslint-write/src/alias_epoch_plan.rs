@@ -28,15 +28,19 @@
 //!
 //! The proof is FAIL-CLOSED at every boundary the walker cannot certify: text
 //! showing (the snapshot lacks the effective font/subtype, and Type3 glyph
-//! programs inherit graphics state, so `Tr` alone proves nothing), `Do`
-//! (a form inherits both lanes; an image stencil consumes the nonstroking
-//! colour, §8.9.6.2), inline images, Type3 `d0`/`d1`, `BX`/`EX` compatibility
-//! sections, Pattern-name or otherwise ineligible setters inside an active
-//! epoch, malformed graphics-object placement (§8.2: text-object and
-//! path-object lifecycles are both tracked, so `q`/`Q`/`cm` inside `BT`/`ET`
-//! and any non-path operator inside an open path refuse), unknown operators,
-//! and any disagreement between raw operator bytes, plan state, and the paint
-//! snapshot. Refusal affects alias plans only; the neighbouring direct-device
+//! programs inherit graphics state, so `Tr` alone proves nothing), inline
+//! images, Type3 `d0`/`d1`, `BX`/`EX` compatibility sections, Pattern-name or
+//! otherwise ineligible setters inside an active epoch, malformed
+//! graphics-object placement (§8.2: text-object and path-object lifecycles
+//! are both tracked, so `q`/`Q`/`cm` inside `BT`/`ET` and any non-path
+//! operator inside an open path refuse), unknown operators, and any
+//! disagreement between raw operator bytes, plan state, and the paint
+//! snapshot. A named `Do` is classified through the page's exact matched
+//! [`PageXObjectPolicy`]: an ordinary image is colour-neutral, a structurally
+//! valid `/ImageMask true` stencil consumes the current nonstroking colour
+//! (§8.9.6.2) exactly like a fill paint, and a form, an unknown or unproven
+//! name, or an invalid image keeps the historical fail-closed refusal.
+//! Refusal affects alias plans only; the neighbouring direct-device
 //! shortcut conversion keeps its own guards, decision order, and counts.
 //!
 //! The plan is also the sole production owner of the EXISTING structural
@@ -67,6 +71,7 @@ use crate::{
     page_device_space_policy::{
         AliasSetterClass, AliasSetterEvent, PageDeviceSpacePolicy, paint_color_space,
     },
+    page_xobject_policy::{PageXObjectEffect, PageXObjectPolicy},
     selector_match::selector_matches_operator,
 };
 
@@ -136,7 +141,9 @@ pub enum EpochRefusalReason {
     RepeatedReferenceMismatch,
     /// `Tj`/`TJ`/`'`/`"` while an alias was live, regardless of `Tr`.
     TextShow,
-    /// `Do` while an alias was live (form or image stencil semantics).
+    /// A form, unknown, unproven, or invalid named `Do` while an alias was
+    /// live. Proven ordinary images are neutral and proven stencils consume
+    /// the nonstroking lane instead of refusing.
     XObjectInvoke,
     /// `BI`/`ID`/`EI` inline image or stencil semantics.
     InlineImage,
@@ -301,6 +308,8 @@ struct RecordDecision {
 pub struct AliasEpochPlan<'a> {
     policy: &'a PageDeviceSpacePolicy,
     routing: &'a LinkRouting,
+    /// Page-exact named `XObject` colour effects for `Do` classification.
+    xobjects: &'a PageXObjectPolicy,
     target: Option<&'a Selector>,
     page_index: PageIndex,
     /// Current lane pair: stroking then nonstroking.
@@ -328,6 +337,7 @@ impl<'a> AliasEpochPlan<'a> {
     pub fn new(
         policy: &'a PageDeviceSpacePolicy,
         routing: &'a LinkRouting,
+        xobjects: &'a PageXObjectPolicy,
         target: Option<&'a Selector>,
         page_index: PageIndex,
         sequence: &PageContentSequence,
@@ -345,6 +355,7 @@ impl<'a> AliasEpochPlan<'a> {
         Self {
             policy,
             routing,
+            xobjects,
             target,
             page_index,
             lanes: [None, None],
@@ -410,8 +421,25 @@ impl<'a> AliasEpochPlan<'a> {
             }
             PaintOpKind::PathPaint { paint } => self.path_paint(*paint, op),
             PaintOpKind::TextShow { .. } => self.refuse_open(op, EpochRefusalReason::TextShow),
-            PaintOpKind::XObjectInvoke { .. } => {
-                self.refuse_open(op, EpochRefusalReason::XObjectInvoke);
+            // An external object is its own graphics object (§8.2): valid at
+            // page-description level only, so invalid placement refuses BEFORE
+            // any classification. A proven ordinary image never touches the
+            // current colour; a proven stencil paints its 1-samples with the
+            // current nonstroking colour (§8.9.6.2), so it consumes the fill
+            // lane exactly like a fill paint — the stroking lane is untouched.
+            // Everything unproven keeps the historical fail-closed refusal.
+            PaintOpKind::XObjectInvoke { name } => {
+                if self.in_text_object || self.in_path_object {
+                    self.refuse_open(op, EpochRefusalReason::InvalidGraphicsObjectContext);
+                } else {
+                    match self.xobjects.effect_of(name) {
+                        PageXObjectEffect::OrdinaryImage => {}
+                        PageXObjectEffect::Stencil => self.consume(LaneSide::Nonstroking, op),
+                        PageXObjectEffect::Form | PageXObjectEffect::Unknown => {
+                            self.refuse_open(op, EpochRefusalReason::XObjectInvoke);
+                        }
+                    }
+                }
             }
             PaintOpKind::ConcatMatrix { .. } => {
                 if self.in_text_object || self.in_path_object {

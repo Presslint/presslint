@@ -165,7 +165,7 @@ pub use icc_profile::{
     parse_icc_profile_header,
 };
 pub use image_xobject::{
-    ImageColorSpaceMetadata, ImageIntegerMetadata, ImageXObjectMetadata,
+    ImageColorSpaceMetadata, ImageIntegerMetadata, ImageMaskMetadata, ImageXObjectMetadata,
     inspect_image_xobject_metadata,
 };
 pub use indirect_reference::{

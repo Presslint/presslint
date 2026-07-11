@@ -63,6 +63,7 @@ mod page_box_serialize;
 mod page_boxes;
 mod page_content_sequence;
 mod page_device_space_policy;
+mod page_xobject_policy;
 mod pdf_number_serialize;
 mod planned;
 mod reencode_content;

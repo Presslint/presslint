@@ -501,6 +501,38 @@ fn page_image_xobjects_expose_structural_metadata() -> Result<(), String> {
 }
 
 #[test]
+fn page_image_xobjects_propagate_the_image_mask_fact() -> Result<(), String> {
+    use crate::pdf::{ImageColorSpaceMetadata, ImageIntegerMetadata, ImageMaskMetadata};
+
+    let source = classic_pdf(&[
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [ 3 0 R ] /Count 1 >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /XObject << /St 5 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        b"4 0 obj\n<< /Length 6 >>\nstream\n/St Do\nendstream\nendobj\n",
+        b"5 0 obj\n<< /Type /XObject /Subtype /Image /Width 8 /Height 8 /ImageMask true /BitsPerComponent 1 >>\nstream\nx\nendstream\nendobj\n",
+    ]);
+
+    let report = build_pdf_inventory(&source, 1024).map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(report.pages[0].image_xobjects.len(), 1);
+    let metadata = report.pages[0].image_xobjects[0]
+        .image_metadata
+        .as_ref()
+        .ok_or("stencil target should carry metadata")?;
+    assert_eq!(metadata.image_mask, ImageMaskMetadata::True);
+    assert_eq!(metadata.width, ImageIntegerMetadata::Value { value: 8 });
+    assert_eq!(
+        metadata.bits_per_component,
+        ImageIntegerMetadata::Value { value: 1 }
+    );
+    assert_eq!(metadata.color_space, ImageColorSpaceMetadata::Missing);
+
+    // Serde round-trips the umbrella page shape with the additive mask fact.
+    round_trip::<PdfInventoryPage>(&report.pages[0].clone())?;
+    Ok(())
+}
+
+#[test]
 fn real_pdf_do_operators_become_image_and_form_inventory_entries() -> Result<(), String> {
     let source = classic_pdf(&[
         b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",

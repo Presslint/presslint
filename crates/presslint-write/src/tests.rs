@@ -8,6 +8,7 @@
 
 mod alias_epoch_convert;
 mod alias_epoch_plan;
+mod alias_epoch_xobject;
 mod append;
 mod content_color_convert;
 mod content_color_convert_malformed;

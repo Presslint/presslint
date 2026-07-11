@@ -1,8 +1,8 @@
 use crate::{
     ClassicXrefEntryState, ClassicXrefTableInspection, ImageColorSpaceMetadata,
-    ImageIntegerMetadata, ImageXObjectMetadata, IndirectRef, PageXObjectResourceTarget, PdfName,
-    SkippedPageXObjectResourceReason, inspect_classic_xref_table,
-    inspect_document_page_xobject_resources,
+    ImageIntegerMetadata, ImageMaskMetadata, ImageXObjectMetadata, IndirectRef,
+    PageXObjectResourceTarget, PdfName, SkippedPageXObjectResourceReason,
+    inspect_classic_xref_table, inspect_document_page_xobject_resources,
 };
 
 struct Fixture {
@@ -95,6 +95,7 @@ fn wh_bpc_no_colorspace(width: u32, height: u32, bits_per_component: u32) -> Ima
             value: bits_per_component,
         },
         color_space: ImageColorSpaceMetadata::Missing,
+        image_mask: ImageMaskMetadata::Missing,
     }
 }
 
@@ -161,6 +162,37 @@ fn page_image_target_carries_direct_colorspace_metadata() {
                 height: ImageIntegerMetadata::Value { value: 3 },
                 bits_per_component: ImageIntegerMetadata::Value { value: 8 },
                 color_space: ImageColorSpaceMetadata::DeviceRgb,
+                image_mask: ImageMaskMetadata::Missing,
+            }
+        )]
+    );
+}
+
+#[test]
+fn page_stencil_target_carries_the_explicit_image_mask_fact() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [ 3 0 R ] /Count 1 >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /XObject << /St 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+        b"4 0 obj\n<< /Type /XObject /Subtype /Image /Width 8 /Height 8 /ImageMask true /BitsPerComponent 1 >>\nstream\nx\nendstream\nendobj\n",
+        b"5 0 obj\n<< /Length 1 >>\nstream\nq\nendstream\nendobj\n",
+    ]);
+
+    let report = inspect_document_page_xobject_resources(&pdf.source, &pdf.xref, pdf.pages_offset)
+        .expect("resources should inspect");
+
+    assert_eq!(
+        report.pages[0].image_xobjects,
+        vec![image_target(
+            b"St",
+            4,
+            pdf.object_offset(4),
+            ImageXObjectMetadata {
+                width: ImageIntegerMetadata::Value { value: 8 },
+                height: ImageIntegerMetadata::Value { value: 8 },
+                bits_per_component: ImageIntegerMetadata::Value { value: 1 },
+                color_space: ImageColorSpaceMetadata::Missing,
+                image_mask: ImageMaskMetadata::True,
             }
         )]
     );
@@ -262,6 +294,7 @@ fn page_resources_replace_inherited_resources() {
                 height: ImageIntegerMetadata::Missing,
                 bits_per_component: ImageIntegerMetadata::Missing,
                 color_space: ImageColorSpaceMetadata::Missing,
+                image_mask: ImageMaskMetadata::Missing,
             }
         )]
     );

@@ -2,6 +2,18 @@
 
 Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T180 - Image-mask inventory descriptor propagation
+
+- Top-level page image-XObject targets exposed by `PdfInventoryPage` now carry
+  the pdf layer's additive `/ImageMask` structural fact. Missing, explicit
+  false, explicit true, duplicate, and unsupported declarations remain
+  distinguishable through `ImageMaskMetadata`; the default missing field is
+  omitted so legacy serialized inventory pages keep their prior shape.
+- The umbrella bridge only propagates the descriptor already produced by the
+  bounded XObject resource inspection. It does not decode image samples,
+  classify paint effects, descend Forms, or change inventory identity and
+  invocation ordering.
+
 ## T173 - Bounded ICCBased Profile Header Descriptor Facts (T168b)
 
 - `scan_document_icc_based_findings(input)` now runs a second, bounded
@@ -165,4 +177,3 @@ Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.
   are emitted alongside each page's ExtGState findings in document order.
   Malformed or unknowable page `/Group` entries become additive transparency
   group coverage gaps instead of being reported as ExtGState facts.
-
