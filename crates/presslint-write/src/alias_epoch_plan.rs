@@ -446,11 +446,13 @@ impl<'a> AliasEpochPlan<'a> {
                     self.refuse_open(op, EpochRefusalReason::InvalidGraphicsObjectContext);
                 }
             }
-            // `Tr` is fully modelled text state (valid in text objects and at
-            // page level); `gs` is colour-neutral here because unsafe
-            // ExtGState activation already skipped the whole page in the
-            // converter preflight. Neither belongs inside an open path.
-            PaintOpKind::SetTextRenderingMode { .. } | PaintOpKind::SetExtGState { .. } => {
+            // `Tr` and `Tf` are fully modelled text state (valid in text
+            // objects and at page level); `gs` is colour-neutral here because
+            // unsafe ExtGState activation already skipped the whole page in
+            // the converter preflight. None belongs inside an open path.
+            PaintOpKind::SetTextRenderingMode { .. }
+            | PaintOpKind::SetFont { .. }
+            | PaintOpKind::SetExtGState { .. } => {
                 if self.in_path_object {
                     self.refuse_open(op, EpochRefusalReason::InvalidGraphicsObjectContext);
                 }
@@ -920,7 +922,7 @@ impl<'a> AliasEpochPlan<'a> {
             // showing, and marked-content points never touch the current
             // colour — but none of them belongs inside an open path object.
             b"w" | b"J" | b"j" | b"M" | b"d" | b"ri" | b"i" | b"Tc" | b"Tw" | b"Tz" | b"TL"
-            | b"Tf" | b"Ts" | b"Td" | b"TD" | b"Tm" | b"T*" | b"MP" | b"DP" => {
+            | b"Ts" | b"Td" | b"TD" | b"Tm" | b"T*" | b"MP" | b"DP" => {
                 if self.in_path_object {
                     self.refuse_open(op, EpochRefusalReason::InvalidGraphicsObjectContext);
                 }

@@ -35,7 +35,7 @@ pub use mutation_class::MutationClass;
 pub use paint_program::{PaintOps, PaintProgram};
 pub use provenance::{DecodedRange, SourceRange};
 pub use walker::{
-    GraphicsColor, GraphicsStateSnapshot, GraphicsStateWalker, GraphicsWalkError,
-    GraphicsWalkErrorKind, PaintOp, PaintOpKind, PathPaintKind, TextRenderingMode,
-    TextShowOperator, walk_graphics_state,
+    FontSelectionState, GraphicsColor, GraphicsStateSnapshot, GraphicsStateWalker,
+    GraphicsWalkError, GraphicsWalkErrorKind, PaintOp, PaintOpKind, PathPaintKind,
+    TextRenderingMode, TextShowOperator, walk_graphics_state,
 };

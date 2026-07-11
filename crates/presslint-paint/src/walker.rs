@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::color_space_env::{ColorSpaceEnv, ColorSpaceResource};
 use crate::extgstate_env::{ExtGStateEnv, GraphicsExtGStateSnapshot};
 use crate::operands::{
-    checked_source, color_operands, concat_matrix, device_color, expect_operands, integer_operand,
-    name_operand, numeric_operands,
+    checked_source, color_operands, concat_matrix, device_color, expect_operands, font_operands,
+    integer_operand, name_operand, numeric_operands,
 };
 use crate::provenance::DecodedRange;
 
@@ -99,6 +99,8 @@ pub struct GraphicsStateSnapshot {
     pub nonstroking_color: GraphicsColor,
     /// Current text rendering mode.
     pub text_rendering_mode: TextRenderingMode,
+    /// Effective raw, unresolved text font selection.
+    pub font_selection: FontSelectionState,
     /// Current classified `ExtGState` state (values only; no resource names).
     pub extgstate: GraphicsExtGStateSnapshot,
 }
@@ -112,6 +114,7 @@ impl GraphicsStateSnapshot {
             stroking_color: GraphicsColor::new(ColorSpace::DeviceGray, vec![0.0]),
             nonstroking_color: GraphicsColor::new(ColorSpace::DeviceGray, vec![0.0]),
             text_rendering_mode: TextRenderingMode::Fill,
+            font_selection: FontSelectionState::Unset,
             extgstate: GraphicsExtGStateSnapshot::page_default(),
         }
     }
@@ -127,6 +130,28 @@ impl GraphicsStateSnapshot {
     pub fn fill_observation(&self) -> ColorObservation {
         self.nonstroking_color.observation(ColorUsage::Fill)
     }
+}
+
+/// Effective raw text-font selection carried by the graphics state.
+///
+/// This is deliberately unresolved: a selected name is the exact `Tf` resource
+/// name bytes without the leading slash. It is not decoded or joined to a font
+/// resource. Any `gs` makes the selection indeterminate because an `ExtGState`
+/// dictionary may carry `/Font` and this slice does not inspect that effect.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FontSelectionState {
+    /// No `Tf` or potentially font-changing `gs` has been observed.
+    Unset,
+    /// A valid `Tf` explicitly selected this raw resource name and finite size.
+    Selected {
+        /// Raw PDF resource name bytes without the leading slash.
+        name: PdfName,
+        /// Exact finite font-size value, including the sign bit of zero.
+        size: f64,
+    },
+    /// A `gs` may have changed the font and its exact effect is not classified.
+    Indeterminate,
 }
 
 impl Default for GraphicsStateSnapshot {
@@ -296,6 +321,13 @@ pub enum PaintOpKind {
         /// Updated text rendering mode.
         mode: TextRenderingMode,
     },
+    /// `Tf` selected a raw font resource name and finite size.
+    SetFont {
+        /// Raw resource name bytes without the leading slash.
+        name: PdfName,
+        /// Exact finite font-size value.
+        size: f64,
+    },
     /// A text-showing operator observed the current text state.
     TextShow {
         /// Text-showing operator.
@@ -312,9 +344,9 @@ pub enum PaintOpKind {
     ///
     /// Carries the resource-name operand without the leading slash, mirroring
     /// [`XObjectInvoke`](Self::XObjectInvoke). This event only surfaces the
-    /// invocation and its provenance; the graphics-state snapshot is left
-    /// unchanged and no `ExtGState` parameter semantics (overprint, blend mode,
-    /// alpha, soft mask, …) are modelled here.
+    /// invocation and its provenance. The seven classified `ExtGState` parameter
+    /// semantics are applied when available, and font selection always becomes
+    /// [`FontSelectionState::Indeterminate`] because `/Font` is not inspected.
     SetExtGState {
         /// Resource name operand without the leading slash.
         name: PdfName,
@@ -408,9 +440,10 @@ pub enum GraphicsWalkErrorKind {
 /// ([`ColorSpaceEnv`]) so `cs`/`CS` + `sc`/`scn`/`SC`/`SCN` resolve resource
 /// colour spaces, and a page/form `ExtGState` environment ([`ExtGStateEnv`]) so
 /// `gs` classifies overprint/transparency state onto the snapshot. Default-empty
-/// environments reproduce the earlier behaviour byte-for-byte: with an empty
-/// colour-space env no `cs` name resolves, and with an empty `ExtGState` env `gs`
-/// mutates nothing.
+/// environments preserve the legacy seven-parameter `ExtGState` behaviour: with
+/// an empty colour-space env no `cs` name resolves, and with an empty
+/// `ExtGState` env `gs` leaves those seven parameters untouched. Every valid
+/// `gs` still makes font selection indeterminate.
 #[derive(Debug, Clone)]
 pub struct GraphicsStateWalker<'a> {
     state: Rc<GraphicsStateSnapshot>,
@@ -421,14 +454,16 @@ pub struct GraphicsStateWalker<'a> {
 
 impl<'a> GraphicsStateWalker<'a> {
     /// Create a walker with the page-initial graphics state and no colour-space or
-    /// `ExtGState` environment (earlier device-only, `gs`-inert behaviour).
+    /// `ExtGState` environment (seven classified parameters stay inert; font
+    /// certainty is still invalidated by `gs`).
     #[must_use]
     pub fn new() -> Self {
         Self::with_envs(ColorSpaceEnv::empty(), ExtGStateEnv::empty())
     }
 
     /// Create a walker that resolves `cs`/`CS` names against a borrowed page
-    /// colour-space environment, with no `ExtGState` environment.
+    /// colour-space environment, with no classified `ExtGState` environment.
+    /// A valid `gs` still invalidates font certainty.
     #[must_use]
     pub fn with_color_space_env(color_space_env: ColorSpaceEnv<'a>) -> Self {
         Self::with_envs(color_space_env, ExtGStateEnv::empty())
@@ -554,6 +589,7 @@ impl<'a> GraphicsStateWalker<'a> {
                 Ok(PaintOpKind::ConcatMatrix { matrix })
             }
             b"Tr" => self.set_text_rendering_mode(source, operator, record),
+            b"Tf" => self.set_font(source, operator, record),
             b"S" => Self::path_paint(operator, record, PathPaintKind::Stroke),
             b"s" => Self::path_paint(operator, record, PathPaintKind::CloseAndStroke),
             b"f" => Self::path_paint(operator, record, PathPaintKind::FillNonzero),
@@ -701,17 +737,18 @@ impl<'a> GraphicsStateWalker<'a> {
 
     /// Mutate the snapshot's classified `ExtGState` state for one `gs` operator.
     ///
-    /// This applies a deliberate tri-level rule so the empty environment stays
-    /// byte-and-state-identical to the pre-classification walker:
+    /// Font selection first becomes indeterminate for EVERY valid `gs`, because
+    /// this slice has no uniform proof that the invoked dictionary lacks
+    /// `/Font`. The seven classified parameters retain their tri-level rule:
     ///
-    /// - empty environment (feature off): mutate NOTHING — every existing caller
-    ///   passes an empty env, so a `gs` only emits its event, exactly as before;
+    /// - empty environment (feature off): leave the seven parameters untouched;
     /// - non-empty environment, name NOT found: set ALL seven params to
     ///   [`GsParam::Unresolved`](crate::extgstate_env::GsParam::Unresolved) — we
     ///   cannot know what that `gs` did, and never invent a value;
     /// - name found: layer the resource's params over the current state, leaving
     ///   fields the dictionary does not carry untouched.
     fn apply_extgstate(&mut self, name: &PdfName) {
+        self.state_mut().font_selection = FontSelectionState::Indeterminate;
         if self.extgstate_env.is_empty() {
             return;
         }
@@ -725,6 +762,20 @@ impl<'a> GraphicsStateWalker<'a> {
             Some(params) => self.state_mut().extgstate.apply(&params),
             None => self.state_mut().extgstate.set_all_unresolved(),
         }
+    }
+
+    fn set_font(
+        &mut self,
+        source: &[u8],
+        operator: &[u8],
+        record: &OperatorRecord,
+    ) -> Result<PaintOpKind, GraphicsWalkError> {
+        let (name, size) = font_operands(source, operator, record)?;
+        self.state_mut().font_selection = FontSelectionState::Selected {
+            name: name.clone(),
+            size,
+        };
+        Ok(PaintOpKind::SetFont { name, size })
     }
 
     fn set_text_rendering_mode(

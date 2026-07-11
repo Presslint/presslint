@@ -18,8 +18,8 @@ fn walk(input: &[u8]) -> Result<Vec<PaintOp>, String> {
 #[test]
 fn no_state_change_ops_share_the_same_interned_state() -> Result<(), String> {
     // These operators emit paint ops without mutating the graphics state.
-    let ops = walk(b"n /Im1 Do /GS1 gs (Hi) Tj")?;
-    assert_eq!(ops.len(), 4);
+    let ops = walk(b"n /Im1 Do (Hi) Tj")?;
+    assert_eq!(ops.len(), 3);
     for window in ops.windows(2) {
         assert!(
             Rc::ptr_eq(&window[0].state, &window[1].state),

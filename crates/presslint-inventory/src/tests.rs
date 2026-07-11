@@ -7,6 +7,7 @@ use presslint_types::{
 mod bit_identity;
 mod combined;
 mod extgstate;
+mod font_identity;
 mod json;
 mod resource_color;
 mod serde_shape;

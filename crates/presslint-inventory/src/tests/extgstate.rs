@@ -1,7 +1,7 @@
 use presslint_types::{ByteRange, ColorSpace, PdfName};
 
 use super::{json, walk};
-use crate::{DecodedRange, GraphicsWalkErrorKind, PaintOpKind, PathPaintKind};
+use crate::{DecodedRange, FontSelectionState, GraphicsWalkErrorKind, PaintOpKind, PathPaintKind};
 
 #[test]
 fn gs_operator_emits_set_ext_g_state_event() -> Result<(), String> {
@@ -22,11 +22,9 @@ fn gs_operator_emits_set_ext_g_state_event() -> Result<(), String> {
         events[0].operator_range,
         DecodedRange::new(ByteRange { start: 5, end: 7 })
     );
-    // `gs` only surfaces the invocation; the snapshot is left at the page default.
-    assert_eq!(
-        events[0].state.as_ref(),
-        &crate::GraphicsStateSnapshot::page_default()
-    );
+    let mut expected = crate::GraphicsStateSnapshot::page_default();
+    expected.font_selection = FontSelectionState::Indeterminate;
+    assert_eq!(events[0].state.as_ref(), &expected);
     Ok(())
 }
 

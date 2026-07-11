@@ -106,6 +106,7 @@ mod tests {
             PaintOpKind::SetNonstrokingColor { .. } => "sc",
             PaintOpKind::PathPaint { .. } => "paint",
             PaintOpKind::SetTextRenderingMode { .. } => "Tr",
+            PaintOpKind::SetFont { .. } => "Tf",
             PaintOpKind::TextShow { .. } => "show",
             PaintOpKind::XObjectInvoke { .. } => "Do",
             PaintOpKind::SetExtGState { .. } => "gs",

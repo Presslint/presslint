@@ -1,5 +1,25 @@
 # presslint-paint Journal
 
+## Raw `Tf` font selection state
+
+- `GraphicsStateSnapshot` now carries authoritative
+  `FontSelectionState::{Unset, Selected { name, size }, Indeterminate}`. A valid
+  `Tf` parses exactly one nonempty raw PDF name plus one finite number before
+  mutating, emits `SetFont`, and retains every finite size including negative
+  zero. Names remain unresolved raw bytes; no font dictionary, descriptor,
+  encoding, glyph, or resource mapping is consumed.
+- Font state participates in the existing shared snapshot: `q`/`Q` save and
+  restore it exactly, while `BT`/`ET` do not reset it. Text shows keep their
+  existing public/serde payload and borrow the effective selection from the
+  shared snapshot, so they pay only the existing `Rc` bump and no per-show name
+  clone.
+- Every syntactically valid `gs`, including the empty-environment path and a
+  clean classified hit, makes font selection `Indeterminate`; a later `Tf`
+  recovers `Selected`. The seven existing ExtGState parameter semantics are
+  otherwise unchanged. This exposes unresolved `/Font` effects and makes no
+  text-edit admission claim. Form subprograms still start fresh, so their local
+  font state is not proof of caller-effective state.
+
 ## T162 - Preserve full spot colorant lists
 
 - `GraphicsColor` now carries additive `spot_names: Vec<PdfName>` alongside the

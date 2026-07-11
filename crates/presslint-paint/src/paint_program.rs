@@ -2,9 +2,10 @@
 //!
 //! [`PaintProgram`] is a cheap, `Copy` descriptor of everything the graphics-state
 //! walker needs to run: the source bytes, the assembled operator records, and the
-//! borrowed [`ColorSpaceEnv`]. It owns no walk state and materializes no `Vec`, so
-//! the SAME program can be replayed: each `.ops()` (or `into_iter()`) constructs a
-//! FRESH [`GraphicsStateWalker`] and re-walks `records` from index `0`.
+//! borrowed [`ColorSpaceEnv`] and [`ExtGStateEnv`]. It owns no walk state and
+//! materializes no `Vec`, so the SAME program can be replayed: each `.ops()` (or
+//! `into_iter()`) constructs a FRESH [`GraphicsStateWalker`] and re-walks
+//! `records` from index `0`.
 //!
 //! [`PaintOps`] is the iterator it hands out. It yields one
 //! `Result<PaintOp, GraphicsWalkError>` per record, driving the walker's
@@ -27,8 +28,8 @@ use crate::walker::{GraphicsStateWalker, GraphicsWalkError, PaintOp};
 
 /// Cheap, replayable descriptor of a paint program.
 ///
-/// Holds only borrowed `source`/`records` and the `Copy` [`ColorSpaceEnv`], so the
-/// descriptor is itself `Copy` and carries no walk state. Iterating it (via
+/// Holds only borrowed `source`/`records` and the `Copy` resource environments,
+/// so the descriptor is itself `Copy` and carries no walk state. Iterating it (via
 /// [`ops`](Self::ops) or `IntoIterator`) builds a fresh walker and re-runs from the
 /// start every time, so the same program can be replayed as many times as needed
 /// without materializing an event `Vec`.
@@ -42,8 +43,9 @@ pub struct PaintProgram<'a> {
 
 impl<'a> PaintProgram<'a> {
     /// Describe a paint program over `source`, its assembled `records`, and the
-    /// borrowed page colour-space environment `env`, with no `ExtGState`
-    /// environment (`gs` stays inert).
+    /// borrowed page colour-space environment `env`, with no classified
+    /// `ExtGState` environment. `gs` leaves the seven classified parameters
+    /// untouched but still makes font selection indeterminate.
     #[must_use]
     pub const fn new(
         source: &'a [u8],
@@ -73,9 +75,9 @@ impl<'a> PaintProgram<'a> {
     /// Start a fresh walk of this program.
     ///
     /// Constructs a new [`GraphicsStateWalker`] from the program's
-    /// [`ColorSpaceEnv`] and returns an iterator positioned at record `0`. Calling
-    /// this again yields an independent iterator over the same input — this is what
-    /// makes the program replayable.
+    /// resource environments and returns an iterator positioned at record `0`.
+    /// Calling this again yields an independent iterator over the same input —
+    /// this is what makes the program replayable.
     #[must_use]
     pub fn ops(&self) -> PaintOps<'a> {
         PaintOps {

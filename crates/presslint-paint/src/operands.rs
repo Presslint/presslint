@@ -187,6 +187,37 @@ pub fn name_operand(
     Ok(PdfName(bytes[1..].to_vec()))
 }
 
+/// Parse the mixed name/number operands of `Tf` atomically.
+///
+/// The name is retained as raw bytes without the leading slash and the size may
+/// be any finite number, including zero, negative values, fractions, and
+/// negative zero.
+pub fn font_operands(
+    source: &[u8],
+    operator: &[u8],
+    record: &OperatorRecord,
+) -> Result<(PdfName, f64), GraphicsWalkError> {
+    expect_operands(operator, record, 2)?;
+
+    let name_operand = &record.operands[0];
+    if name_operand.tokens.len() != 1 {
+        return Err(malformed_name(operator, 0, name_operand.range));
+    }
+    let name_bytes = checked_source(source, name_operand.range, name_operand.range)?;
+    if name_bytes.len() <= 1 || name_bytes[0] != b'/' {
+        return Err(malformed_name(operator, 0, name_operand.range));
+    }
+
+    let size_operand = &record.operands[1];
+    if size_operand.tokens.len() != 1 {
+        return Err(malformed_numeric(operator, 1, size_operand.range));
+    }
+    let size_bytes = checked_source(source, size_operand.range, size_operand.range)?;
+    let size = parse_finite_number(operator, 1, size_operand, size_bytes)?;
+
+    Ok((PdfName(name_bytes[1..].to_vec()), size))
+}
+
 fn numeric_operands_vec(
     source: &[u8],
     operator: &[u8],

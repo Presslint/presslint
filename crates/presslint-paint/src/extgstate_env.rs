@@ -3,9 +3,10 @@
 //!
 //! This mirrors [`ColorSpaceEnv`](crate::ColorSpaceEnv): a thin borrowed view over
 //! a per-scope slice of classified `ExtGState` resources, keyed by resource name.
-//! The walker interprets `gs` against it. A default-empty environment reproduces
-//! today's behaviour byte-for-byte: with no classified resources the env
-//! `is_empty()`, so `gs` mutates nothing and only surfaces the invocation event.
+//! The walker interprets `gs` against it. With a default-empty environment, `gs`
+//! leaves these seven classified parameters untouched. Independently, every
+//! valid `gs` makes the walker's raw font selection indeterminate because this
+//! environment does not classify the `ExtGState` `/Font` entry.
 //!
 //! The model is inventory-native: values are CLASSIFIED, never simulated. No PDF
 //! defaults are invented, no alpha math is done, and no `PdfName` blend-mode name
@@ -263,8 +264,8 @@ impl<'a> ExtGStateEnv<'a> {
 
     /// The empty environment: no `gs` name resolves and the feature is off.
     ///
-    /// This is the default; with it `gs` does not mutate the snapshot at all,
-    /// exactly as before this read model existed.
+    /// This is the default; with it `gs` does not mutate the seven classified
+    /// `ExtGState` parameters. Font certainty is invalidated separately.
     #[must_use]
     pub const fn empty() -> Self {
         Self { resources: &[] }

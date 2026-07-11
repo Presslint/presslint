@@ -2,6 +2,14 @@
 
 Earlier entries are preserved in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## Paint `SetFont` enum adoption
+
+`AliasEpochPlan` now handles semantic `SetFont` directly as colour-neutral text
+state with the same graphics-object-context check previously applied to raw
+`Tf`; `Tf` is no longer in the `NoOp` allowlist. `TextShow` remains an
+unconditional live-epoch refusal. No conversion candidate, telemetry, policy,
+resource interpretation, or admission reach changed.
+
 ## T180 - Page named-image and stencil alias admission
 
 One bounded shallow page-XObject inspection now runs per conversion request

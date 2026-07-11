@@ -11,7 +11,9 @@
 //! - [`call_machine`]: the call/return [`CallMachine`](crate::CallMachine) traversal,
 //!   invocation identity, and the `InvocationPath` JSON round trip.
 //! - [`extgstate_env`]: `gs` classification onto the snapshot — layered hits, the
-//!   all-`Unresolved` miss, the empty-env legacy identity, and `q`/`Q` restore.
+//!   all-`Unresolved` miss, empty-env parameter preservation, and `q`/`Q` restore.
+//! - [`font_state`]: raw `Tf` state, `gs` uncertainty, save/restore, errors, and
+//!   serde shape locks.
 //! - [`mini_json`]: the dependency-free JSON serializer/parser shared by the
 //!   serde-transparency and invocation-path locks.
 //!
@@ -27,6 +29,7 @@ use crate::{ColorSpaceEnv, ExtGStateEnv, PaintSubProgram};
 
 mod call_machine;
 mod extgstate_env;
+mod font_state;
 mod mini_json;
 mod mutation_class;
 mod paint_program;

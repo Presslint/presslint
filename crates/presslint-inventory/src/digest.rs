@@ -3,7 +3,9 @@ use presslint_types::{
     PdfName,
 };
 
-use presslint_paint::{PaintOp, PathPaintKind, TextRenderingMode, TextShowOperator};
+use presslint_paint::{
+    FontSelectionState, PaintOp, PathPaintKind, TextRenderingMode, TextShowOperator,
+};
 
 pub fn vector_object_digest(
     page: PageIndex,
@@ -36,10 +38,11 @@ pub fn text_object_digest(
     colors: &[ColorObservation],
 ) -> [u8; 32] {
     let mut digest = StableDigest::new();
-    digest.push_bytes(b"presslint.text.v3");
+    digest.push_bytes(b"presslint.text.v4");
     push_event_header(&mut digest, page, sequence, scope, path, event);
     digest.push_u8(text_show_operator_tag(operator));
     digest.push_text_rendering_mode(rendering_mode);
+    digest.push_font_selection(&event.state.font_selection);
     for color in colors {
         digest.push_color_observation(color);
     }
@@ -221,6 +224,18 @@ impl StableDigest {
                 self.push_u8(4);
                 self.push_i32(value);
             }
+        }
+    }
+
+    fn push_font_selection(&mut self, selection: &FontSelectionState) {
+        match selection {
+            FontSelectionState::Unset => self.push_u8(0),
+            FontSelectionState::Selected { name, size } => {
+                self.push_u8(1);
+                self.push_bytes(&name.0);
+                self.push_f64(*size);
+            }
+            FontSelectionState::Indeterminate => self.push_u8(2),
         }
     }
 

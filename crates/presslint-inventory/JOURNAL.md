@@ -1,5 +1,19 @@
 # presslint-inventory Journal
 
+## Text identity v4 font-state input
+
+- Text identity alone advances from `presslint.text.v3` to
+  `presslint.text.v4`. After the existing show-operator and rendering-mode
+  inputs and before colour observations, the digest hashes an explicit
+  Unset/Selected/Indeterminate discriminator; Selected adds length-prefixed raw
+  name bytes and exact `f64::to_bits()` size.
+- Both single-stream and expanded identity borrow the authoritative selection
+  from `PaintOp.state`. Every text object ID changes, including Unset text, so
+  persisted text IDs must be regenerated. Vector, image, and form domain tags
+  and digest bytes remain unchanged, and `InventoryEntry` JSON gains no field.
+- This is raw identity groundwork only: no page font descriptor, resource join,
+  font classification, glyph interpretation, or writer admission is consumed.
+
 ## T166 - Indexed resource-colour regressions
 
 - Added walker/inventory regressions for `cs`/`scn` over an `Indexed`

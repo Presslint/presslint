@@ -542,6 +542,25 @@ fn colour_neutral_allowlist_operators_keep_the_epoch_provable() {
 }
 
 #[test]
+fn set_font_is_colour_neutral_context_checked_and_does_not_relax_text_show() {
+    let outcome = run(b"/GrayAlias cs 0.5 sc BT /F1 12 Tf ET f\n");
+    assert!(is_closed(&outcome.epochs[0]));
+    assert!(outcome.epochs[0].has_consumer);
+
+    let outcome = run(b"/GrayAlias cs 0.5 sc 0 0 m /F1 12 Tf 1 1 l S\n");
+    assert_eq!(
+        refusal(&outcome.epochs[0]),
+        Some(EpochRefusalReason::InvalidGraphicsObjectContext)
+    );
+
+    let outcome = run(b"/GrayAlias cs 0.5 sc BT /F1 12 Tf (x) Tj ET f\n");
+    assert_eq!(
+        refusal(&outcome.epochs[0]),
+        Some(EpochRefusalReason::TextShow)
+    );
+}
+
+#[test]
 fn conservative_boundaries_refuse_a_live_root_each_with_its_reason() {
     let cases: [(&[u8], EpochRefusalReason); 13] = [
         (b"(x) Tj", EpochRefusalReason::TextShow),

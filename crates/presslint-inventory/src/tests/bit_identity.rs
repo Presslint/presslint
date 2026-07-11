@@ -34,6 +34,9 @@ fn corpus_inventory_identity_is_golden_locked() -> Result<(), GraphicsWalkError>
         &im1,
         &fm1,
     )?;
+    assert_eq!(inventory.entries[0].id.digest, MIXED_DIGESTS[0]);
+    assert_eq!(inventory.entries[1].id.digest, MIXED_DIGESTS[1]);
+    assert_eq!(inventory.entries[3].id.digest, MIXED_DIGESTS[3]);
     assert_golden(
         "mixed vector/text/image/form",
         &inventory,
@@ -54,6 +57,9 @@ fn corpus_inventory_identity_is_golden_locked() -> Result<(), GraphicsWalkError>
         &im1,
         &fm1,
     )?;
+    assert_eq!(inventory.entries[0].id.digest, MANY_NOOP_DIGESTS[0]);
+    assert_eq!(inventory.entries[2].id.digest, MANY_NOOP_DIGESTS[2]);
+    assert_eq!(inventory.entries[3].id.digest, MANY_NOOP_DIGESTS[3]);
     assert_golden(
         "many no-op few entry",
         &inventory,
@@ -86,6 +92,7 @@ fn corpus_inventory_identity_is_golden_locked() -> Result<(), GraphicsWalkError>
 
     let inventory =
         assert_streaming_equals_materialized(b"0.2 g f (Inner) Tj", PAGE, &form_scope, &[], &[])?;
+    assert_eq!(inventory.entries[0].id.digest, FORM_SCOPE_DIGESTS[0]);
     assert_golden(
         "form scope",
         &inventory,
@@ -262,8 +269,8 @@ const MIXED_DIGESTS: &[[u8; 32]] = &[
         164, 229, 34, 149, 70, 250, 22, 233, 237, 66, 136, 65, 10,
     ],
     [
-        6, 162, 104, 144, 149, 3, 197, 92, 64, 199, 236, 249, 20, 144, 136, 180, 128, 149, 117,
-        183, 7, 124, 3, 61, 73, 147, 232, 224, 148, 244, 67, 178,
+        97, 200, 184, 89, 218, 165, 14, 19, 64, 187, 124, 19, 61, 98, 174, 150, 32, 18, 69, 169,
+        47, 242, 77, 14, 154, 174, 137, 189, 155, 232, 211, 237,
     ],
     [
         93, 241, 210, 114, 9, 98, 211, 91, 101, 128, 45, 107, 246, 216, 90, 115, 131, 79, 38, 60,
@@ -276,8 +283,8 @@ const MANY_NOOP_DIGESTS: &[[u8; 32]] = &[
         158, 22, 242, 124, 1, 25, 138, 141, 223, 5, 172,
     ],
     [
-        11, 157, 32, 98, 220, 33, 217, 23, 63, 173, 9, 115, 172, 2, 18, 136, 75, 74, 54, 56, 183,
-        57, 53, 43, 167, 226, 230, 249, 255, 77, 193, 107,
+        247, 118, 85, 37, 207, 163, 252, 251, 133, 108, 193, 215, 149, 158, 78, 185, 69, 222, 197,
+        103, 3, 170, 124, 194, 192, 83, 19, 17, 112, 190, 119, 200,
     ],
     [
         105, 214, 162, 255, 212, 119, 40, 215, 132, 176, 10, 146, 214, 11, 196, 1, 130, 217, 86,
@@ -306,7 +313,7 @@ const FORM_SCOPE_DIGESTS: &[[u8; 32]] = &[
         143, 188, 121, 99, 108, 157, 175, 101, 170, 147, 207, 73, 225,
     ],
     [
-        205, 51, 184, 242, 68, 55, 175, 105, 237, 17, 57, 230, 81, 40, 173, 44, 204, 179, 106, 200,
-        45, 28, 133, 215, 247, 126, 225, 210, 52, 27, 94, 61,
+        204, 124, 230, 97, 253, 67, 138, 89, 174, 44, 177, 27, 92, 61, 156, 249, 68, 103, 145, 240,
+        150, 169, 172, 132, 252, 84, 170, 249, 125, 147, 180, 34,
     ],
 ];

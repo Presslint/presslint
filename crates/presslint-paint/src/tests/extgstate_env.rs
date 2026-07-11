@@ -1,18 +1,17 @@
 //! `gs` snapshot-classification tests (Phase 1-2).
 //!
-//! These prove the tri-level `gs` rule: an empty environment is state-identical
-//! to the pre-classification walker (`gs` mutates nothing), a miss on a NON-empty
-//! environment sets every param to `Unresolved`, and a hit layers the resource's
-//! set params over the current state without disturbing the params it leaves
-//! unset. They also pin `q`/`Q` save-restore of the classified state and the
-//! `Rc`-sharing boundary around the mutation.
+//! These prove the tri-level seven-parameter `gs` rule: an empty environment
+//! leaves those params untouched, a miss on a NON-empty environment sets every
+//! param to `Unresolved`, and a hit layers set params over current state. Every
+//! valid `gs` separately invalidates font certainty. The tests also pin `q`/`Q`
+//! save-restore and the `Rc`-sharing boundary around the mutation.
 
 use std::rc::Rc;
 
 use super::{assemble, name};
 use crate::{
     AlphaClass, BlendModeClass, ColorSpaceEnv, ExtGStateEnv, ExtGStateParams, ExtGStateResource,
-    GraphicsExtGStateSnapshot, GraphicsStateWalker, GsParam, PaintOp,
+    FontSelectionState, GraphicsExtGStateSnapshot, GraphicsStateWalker, GsParam, PaintOp,
 };
 
 /// Walk `input` with a borrowed `ExtGState` environment, materializing every op.
@@ -101,17 +100,20 @@ fn gs_miss_on_non_empty_env_sets_all_params_unresolved() -> Result<(), String> {
 }
 
 #[test]
-fn gs_on_empty_env_mutates_nothing() -> Result<(), String> {
-    // The empty env is the feature-off path: `gs` must leave the snapshot exactly
-    // at the page default, byte-and-state-identical to the pre-classification
-    // walker. (`walk_with_env` with an empty slice takes the `is_empty()` branch.)
+fn gs_on_empty_env_preserves_seven_params_but_invalidates_font() -> Result<(), String> {
+    // The empty env is the feature-off path for the seven classified params.
+    // Font certainty still becomes indeterminate because `/Font` was not
+    // classified.
     let ops = walk_with_env(b"/GS1 gs", &[])?;
 
     assert_eq!(
         ops[0].state.extgstate,
         GraphicsExtGStateSnapshot::page_default()
     );
-    // The op still surfaces; only the state stayed inert.
+    assert_eq!(
+        ops[0].state.font_selection,
+        FontSelectionState::Indeterminate
+    );
     assert_eq!(ops.len(), 1);
     Ok(())
 }
@@ -182,21 +184,15 @@ fn two_sequential_gs_layer_and_override() -> Result<(), String> {
 }
 
 #[test]
-fn empty_env_gs_keeps_interned_state_sharing_and_a_hit_breaks_it() -> Result<(), String> {
-    // Empty env: `gs` mutates nothing, so it stays inside the run of no-state-
-    // change ops that share one interned `Rc` (extends the walker.rs identity
-    // test with the classified snapshot in place).
+fn every_gs_breaks_pre_gs_sharing_and_following_noop_shares_mutated_state() -> Result<(), String> {
+    // Even with an empty env, `gs` mutates font certainty. It copies on write
+    // away from the prior event; the following show shares the mutated state.
     let inert = walk_with_env(b"n /GS1 gs (Hi) Tj", &[])?;
     assert_eq!(inert.len(), 3);
-    for window in inert.windows(2) {
-        assert!(
-            Rc::ptr_eq(&window[0].state, &window[1].state),
-            "empty-env gs must not perturb the shared interned state"
-        );
-    }
+    assert!(!Rc::ptr_eq(&inert[0].state, &inert[1].state));
+    assert!(Rc::ptr_eq(&inert[1].state, &inert[2].state));
 
-    // A hitting gs DOES mutate, so it copies-on-write to a distinct snapshot while
-    // the following no-op shares the mutated state.
+    // A classified hit has the same COW boundary.
     let resources = [resource(
         b"GS1",
         ExtGStateParams {

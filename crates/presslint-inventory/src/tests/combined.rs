@@ -155,9 +155,9 @@ fn combined_inventory_object_ids_are_deterministic() -> Result<(), String> {
 
 #[test]
 fn streaming_build_inventory_equals_events_path_for_mixed_stream() -> Result<(), String> {
-    // Many no-op / path-construction operators (cm, m, l, h, W, n, gs, BT, Tf,
-    // ET, re) surround only four entry-producing operators (f, Tj, /Im1 Do,
-    // /Fm1 Do): the many-no-op/few-entry case the streaming driver targets.
+    // Many non-entry / path-construction operators (cm, m, l, h, W, n, gs, BT,
+    // semantic Tf, ET, re) surround only four entry-producing operators (f, Tj,
+    // /Im1 Do, /Fm1 Do): the many-no-op/few-entry case the streaming driver targets.
     let input: &[u8] = b"q 1 0 0 1 5 5 cm 10 20 m 30 40 l 50 60 l h W n /GS1 gs \
         0.4 g f BT /F1 12 Tf (Hi) Tj ET /Im1 Do 5 5 10 10 re n /Fm1 Do Q";
     let images = [PdfName(b"Im1".to_vec())];
