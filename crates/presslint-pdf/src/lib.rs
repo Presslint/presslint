@@ -30,8 +30,10 @@ mod dictionary_extent;
 mod document_access;
 mod document_page_content_extents;
 mod extgstate_classify;
+mod font_classify;
 mod form_color_space_resources;
 mod form_extgstate_resources;
+mod form_font_resources;
 mod form_transparency_group;
 mod form_xobject_resources;
 mod icc_profile;
@@ -56,6 +58,7 @@ mod page_content_targets;
 mod page_contents;
 mod page_contents_resolved;
 mod page_extgstate_resources;
+mod page_font_resources;
 mod page_resource_inheritance;
 mod page_transparency_group;
 mod page_tree_kid_targets;
@@ -149,12 +152,17 @@ pub use extgstate_classify::{
     ExtGStateParamClass, ExtGStateSoftMask, SkippedExtGStateResource,
     SkippedExtGStateResourceReason, classify_extgstate_entry,
 };
+pub use font_classify::{
+    ClassifiedFontResource, FontDictionaryTypeFact, FontSubtypeClass, SkippedFontResource,
+    SkippedFontResourceReason, classify_font_entry,
+};
 pub use form_color_space_resources::{
     FormColorSpaceResourcesInspection, inspect_form_color_space_resources,
 };
 pub use form_extgstate_resources::{
     FormExtGStateResourcesInspection, inspect_form_extgstate_resources,
 };
+pub use form_font_resources::{FormFontResourcesInspection, inspect_form_font_resources};
 pub use form_transparency_group::{
     FormTransparencyGroupInspection, inspect_form_transparency_group,
 };
@@ -266,6 +274,11 @@ pub use page_extgstate_resources::{
     DocumentPageExtGStateResourcesInspection, DocumentPageExtGStateResourcesInspectionError,
     PageExtGStateResourcesInspection, inspect_document_page_extgstate_resources,
     inspect_document_page_extgstate_resources_with_lookup,
+};
+pub use page_font_resources::{
+    DocumentPageFontResourcesInspection, DocumentPageFontResourcesInspectionError,
+    PageFontResourcesInspection, inspect_document_page_font_resources,
+    inspect_document_page_font_resources_with_lookup,
 };
 pub use page_transparency_group::{
     DocumentPageTransparencyGroupsInspection, DocumentPageTransparencyGroupsInspectionError,

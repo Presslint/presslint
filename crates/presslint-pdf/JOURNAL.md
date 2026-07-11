@@ -4,6 +4,71 @@ Older accumulated journal history lives in [JOURNAL-archive-4.md](JOURNAL-archiv
 
 ## Current State
 
+### T181 - Inherited page-Font resource descriptor (read-only, no consumers)
+
+- Three new modules mirror the ExtGState resource inspectors: `font_classify`
+  (taxonomy + per-entry classifier), `page_font_resources` (page-tree walk
+  with whole-dictionary `/Resources` inheritance producing per-page reports
+  keyed by the identity triple ordinal/page_reference/page_object_byte_offset),
+  and `form_font_resources` (own-scope form entry point via
+  `ResourceContext::from_dictionary(..., None)`, no page inheritance). All
+  reuse the existing walk (cycle guard, MAX depth/visited bounds),
+  `ResourceContext`, `resolve_reference`, and `unique_entry`; the ONE new
+  abstraction is the classified page-font report family.
+- NAMING NOTE: this is a descriptor OF a page's `/Font` resource entries. It
+  never resolves or inspects the PDF `/FontDescriptor` key, descendant fonts,
+  encodings, CMap/Widths/ToUnicode data, CharProcs, or font program streams.
+- `ClassifiedFontResource { name, dictionary_type, subtype, reference,
+  object_byte_offset }`. `name` keeps RAW bytes without the leading slash and
+  without `#xx` decoding (write-policy territory). `reference`/
+  `object_byte_offset` carry the resolved indirect target when the entry was a
+  reference (bind by resolved object, never by name).
+- `FontSubtypeClass` (serde `tag = "kind"`, snake_case): the five legal `Tf`
+  subtypes `Type1`/`MmType1`/`TrueType`/`Type0`/`Type3` as distinct variants
+  (`/MMType1` is never collapsed into `Type1`), distinct `CidFontType0`/
+  `CidFontType2` variants documented as invalid direct `Tf` operands (ISO
+  32000-1 §9.7.4.1, never mapped to `Type0`), and fail-closed
+  `OtherName { name }` (e.g. `/Type1C`), `Missing`, `Duplicate { ranges }`,
+  `NonName { value_kind }`. Exact byte equality on a DIRECT name only; an
+  indirect `/Subtype` is `NonName` and is never resolved.
+  `FontDictionaryTypeFact` records the exact `/Type` fact (`Font`, `Missing`,
+  `OtherName`, `Duplicate`, `NonName`) without guessing and without affecting
+  the subtype class.
+- Split rule: failures reaching a font dictionary use the 11-variant skip
+  vocabulary mirroring ExtGState (`Resources` delegation,
+  `MissingFontResources`, `MissingFont`, `DuplicateFont`, `NonDictionaryFont`,
+  `FontDictionaryFailed`, `DuplicateFontName`, `NonDictionaryEntry`,
+  `MalformedResourceReference`, `UnresolvedResourceReference`,
+  `ResourceDictionaryFailed`). A REACHED dictionary with bad/absent `/Type` or
+  `/Subtype` stays in `fonts` with explicit fail-closed classes.
+- Inheritance is whole-dictionary nearest-ancestor replacement (Table 30,
+  §7.7.3.4): a page owning `/Resources` without `/Font` is `MissingFont`, an
+  empty `/Resources << >>` or `/Font << >>` is present-not-omitted, only an
+  absent `/Resources` key inherits. Identity-triple parity with the ExtGState
+  inspector is pinned by test.
+- Read-only descriptor contract: NO consumers, NO behaviour change —
+  presslint-write, presslint-paint, the umbrella, and the CLI have zero diff;
+  conversion output is byte-identical. The descriptor claims no safety or
+  admissibility judgement; the safe/unsafe mapping is deferred write-side
+  policy. Reports retain only copied name bytes and byte ranges/offsets — no
+  dictionaries, object bodies, streams, or font-program bytes; no stream
+  decode. One bounded page-tree walk per document call, same cost profile as
+  the ExtGState inspector.
+- Concepts cross-checked (never copied, no GPL/AGPL read): PDFBOX-5054 (no
+  d0/d1 or CharProcs fact may upgrade a classification; renderers disagree on
+  colour ops after d1), PDFBOX-1238 (real files reference font resources that
+  the effective `/Font` dictionary does not define; absence stays a structured
+  `MissingFont`/`MissingFontResources` fact, never a substituted fallback),
+  pdf.js #19634 (Type3 resource lookup is multi-tier and renderer-divergent;
+  this slice records the shallow `Type3` fact and models no CharProcs or
+  Type3 resource lookup), pdf-issues #368 (text-state/graphics-state
+  restoration semantics belong to the later paint `Tf` modelling slice, not
+  to this structural descriptor), ISO 32000-1 §9.9 (`/Type1C` names an
+  embedded font-program stream subtype under `/FontFile3`, never a legal font
+  dictionary `/Subtype`, so it and every other unknown name stay `OtherName`,
+  never collapsed), qpdf 10.1.0 lesson (bind by resolved object identity, not
+  by resource name).
+
 ### T180 - Image XObject stencil-mask metadata
 
 - `ImageXObjectMetadata` now carries additive `ImageMaskMetadata` with exact
