@@ -4,6 +4,96 @@ Older accumulated journal history lives in [JOURNAL-archive-4.md](JOURNAL-archiv
 
 ## Current State
 
+### T183 - Exact ExtGState Font effect descriptor (read-only, no consumers)
+
+- `ClassifiedExtGStateResource` gains one additive `#[serde(default)]` field
+  `font_effect: ExtGStateFontEffect`, classifying the `/Font` entry of every
+  already-inspected ExtGState dictionary as its ISO 32000-1 Table-58 effect:
+  a two-element `[font size]` array whose first element must be an indirect
+  reference to a font dictionary — the direct-reference equivalent of `Tf`.
+  The existing page-inherited and form-own-scope ExtGState reports transport
+  the field unchanged; no new page/form report abstraction was added.
+- STRUCTURAL SELECTION, NOT WRITER SAFETY: `StructurallyValid` is emitted only
+  for an inspectable target whose `/Type` is exactly `/Font` and whose direct
+  `/Subtype` is one of Type1/MMType1/TrueType/Type0/Type3. It proves selection
+  eligibility only. Type3 is a structurally legal current font but carries no
+  writer-safety claim; `CidFontType0`/`CidFontType2` are distinct
+  reached-but-inadmissible facts and are never folded into Type0 (§9.7.4.1);
+  missing/duplicate/non-name `/Type` or `/Subtype` facts stay exact via
+  `InadmissibleTarget`.
+- The 14-variant internally-tagged (`effect`, snake_case) vocabulary keeps
+  every failure a distinct deterministic outcome, never absence or a
+  fabricated binding: `Unset`, `DuplicateKey` (both key ranges, no
+  first/last-wins recovery), `NonArrayValue`, `MalformedFontReference`
+  (direct dictionaries/names/out-of-range refs never become valid),
+  `MalformedSize` (empty range marks an absent second element),
+  `NonFiniteSize` (numeric overflow parses to infinity),
+  `IndirectSizeUnsupported` (uninspected, not malformed),
+  `ExtraArrayElements`, `UnresolvedTarget` (undefined/free with locate-only
+  location; generation mismatch with `None`), `CompressedTargetUninspected`,
+  `TargetDictionaryFailed`, `TargetHeaderMismatch` (the object header at the
+  resolved offset is inspected and compared before any body inspection; when
+  it identifies a different object than the requested reference, the foreign
+  body is never classified), `InadmissibleTarget`,
+  `StructurallyValid`. Serde tags and the mixed resource shape are
+  test-locked; older report JSON without the trailing field deserializes to
+  the defaulted `Unset`.
+- COMPRESSED-TARGET LIMITATION: the resource path is offset-based, so an
+  xref-stream type-2 compressed font target is a valid possible PDF object
+  that this path cannot inspect standalone. A generation-zero reference is
+  recorded as `CompressedTargetUninspected` carrying the exact structural
+  object-stream/member `ObjectLookupLocation` — neither valid nor malformed,
+  never offset zero, and no object stream is decoded. Compressed objects
+  have implicit generation zero (§7.5.8.3), so a nonzero-generation
+  reference is the generation-mismatch outcome, never a possible compressed
+  target.
+- Exact size semantics: the size token must satisfy the PDF number grammar
+  (§7.3.3: optional sign, decimal digits, at most one period — no
+  exponential notation, so `1e2`/`inf`/`NaN` are malformed, never values)
+  before `size_bits: u64` is taken as the parsed `f64::to_bits()`. The
+  grammar gate plus lexeme-to-`f64` conversion mirror the paint `Tf` operand
+  path (tokenizer number classification, then `str::parse::<f64>` and a
+  finite check), preserving `0.0` versus `-0.0`, negatives, and fractions
+  bit-exactly with no invented positive-size rule; overflow is tested with a
+  lexically valid oversized decimal.
+- The `/Font` array uses a local allocation-free `N G R` parser bounded to a
+  128-byte leading window. Unlike the shared whitespace-only reference parser,
+  this narrow path treats PDF comments as token separators between all three
+  reference tokens, while retaining object/generation range rejection and the
+  `R` keyword-boundary check. The same parser detects an indirect size without
+  changing unrelated reference callers.
+- Taxonomy reuse: `font_classify.rs` factors the crate-internal
+  `classify_font_dictionary_facts` helper over already-inspected entries, so
+  the ExtGState effect reuses the T181 `FontDictionaryTypeFact` and
+  `FontSubtypeClass` verbatim (no synthetic `ClassifiedFontResource`, no
+  invented resource name, no taxonomy drift). T181 public behaviour, ordering,
+  and serde are unchanged.
+- FAIL-CLOSED AGGREGATE: `/Font` continues to set
+  `has_unclassified_keys = true` on success AND failure in this slice, because
+  `graphics_state_findings` treats that flag fail-closed and no paint consumer
+  reads the new fact yet; `font_effect == Unset` alone is not proof of absence
+  while the flag is true (a semantically escaped `/Font` spelling stays
+  unclassified — raw-name scanners decode no `#xx` escapes). The seven
+  Phase-1 safety parameter classifications are preserved byte-for-byte and
+  independently of `/Font` success or failure.
+- ZERO CONSUMERS: no paint state, inventory identity, umbrella wiring, writer
+  admission, conversion, CLI, selector, or audit change; every `gs` remains
+  font-indeterminate in paint and writer `TextShow` remains refused. Copy
+  budget: one bounded array scan plus at most one existing resource-reference
+  resolution and shallow target dictionary scan per ExtGState carrying
+  `/Font`; retained facts are one reference, one offset, eight size bits, two
+  existing enums, and small ranges — no target bodies or attacker-sized token
+  copies.
+- Concepts cross-checked (never copied, no GPL/AGPL read): iText
+  `PdfExtGState.setFont(PdfArray)` documents the Table-58 array as
+  `[font size]` with `font` an indirect reference to a font dictionary;
+  pdf.js `evaluator.js` `setGState` resolves the ExtGState `/Font` pair
+  through the xref rather than a resource name (and pdf.js #4244/#12705 show
+  real files whose ExtGState font handling breaks when treated name-based);
+  PDFBOX-1359/PDFBOX-5054 warn against upgrading font classifications from
+  partial facts; ISO 32000-1 §8.4.5 Table 58, §9.3.1 Table 105, §9.5
+  Table 110, §9.7.4.1.
+
 ### T181 - Inherited page-Font resource descriptor (read-only, no consumers)
 
 - Three new modules mirror the ExtGState resource inspectors: `font_classify`

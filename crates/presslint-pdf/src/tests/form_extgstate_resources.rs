@@ -1,5 +1,6 @@
 use crate::{
-    ClassicXrefTableInspection, ExtGStateBlendMode, ExtGStateParamClass, ObjectLookup, PdfName,
+    ClassicXrefTableInspection, ExtGStateBlendMode, ExtGStateFontEffect, ExtGStateParamClass,
+    FontDictionaryTypeFact, FontSubtypeClass, IndirectRef, ObjectLookup, PdfName,
     SkippedExtGStateResourceReason, inspect_classic_xref_table, inspect_form_extgstate_resources,
 };
 
@@ -68,6 +69,52 @@ fn form_own_extgstate_classifies_bm() {
             },
         }
     );
+}
+
+#[test]
+fn form_own_scope_transports_font_effect() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ExtGState << /GS1 << /Font [2 0 R 7.5] >> >> >> >>\nstream\n\nendstream\nendobj\n",
+        b"2 0 obj\n<< /Type /Font /Subtype /TrueType >>\nendobj\n",
+    ]);
+
+    let report = inspect_form_extgstate_resources(&pdf.source, pdf.lookup(), pdf.object_offset(1));
+
+    assert!(report.skipped.is_empty());
+    let gs = &report.extgstates[0];
+    assert!(gs.has_unclassified_keys, "/Font stays unclassified");
+    assert_eq!(
+        gs.font_effect,
+        ExtGStateFontEffect::StructurallyValid {
+            reference: IndirectRef {
+                object_number: 2,
+                generation: 0,
+            },
+            object_byte_offset: pdf.object_offset(2),
+            size_bits: 7.5f64.to_bits(),
+            dictionary_type: FontDictionaryTypeFact::Font,
+            subtype: FontSubtypeClass::TrueType,
+        }
+    );
+}
+
+#[test]
+fn form_never_inherits_page_extgstate_font_effects() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /Pages /Kids [2 0 R] /Count 1 /Resources << /ExtGState << /GS0 << /Font [4 0 R 12] >> >> >> >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Page /Parent 1 0 R /MediaBox [0 0 10 10] /Resources << /XObject << /Fm1 3 0 R >> >> >>\nendobj\n",
+        b"3 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 >>\nstream\n\nendstream\nendobj\n",
+        b"4 0 obj\n<< /Type /Font /Subtype /Type1 >>\nendobj\n",
+    ]);
+
+    let report = inspect_form_extgstate_resources(&pdf.source, pdf.lookup(), pdf.object_offset(3));
+
+    assert!(report.extgstates.is_empty());
+    assert_eq!(report.skipped.len(), 1);
+    assert!(matches!(
+        report.skipped[0].reason,
+        SkippedExtGStateResourceReason::MissingExtGStateResources
+    ));
 }
 
 #[test]

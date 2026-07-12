@@ -1,6 +1,7 @@
 use crate::{
-    ClassicXrefTableInspection, ExtGStateBlendMode, ExtGStateOverprintMode, ExtGStateParamClass,
-    ObjectLookup, PdfName, SkippedExtGStateResourceReason, inspect_classic_xref_table,
+    ClassicXrefTableInspection, ExtGStateBlendMode, ExtGStateFontEffect, ExtGStateOverprintMode,
+    ExtGStateParamClass, FontDictionaryTypeFact, FontSubtypeClass, IndirectRef, ObjectLookup,
+    PdfName, SkippedExtGStateResourceReason, inspect_classic_xref_table,
     inspect_document_page_extgstate_resources_with_lookup,
 };
 
@@ -123,6 +124,39 @@ fn duplicate_extgstate_resource_name_is_structured_skip() {
         report.pages[0].skipped[0].reason,
         SkippedExtGStateResourceReason::DuplicateExtGStateName { .. }
     ));
+}
+
+#[test]
+fn page_report_transports_font_effect_through_inherited_resources() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /Pages /Kids [2 0 R] /Count 1 /Resources << /ExtGState << /GS0 << /Font [3 0 R 9.5] >> >> >> >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Page /Parent 1 0 R /MediaBox [0 0 10 10] >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Font /Subtype /Type1 >>\nendobj\n",
+    ]);
+
+    let report = inspect_document_page_extgstate_resources_with_lookup(
+        &pdf.source,
+        pdf.lookup(),
+        pdf.object_offset(1),
+    )
+    .expect("page ExtGState resources should inspect");
+
+    assert!(report.pages[0].skipped.is_empty());
+    let gs = &report.pages[0].extgstates[0];
+    assert!(gs.has_unclassified_keys, "/Font stays unclassified");
+    assert_eq!(
+        gs.font_effect,
+        ExtGStateFontEffect::StructurallyValid {
+            reference: IndirectRef {
+                object_number: 3,
+                generation: 0,
+            },
+            object_byte_offset: pdf.object_offset(3),
+            size_bits: 9.5f64.to_bits(),
+            dictionary_type: FontDictionaryTypeFact::Font,
+            subtype: FontSubtypeClass::Type1,
+        }
+    );
 }
 
 #[test]

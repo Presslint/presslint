@@ -148,8 +148,8 @@ pub use document_page_content_extents::{
     inspect_document_page_content_extents_with_lookup,
 };
 pub use extgstate_classify::{
-    ClassifiedExtGStateResource, ExtGStateAlpha, ExtGStateBlendMode, ExtGStateOverprintMode,
-    ExtGStateParamClass, ExtGStateSoftMask, SkippedExtGStateResource,
+    ClassifiedExtGStateResource, ExtGStateAlpha, ExtGStateBlendMode, ExtGStateFontEffect,
+    ExtGStateOverprintMode, ExtGStateParamClass, ExtGStateSoftMask, SkippedExtGStateResource,
     SkippedExtGStateResourceReason, classify_extgstate_entry,
 };
 pub use font_classify::{

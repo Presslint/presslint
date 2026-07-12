@@ -400,13 +400,33 @@ fn classify_dictionary(
     reference: Option<IndirectRef>,
     object_byte_offset: Option<usize>,
 ) -> ClassifiedFontResource {
+    let (dictionary_type, subtype) = classify_font_dictionary_facts(input, entries);
     ClassifiedFontResource {
         name,
-        dictionary_type: classify_type_fact(input, entries),
-        subtype: classify_subtype(input, entries),
+        dictionary_type,
+        subtype,
         reference,
         object_byte_offset,
     }
+}
+
+/// Derive the exact `/Type` fact and `/Subtype` class from already-inspected
+/// dictionary entries.
+///
+/// This is the single taxonomy source shared by the page/form `/Font`
+/// resource classifier and the `ExtGState` `/Font` effect classifier, so the
+/// two paths can never drift apart. It performs no resolution and no scan of
+/// its own: callers hand it the entry spans of a dictionary they already
+/// inspected. The enclosing module is private, so this stays crate-internal
+/// and is not part of the public surface.
+pub fn classify_font_dictionary_facts(
+    input: &[u8],
+    entries: &[DictionaryEntrySpan],
+) -> (FontDictionaryTypeFact, FontSubtypeClass) {
+    (
+        classify_type_fact(input, entries),
+        classify_subtype(input, entries),
+    )
 }
 
 fn classify_type_fact(input: &[u8], entries: &[DictionaryEntrySpan]) -> FontDictionaryTypeFact {
