@@ -13,11 +13,11 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 
 use presslint_inventory::{
-    Inventory, InventoryEntry, build_inventory_with_color_space_env, expanded_entry_identity,
+    Inventory, InventoryEntry, build_inventory_with_initial_state_and_envs, expanded_entry_identity,
 };
 use presslint_paint::{
-    CallSite, ColorSpaceEnv, ExtGStateEnv, FormResolver, GraphicsWalkError, PaintSubProgram,
-    ResolveForm, flat_call_events,
+    CallSite, ColorSpaceEnv, ExtGStateEnv, FormResolver, GraphicsStateSnapshot, GraphicsWalkError,
+    PaintSubProgram, ResolveForm, flat_call_events,
 };
 use presslint_pdf::{
     ObjectLookup, PageXObjectResourceTarget, SkippedPageXObjectResource,
@@ -132,6 +132,14 @@ impl FormObjectKey {
 /// colour-space env AND `gs` against a LOCAL `ExtGState` env, both built from
 /// that form's own `/Resources` and never merged with the page's.
 ///
+/// Effective graphics STATE is the opposite axis (ISO 32000-1 §8.10.1): every
+/// descended form starts from the exact caller state at its `Do` invocation —
+/// both in the `CallMachine` walk and in the invocation-specific template built
+/// here — while caller and callee keep independent `q`/`Q` stacks and callee
+/// mutations copy-on-write away from the shared seed. Form `/Matrix`
+/// concatenation, `/BBox` clipping, and transparency-group entry resets remain
+/// deliberately unmodelled.
+///
 /// # Errors
 ///
 /// Returns [`InventoryPageSkip`] only for page-level failures (page decode,
@@ -164,14 +172,21 @@ pub fn build_page_inventory_with_forms(
             error,
         })?;
 
-    let page_inventory = build_inventory_with_color_space_env(
+    // Page template: page-default state plus BOTH page environments, matching
+    // the root traversal program below, so template and traversal environment
+    // construction is coherent at both levels. The classified `ExtGState` facts
+    // are not digest inputs and `gs` already made font selection indeterminate
+    // under the empty env, so page-only output stays byte-identical.
+    let page_inventory = build_inventory_with_initial_state_and_envs(
         source,
         &assembled.records,
         page_index,
         &ContentScope::Page,
         page_image_names,
         page_form_names,
+        Rc::new(GraphicsStateSnapshot::page_default()),
         ColorSpaceEnv::new(page_color_spaces),
+        ExtGStateEnv::new(page_extgstates),
     )
     .map_err(|error| InventoryPageSkip::GraphicsWalkFailed {
         object_byte_offset: first_stream_offset,
@@ -363,14 +378,23 @@ impl<'arena> FormResolver<'arena> for UmbrellaFormResolver<'arena, '_> {
         let scope = ContentScope::FormXObject {
             name: call.name.clone(),
         };
-        let inventory = match build_inventory_with_color_space_env(
+        // Invocation-specific template: seeded from the EXACT caller state at
+        // this `Do` event (`Rc::clone`, no deep copy) — the same seed the
+        // `CallMachine` independently installs for the descended walk — plus the
+        // Form-LOCAL colour-space and `ExtGState` environments, so the template
+        // and the descended interpretation cannot diverge. The template is
+        // caller-dependent by construction and is therefore rebuilt per
+        // invocation, never cached in the `OnceLock` with the decoded data.
+        let inventory = match build_inventory_with_initial_state_and_envs(
             data.content.as_slice(),
             &data.records,
             self.page_index,
             &scope,
             &data.image_names,
             &data.form_names,
+            Rc::clone(&call.event.state),
             ColorSpaceEnv::new(&data.color_spaces),
+            ExtGStateEnv::new(&data.extgstates),
         ) {
             Ok(inventory) => inventory,
             Err(error) => {

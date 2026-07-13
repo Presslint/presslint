@@ -1,5 +1,40 @@
 # presslint-paint Journal
 
+## Seeded replay and machine-owned Form caller-state inheritance
+
+- `GraphicsStateWalker::with_initial_state_and_envs` installs a supplied
+  `Rc<GraphicsStateSnapshot>` as the walk's initial state with an EMPTY local
+  `q`/`Q` stack, alongside the existing borrowed colour-space and `ExtGState`
+  environments. Existing constructors delegate through `page_default()`, so
+  every prior entry point is unchanged. `PaintProgram::ops_with_initial_state`
+  accepts the seed at replay time: the descriptor stays borrowed, reusable, and
+  `Copy` — no `Rc` is stored in the program — and `.ops()` delegates with the
+  page default.
+- `CallMachine` now owns the normative Form inheritance mechanic
+  (ISO 32000-1 §8.10.1): every `ResolveForm::Descend` frame replays the callee
+  from `Rc::clone(&event.state)` — the exact caller snapshot at the `Do`
+  invocation. The resolver supplies only the sub-program and can neither choose
+  nor override the descent seed; `PaintSubProgram`, `ResolveForm`, `CallSite`,
+  and `CallEvent` shapes are unchanged, and the flat projection inherits the
+  fix without modification.
+- Rc/COW behaviour: seeding is a refcount bump, never a deep snapshot copy. A
+  non-mutating first callee op remains `Rc::ptr_eq` to the caller's `Do` state
+  (pinned by test); the first callee mutation triggers the existing bounded
+  copy-on-write clone, so callee mutations cannot leak back into the caller and
+  sibling invocations inherit independently from their own call sites. An
+  unmatched callee `Q` underflows instead of popping a caller save because the
+  callee-local stack starts empty.
+- Every field currently represented by `GraphicsStateSnapshot` inherits: CTM,
+  stroking and nonstroking colour, text rendering mode, font selection, and the
+  classified `ExtGState` snapshot. Nothing more is claimed: Form `/Matrix`
+  classification/concatenation, `/BBox` clipping, clip-path state, and
+  transparency-group entry resets (§11.6.6) remain deliberately unmodelled.
+- A sourced inherited colour may therefore retain a decoded range from its
+  caller stream. That range has no owning-stream identity and is observation /
+  digest provenance only. Seed-aware inventory admission now fails closed by
+  withholding colour-operand rewrite capability until a local colour operator
+  establishes distinct provenance; an explicit owner identity remains deferred.
+
 ## Raw `Tf` font selection state
 
 - `GraphicsStateSnapshot` now carries authoritative

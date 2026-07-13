@@ -14,12 +14,23 @@
 //! the machine assigns the next zero-based ordinal for the calling program,
 //! asks the resolver, and pushes an [`InvocationFrame`] only for `Descend`.
 //! `Skip` is a normal resolver decision; an error aborts like any walker error.
+//!
+//! The machine also owns the normative Form graphics-state inheritance
+//! (ISO 32000-1 §8.10.1): every descended callee walk is seeded from the exact
+//! shared snapshot carried by the caller's `Do` event (`Rc::clone`, no deep
+//! copy), with an empty callee-local `q`/`Q` stack. Caller and callee remain
+//! isolated by the walker's copy-on-write snapshots. Form `/Matrix`
+//! concatenation, `/BBox` clipping, and transparency-group entry resets are
+//! deliberately NOT modelled here.
+
+use std::rc::Rc;
 
 use presslint_syntax::OperatorRecord;
 use presslint_types::{ContentScope, InvocationFrame, InvocationPath, PdfName};
 
 use crate::{
-    ColorSpaceEnv, ExtGStateEnv, GraphicsWalkError, PaintOp, PaintOpKind, PaintOps, PaintProgram,
+    ColorSpaceEnv, ExtGStateEnv, GraphicsStateSnapshot, GraphicsWalkError, PaintOp, PaintOpKind,
+    PaintOps, PaintProgram,
 };
 
 /// Borrowed descriptor for one paint sub-program.
@@ -177,7 +188,12 @@ impl CallMachine {
                     ordinal,
                     name: name.clone(),
                 });
-                stack.push(WalkFrame::callee(callee));
+                // Machine-owned Form-inheritance invariant (ISO 32000-1
+                // §8.10.1): the callee starts from the EXACT caller state at
+                // this `Do` event — a refcount bump, never a deep copy. The
+                // resolver supplies only the sub-program; it cannot choose or
+                // override the descent seed.
+                stack.push(WalkFrame::callee(callee, Rc::clone(&event.state)));
             }
         }
 
@@ -207,22 +223,31 @@ struct WalkFrame<'a> {
 }
 
 impl<'a> WalkFrame<'a> {
+    /// The root program starts from the page-default state, exactly as before.
     fn root(program: PaintSubProgram<'a>) -> Self {
-        Self::new(program, false)
+        let seed = Rc::new(GraphicsStateSnapshot::page_default());
+        Self::new(program, seed, false)
     }
 
-    fn callee(program: PaintSubProgram<'a>) -> Self {
-        Self::new(program, true)
+    /// A descended callee starts from the caller's exact `Do`-event state with
+    /// an empty local `q`/`Q` stack; its mutations copy-on-write away from the
+    /// shared seed, so they can never leak back into the caller's walker.
+    const fn callee(program: PaintSubProgram<'a>, seed: Rc<GraphicsStateSnapshot>) -> Self {
+        Self::new(program, seed, true)
     }
 
-    fn new(program: PaintSubProgram<'a>, pop_path_on_return: bool) -> Self {
+    const fn new(
+        program: PaintSubProgram<'a>,
+        seed: Rc<GraphicsStateSnapshot>,
+        pop_path_on_return: bool,
+    ) -> Self {
         let ops = PaintProgram::with_envs(
             program.source,
             program.records,
             program.color_space_env,
             program.extgstate_env,
         )
-        .ops();
+        .ops_with_initial_state(seed);
         Self {
             program,
             ops,

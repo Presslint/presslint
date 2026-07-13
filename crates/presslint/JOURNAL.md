@@ -2,6 +2,48 @@
 
 Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## Dual-path Form caller-state inheritance in the expansion machine
+
+- Both consumers of a Form invocation now start from the same state. The
+  descended walk is seeded by the paint `CallMachine` itself from the exact
+  caller `Do`-event snapshot; the fresh invocation-specific template inventory
+  is built through the new seeded builder from `Rc::clone(&call.event.state)`
+  plus the Form-LOCAL colour-space and `ExtGState` environments. The page
+  template symmetrically uses page-default state plus BOTH page environments,
+  matching the root traversal program, so template and traversal environment
+  construction is coherent at both levels and a `gs` inside a Form cannot make
+  the two interpretations diverge.
+- Caching is unchanged: the `OnceLock` still holds only decoded bytes, operator
+  records, and inspected resources. The template inventory is caller-dependent
+  by construction and is rebuilt per invocation; repeated invocations of one
+  shared Form stay distinct by invocation path and effective state, and nested
+  Forms inherit from their IMMEDIATE caller. Resource lookup remains a separate
+  axis: inherited effective colour persists until a Form-local colour-space
+  operator resolves a (possibly same-spelled) name against the Form
+  environment, never the page environment, and there is still no page-resource
+  fallback for Forms.
+- Proof lives in the focused `tests/form_state_inheritance.rs` suite
+  (shared-Form dual-state, nested immediate-caller, caller/sibling isolation,
+  `q`/`Do`/`Q` restore, resource-scope independence, `gs` template/descent
+  coherence, deterministic distinct identities) next to the untouched Form
+  golden locks: every existing golden Form establishes its own colour before
+  painting, so the golden file remains an unchanged regression oracle. Claim
+  boundary: only the fields of `GraphicsStateSnapshot` inherit; Form `/Matrix`
+  classification/concatenation, `/BBox` clipping, transparency-group entry
+  resets, resource-backed font semantics, text identity v5, and any writer
+  admission remain deferred. Next direction: the three-crate FontEnv
+  mapping/all-environments builder with a deliberate text-v5 decision; Form
+  `/Matrix` follows as a later geometry/CTM slice, writer admission later
+  still.
+- Inherited caller colour provenance is fail-closed for action planning. A
+  Form entry whose vector/text colour still equals a sourced invocation seed
+  does not advertise `RewriteColorOperand`; the unchanged `ConvertColor`
+  planner reports `UnsupportedCapability` and cannot publish a Form-local
+  operand boundary from a caller-stream range. Page-local sourced colours and
+  locally reset Form colours keep their existing capability. This is an
+  inventory admission guard, not writer admission; explicit owning-stream
+  identity remains deferred.
+
 ## T180 - Image-mask inventory descriptor propagation
 
 - Top-level page image-XObject targets exposed by `PdfInventoryPage` now carry

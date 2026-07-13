@@ -188,8 +188,11 @@ pub struct ColorObservation {
     ///
     /// `Some(range)` points at the color-setting operator's record (e.g. the
     /// `rg`/`g`/`k` operator), not the paint or text-showing operator that
-    /// observed the color. It is `None` for the page-default/inherited color
-    /// and for synthesized observations that no color operator produced.
+    /// observed the color. Ordinary Form inheritance may retain a caller-stream
+    /// range here; because this bare range has no owning-stream identity, it is
+    /// observation/digest provenance only and is not mutation authority for the
+    /// observing stream. `None` remains valid for the page default and for
+    /// synthesized observations that no color operator produced.
     pub source: Option<ByteRange>,
 }
 

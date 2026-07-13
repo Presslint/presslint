@@ -1,5 +1,37 @@
 # presslint-inventory Journal
 
+## Seeded inventory builder for invocation-specific Form templates
+
+- Additive `build_inventory_with_initial_state_and_envs`: the existing combined
+  builder inputs plus an `Rc<GraphicsStateSnapshot>` seed, a `ColorSpaceEnv`,
+  and an `ExtGStateEnv`. The walk starts from the supplied shared snapshot —
+  normally the exact caller state at a Form's `Do` invocation — with an empty
+  local `q`/`Q` stack; installing the seed is a refcount bump and the first
+  mutation copies-on-write. Existing builders delegate through
+  `page_default()` plus their current default environments, so default output,
+  the streaming/materialized differential, the digest locks, and all existing
+  golden constants remain byte-identical (pinned by an explicit equivalence
+  test).
+- Seeded-template semantics: only inventory inputs that were ALREADY
+  state-dependent change through the seed — colour observations for paints and
+  text shows, and the text-identity-v4 font-selection/rendering-mode inputs.
+  The digest encoding and every domain tag are unchanged; entries for Forms
+  that genuinely inherit caller state may acquire different digests because
+  their effective colour/font inputs are now correct, not because identity
+  moved. Classified `ExtGState` snapshot fields remain non-digest inputs.
+- Provenance boundary: an inherited `GraphicsColor.source` (and thus a
+  `ColorObservation.source`) may refer to a range in the CALLER's stream. It
+  stays observation and digest provenance only — it carries no owning-stream
+  identity and is NEVER writer permission for a Form-local operand. The seeded
+  builder enforces this fail-closed at capability admission: when a vector/text
+  observation equals the corresponding sourced seed colour (including source
+  provenance), it withholds `RewriteColorOperand` while preserving unrelated
+  capabilities such as `AddTextSpreadStroke`. A local colour reset regains the
+  existing capability. Identical range/value collisions across streams may
+  conservatively withhold capability but can never grant it; an explicit
+  owning-stream identity remains deferred. Form `/Matrix`, `/BBox` clipping,
+  and transparency-group entry resets are not applied by any builder here.
+
 ## Text identity v4 font-state input
 
 - Text identity alone advances from `presslint.text.v3` to

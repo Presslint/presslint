@@ -41,9 +41,12 @@ pub struct GraphicsColor {
     pub spot_names: Vec<PdfName>,
     /// Decoded-buffer record range of the operator that set this colour.
     ///
-    /// `None` for the page-default/inherited colour; `Some(range)` once a
-    /// colour operator in the walked stream established it. The range travels
-    /// with the colour through `q`/`Q` save/restore.
+    /// `None` for the page default or when no modelled operator established the
+    /// colour; `Some(range)` once a colour operator established it. The range
+    /// travels with the colour through `q`/`Q` and ordinary Form inheritance,
+    /// so a Form may retain a range from its CALLER stream. Because the range
+    /// carries no owning-stream identity, it is observation/digest provenance
+    /// only and never mutation authority for the current stream.
     pub source: Option<DecodedRange>,
 }
 
@@ -473,8 +476,35 @@ impl<'a> GraphicsStateWalker<'a> {
     /// and `gs` against an `ExtGState` environment.
     #[must_use]
     pub fn with_envs(color_space_env: ColorSpaceEnv<'a>, extgstate_env: ExtGStateEnv<'a>) -> Self {
+        Self::with_initial_state_and_envs(
+            Rc::new(GraphicsStateSnapshot::page_default()),
+            color_space_env,
+            extgstate_env,
+        )
+    }
+
+    /// Create a walker whose initial graphics state is the supplied shared
+    /// snapshot instead of [`GraphicsStateSnapshot::page_default`].
+    ///
+    /// This is the seeded-replay seam for ordinary Form `XObject` execution
+    /// (ISO 32000-1 §8.10.1): the callee starts from the exact caller state at
+    /// its `Do` invocation. Installing the seed is a refcount bump, never a deep
+    /// snapshot copy; the existing copy-on-write isolates the seed on the first
+    /// callee mutation, so caller-held snapshots are never mutated through it.
+    /// The local `q`/`Q` save stack starts EMPTY: a callee `Q` can never pop a
+    /// caller save, it underflows instead. Every field currently represented by
+    /// [`GraphicsStateSnapshot`] inherits (CTM, both colours, text rendering
+    /// mode, font selection, classified `ExtGState` state); nothing is claimed
+    /// for unmodelled state, Form `/Matrix` concatenation, `/BBox` clipping, or
+    /// transparency-group entry resets.
+    #[must_use]
+    pub const fn with_initial_state_and_envs(
+        initial_state: Rc<GraphicsStateSnapshot>,
+        color_space_env: ColorSpaceEnv<'a>,
+        extgstate_env: ExtGStateEnv<'a>,
+    ) -> Self {
         Self {
-            state: Rc::new(GraphicsStateSnapshot::page_default()),
+            state: initial_state,
             stack: Vec::new(),
             color_space_env,
             extgstate_env,

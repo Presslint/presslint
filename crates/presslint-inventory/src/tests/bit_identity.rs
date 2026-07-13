@@ -7,12 +7,18 @@
 //! pin the exact entry identities before those refactors, so digest movement
 //! fails loudly even when both paths still agree with each other.
 
-use presslint_types::{ByteRange, ColorSpace, ContentScope, ObjectKind, PageIndex, PdfName};
+use std::rc::Rc;
+
+use presslint_types::{
+    ByteRange, ColorSpace, ContentScope, EditCapability, ObjectKind, PageIndex, PdfName,
+};
 
 use crate::{
-    ColorSpaceEnv, ColorSpaceResource, DecodedRange, GraphicsStateWalker, GraphicsWalkError,
-    GraphicsWalkErrorKind, Inventory, PaintOp, build_inventory,
-    build_inventory_with_color_space_env, inventory_from_graphics_events,
+    ColorSpaceEnv, ColorSpaceResource, DecodedRange, ExtGStateEnv, FontSelectionState,
+    GraphicsColor, GraphicsStateSnapshot, GraphicsStateWalker, GraphicsWalkError,
+    GraphicsWalkErrorKind, Inventory, PaintOp, TextRenderingMode, build_inventory,
+    build_inventory_with_color_space_env, build_inventory_with_initial_state_and_envs,
+    inventory_from_graphics_events,
 };
 
 const PAGE: PageIndex = PageIndex(2);
@@ -147,6 +153,218 @@ fn malformed_after_last_entry_surfaces_identical_error() -> Result<(), String> {
             DecodedRange::new(ByteRange { start: 8, end: 14 }),
         )
     );
+    Ok(())
+}
+
+/// A seed where every tracked snapshot field differs from `page_default()`.
+///
+/// The seeded tests below cover ordinary Form caller-state inheritance only:
+/// Form `/Matrix` concatenation, `/BBox` clipping, and transparency-group entry
+/// resets are NOT applied by the seeded builder and are not tested here.
+fn seeded_snapshot() -> GraphicsStateSnapshot {
+    GraphicsStateSnapshot {
+        ctm: [2.0, 0.0, 0.0, 2.0, 7.0, 7.0],
+        stroking_color: GraphicsColor::new(ColorSpace::DeviceRgb, vec![1.0, 0.0, 0.0]),
+        nonstroking_color: GraphicsColor::new(ColorSpace::DeviceCmyk, vec![0.0, 0.0, 0.0, 1.0]),
+        text_rendering_mode: TextRenderingMode::FillThenStroke,
+        font_selection: FontSelectionState::Selected {
+            name: name(b"F7"),
+            size: 7.0,
+        },
+        extgstate: crate::GraphicsExtGStateSnapshot::page_default(),
+    }
+}
+
+fn sourced_seeded_snapshot() -> GraphicsStateSnapshot {
+    let mut state = seeded_snapshot();
+    state.nonstroking_color.source = Some(DecodedRange::new(ByteRange {
+        start: 100,
+        end: 109,
+    }));
+    state
+}
+
+#[test]
+fn seeded_builder_with_page_default_and_empty_envs_matches_legacy_builders()
+-> Result<(), GraphicsWalkError> {
+    // Page-default/empty-environment equivalence: the seeded builder reduces
+    // byte-for-byte to the legacy builders, so existing digest locks above stay
+    // authoritative for the default root path.
+    let im1 = [name(b"Im1")];
+    let fm1 = [name(b"Fm1")];
+    for input in [
+        b"0.4 g f /Im1 Do (Hi) Tj /Fm1 Do".as_slice(),
+        b"q 1 0 0 1 5 5 cm 0.4 g f BT /F1 12 Tf (Hi) Tj ET /GS1 gs f Q".as_slice(),
+    ] {
+        let records = super::assembled_records(input)?;
+        let legacy = build_inventory(input, &records, PAGE, &ContentScope::Page, &im1, &fm1)?;
+        let seeded = build_inventory_with_initial_state_and_envs(
+            input,
+            &records,
+            PAGE,
+            &ContentScope::Page,
+            &im1,
+            &fm1,
+            Rc::new(GraphicsStateSnapshot::page_default()),
+            ColorSpaceEnv::empty(),
+            ExtGStateEnv::empty(),
+        )?;
+        assert_eq!(legacy, seeded);
+    }
+    Ok(())
+}
+
+#[test]
+fn seeded_streaming_matches_seeded_materialized_walk() -> Result<(), GraphicsWalkError> {
+    // The form paints BEFORE any local colour operator (`f` under the inherited
+    // seed), shows text under the inherited font/rendering mode, then sets a
+    // local colour: entries, observations, capabilities, and text identity
+    // inputs must agree between the streaming seeded builder and a materialized
+    // walk from the SAME source-free seed and environments. A sourced seed is
+    // covered separately because only the seeded builder receives the seed
+    // needed to withhold caller-owned rewrite provenance.
+    let input: &[u8] = b"f (Hi) Tj 0.5 g f";
+    let scope = ContentScope::FormXObject {
+        name: name(b"FmSeed"),
+    };
+    let records = super::assembled_records(input)?;
+    let streamed = build_inventory_with_initial_state_and_envs(
+        input,
+        &records,
+        PAGE,
+        &scope,
+        &[],
+        &[],
+        Rc::new(seeded_snapshot()),
+        ColorSpaceEnv::empty(),
+        ExtGStateEnv::empty(),
+    )?;
+
+    let mut walker = GraphicsStateWalker::with_initial_state_and_envs(
+        Rc::new(seeded_snapshot()),
+        ColorSpaceEnv::empty(),
+        ExtGStateEnv::empty(),
+    );
+    let events: Vec<PaintOp> = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| walker.step(input, index, record))
+        .collect::<Result<_, _>>()?;
+    let materialized = inventory_from_graphics_events(PAGE, &scope, &events, &[], &[]);
+    assert_eq!(streamed, materialized);
+
+    // The inherited seed is observable: the first fill reports the seeded CMYK
+    // colour; the FillThenStroke text show reports BOTH seeded colours; the
+    // later local `0.5 g` fill reports grey. Identity stays deterministic.
+    assert_eq!(streamed.entries[0].colors.len(), 1);
+    assert_eq!(streamed.entries[0].colors[0].space, ColorSpace::DeviceCmyk);
+    assert_eq!(
+        streamed.entries[0].colors[0].components,
+        vec![0.0, 0.0, 0.0, 1.0]
+    );
+    assert_eq!(streamed.entries[1].kind, ObjectKind::Text);
+    assert_eq!(streamed.entries[1].colors.len(), 2);
+    assert_eq!(streamed.entries[1].colors[0].space, ColorSpace::DeviceRgb);
+    assert_eq!(streamed.entries[2].colors[0].space, ColorSpace::DeviceGray);
+    let replay = build_inventory_with_initial_state_and_envs(
+        input,
+        &records,
+        PAGE,
+        &scope,
+        &[],
+        &[],
+        Rc::new(seeded_snapshot()),
+        ColorSpaceEnv::empty(),
+        ExtGStateEnv::empty(),
+    )?;
+    assert_eq!(streamed, replay);
+    Ok(())
+}
+
+#[test]
+fn seeded_inherited_source_withholds_only_rewrite_until_local_color_reset()
+-> Result<(), GraphicsWalkError> {
+    // The first vector and text entry inherit a sourced caller colour. The bare
+    // range has no owning-stream identity, so it is observation/digest evidence
+    // but cannot authorize a Form-local rewrite. Text spread remains unrelated
+    // and available. A local `g` establishes callee-owned provenance and
+    // restores the existing rewrite capability for later vector and text paint.
+    let input: &[u8] = b"f (Inherited) Tj 0.5 g f (Local) Tj";
+    let records = super::assembled_records(input)?;
+    let inventory = build_inventory_with_initial_state_and_envs(
+        input,
+        &records,
+        PAGE,
+        &ContentScope::FormXObject {
+            name: name(b"FmSeed"),
+        },
+        &[],
+        &[],
+        Rc::new(sourced_seeded_snapshot()),
+        ColorSpaceEnv::empty(),
+        ExtGStateEnv::empty(),
+    )?;
+
+    assert_eq!(inventory.entries.len(), 4);
+    assert_eq!(inventory.entries[0].kind, ObjectKind::Vector);
+    assert!(inventory.entries[0].colors[0].source.is_some());
+    assert!(
+        !inventory.entries[0]
+            .capabilities
+            .contains(&EditCapability::RewriteColorOperand)
+    );
+    assert_eq!(inventory.entries[1].kind, ObjectKind::Text);
+    assert_eq!(
+        inventory.entries[1].capabilities,
+        vec![EditCapability::AddTextSpreadStroke]
+    );
+
+    for entry in &inventory.entries[2..] {
+        assert!(
+            entry
+                .capabilities
+                .contains(&EditCapability::RewriteColorOperand)
+        );
+    }
+    assert_eq!(
+        inventory.entries[3].capabilities,
+        vec![
+            EditCapability::RewriteColorOperand,
+            EditCapability::AddTextSpreadStroke,
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn seeded_builder_surfaces_identical_error_to_materialized_walk() -> Result<(), GraphicsWalkError> {
+    // Errors agree too: the same malformed record short-circuits both paths
+    // with the same structured error under a non-default seed.
+    let input: &[u8] = b"f 1 2 RG";
+    let records = super::assembled_records(input)?;
+    let streamed = build_inventory_with_initial_state_and_envs(
+        input,
+        &records,
+        PAGE,
+        &ContentScope::Page,
+        &[],
+        &[],
+        Rc::new(seeded_snapshot()),
+        ColorSpaceEnv::empty(),
+        ExtGStateEnv::empty(),
+    );
+    let mut walker = GraphicsStateWalker::with_initial_state_and_envs(
+        Rc::new(seeded_snapshot()),
+        ColorSpaceEnv::empty(),
+        ExtGStateEnv::empty(),
+    );
+    let materialized: Result<Vec<PaintOp>, GraphicsWalkError> = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| walker.step(input, index, record))
+        .collect();
+    assert!(streamed.is_err());
+    assert_eq!(streamed.err(), materialized.err());
     Ok(())
 }
 

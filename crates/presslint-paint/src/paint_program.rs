@@ -20,11 +20,13 @@
 //! mutates a shared snapshot. Replay re-runs the walk from scratch; callers
 //! replay only when they need a fresh pass, so extra retained memory is O(1).
 
+use std::rc::Rc;
+
 use presslint_syntax::OperatorRecord;
 
 use crate::color_space_env::ColorSpaceEnv;
 use crate::extgstate_env::ExtGStateEnv;
-use crate::walker::{GraphicsStateWalker, GraphicsWalkError, PaintOp};
+use crate::walker::{GraphicsStateSnapshot, GraphicsStateWalker, GraphicsWalkError, PaintOp};
 
 /// Cheap, replayable descriptor of a paint program.
 ///
@@ -80,8 +82,30 @@ impl<'a> PaintProgram<'a> {
     /// this is what makes the program replayable.
     #[must_use]
     pub fn ops(&self) -> PaintOps<'a> {
+        self.ops_with_initial_state(Rc::new(GraphicsStateSnapshot::page_default()))
+    }
+
+    /// Start a fresh walk of this program from a caller-supplied initial state.
+    ///
+    /// This is the seeded-replay entry: the walk begins from `initial_state`
+    /// (an `Rc` refcount bump, never a deep snapshot copy) with an EMPTY local
+    /// `q`/`Q` stack, while the program keeps its own colour-space and
+    /// `ExtGState` environments. The seed lives with the returned iterator, not
+    /// with the descriptor: `PaintProgram` stays a borrowed, reusable `Copy`
+    /// value, so the SAME program can be replayed under different invocation
+    /// states. [`ops`](Self::ops) delegates here with
+    /// [`GraphicsStateSnapshot::page_default`].
+    #[must_use]
+    pub const fn ops_with_initial_state(
+        &self,
+        initial_state: Rc<GraphicsStateSnapshot>,
+    ) -> PaintOps<'a> {
         PaintOps {
-            walker: GraphicsStateWalker::with_envs(self.env, self.extgstate_env),
+            walker: GraphicsStateWalker::with_initial_state_and_envs(
+                initial_state,
+                self.env,
+                self.extgstate_env,
+            ),
             source: self.source,
             records: self.records,
             index: 0,

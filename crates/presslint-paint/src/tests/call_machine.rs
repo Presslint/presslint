@@ -1,16 +1,26 @@
-//! Call/return machine + invocation-identity tests (Phase 0b-2..0b-4a).
+//! Call/return machine + invocation-identity tests (Phase 0b-2..0b-4a), plus
+//! the machine-owned caller-state inheritance invariant.
 //!
 //! These exercise `CallMachine::walk`: caller-local form invocation ordinals,
 //! depth-first descent with LIFO frame popping, the `on_return` hook, resolver
 //! skip/error surfacing, image-name precedence, and the plain-JSON round trip of
-//! the `InvocationPath` that identifies each expanded op.
+//! the `InvocationPath` that identifies each expanded op. The inheritance tests
+//! prove every descended callee starts from the EXACT caller `Do`-event state
+//! (`Rc::ptr_eq` for a non-mutating first callee op), that nesting inherits
+//! from the IMMEDIATE caller, that callee mutations never leak back to the
+//! caller or a sibling invocation, that `q`/`Do`/`Q` restores the pre-`q`
+//! state, and that the callee's local `q`/`Q` stack starts EMPTY. Form
+//! `/Matrix` concatenation, `/BBox` clipping, and transparency-group entry
+//! resets are NOT modelled or tested here.
 
-use presslint_types::{InvocationFrame, InvocationPath, PdfName};
+use std::rc::Rc;
+
+use presslint_types::{ColorSpace, InvocationFrame, InvocationPath, PdfName};
 
 use super::{assemble, form_program, mini_json, name, page_program};
 use crate::{
-    CallEvent, CallMachine, CallSite, FormResolver, GraphicsWalkError, PaintOpKind,
-    PaintSubProgram, ResolveForm,
+    CallEvent, CallMachine, CallSite, FontSelectionState, FormResolver, GraphicsStateSnapshot,
+    GraphicsWalkError, PaintOp, PaintOpKind, PaintSubProgram, ResolveForm, TextRenderingMode,
 };
 
 fn collect_xobject_paths(event: CallEvent<'_>, paths: &mut Vec<(InvocationPath, PdfName)>) {
@@ -337,6 +347,254 @@ fn call_machine_resolver_error_surfaces_as_walk_error() -> Result<(), String> {
         .err()
         .ok_or("resolver error should abort the walk")?;
     assert_eq!(error.kind, crate::GraphicsWalkErrorKind::InvalidSourceRange);
+    Ok(())
+}
+
+/// Collect every visited `(path, op)` pair through a `StaticResolver` descent.
+fn collect_events<'a>(
+    root: PaintSubProgram<'a>,
+    resolver: &mut impl FormResolver<'a>,
+) -> Result<Vec<(InvocationPath, PaintOp)>, String> {
+    let mut seen = Vec::new();
+    CallMachine::walk(root, resolver, |event| {
+        seen.push((event.path.clone(), event.op.clone()));
+    })
+    .map_err(|error| format!("{error:?}"))?;
+    Ok(seen)
+}
+
+fn nonstroking(state: &GraphicsStateSnapshot) -> (ColorSpace, Vec<f64>) {
+    (
+        state.nonstroking_color.space.clone(),
+        state.nonstroking_color.components.clone(),
+    )
+}
+
+#[test]
+fn descended_callee_starts_from_exact_caller_do_state() -> Result<(), String> {
+    // The caller establishes non-default state before `Do`; the callee's first
+    // op `n` does not mutate, so it must carry the caller `Do` event's snapshot
+    // by POINTER — proving the machine seeded the descended walk itself.
+    let root_source = b"0 0 1 RG 1 0 0 rg /F Do f";
+    let form_source = b"n 0 1 0 rg f";
+    let root_records = assemble(root_source)?;
+    let form_records = assemble(form_source)?;
+    let no_images = [];
+    let forms = [name(b"F")];
+    let root = page_program(root_source, &root_records, &no_images, &forms);
+    let callee = form_program(form_source, &form_records, &no_images, &[], name(b"F"));
+    let mut resolver = StaticResolver {
+        callee,
+        calls: Vec::new(),
+    };
+
+    let seen = collect_events(root, &mut resolver)?;
+
+    let do_state = seen
+        .iter()
+        .find(|(path, op)| {
+            path.frames.is_empty() && matches!(op.kind, PaintOpKind::XObjectInvoke { .. })
+        })
+        .map(|(_, op)| Rc::clone(&op.state))
+        .ok_or("caller Do event")?;
+    let callee_first = seen
+        .iter()
+        .find(|(path, _)| path.frames.len() == 1)
+        .map(|(_, op)| op)
+        .ok_or("first callee op")?;
+
+    // Exact inheritance: pointer-equal until the first callee mutation.
+    assert!(Rc::ptr_eq(&callee_first.state, &do_state));
+    assert_eq!(
+        nonstroking(&callee_first.state),
+        (ColorSpace::DeviceRgb, vec![1.0, 0.0, 0.0])
+    );
+    assert_eq!(
+        callee_first.state.stroking_color.components,
+        vec![0.0, 0.0, 1.0]
+    );
+
+    // Callee mutation isolation: the caller's `f` after the return still sees
+    // the caller's own red, not the callee's green.
+    let caller_paint = seen
+        .iter()
+        .filter(|(path, op)| {
+            path.frames.is_empty() && matches!(op.kind, PaintOpKind::PathPaint { .. })
+        })
+        .map(|(_, op)| op)
+        .next_back()
+        .ok_or("caller paint after return")?;
+    assert_eq!(
+        nonstroking(&caller_paint.state),
+        (ColorSpace::DeviceRgb, vec![1.0, 0.0, 0.0])
+    );
+    Ok(())
+}
+
+#[test]
+// Exact CTM transport is part of the inheritance contract: strict compare.
+#[allow(clippy::float_cmp)]
+fn nested_callee_inherits_from_immediate_caller_not_page() -> Result<(), String> {
+    // Page sets 0.3 g, A sets 0.6 g and a CTM, then invokes B: B must inherit
+    // A's exact `Do` state (0.6 grey + A's CTM), not the page state or default.
+    let root_source = b"0.3 g /A Do";
+    let a_source = b"0.6 g 2 0 0 2 0 0 cm /B Do";
+    let b_source = b"f";
+    let root_records = assemble(root_source)?;
+    let a_records = assemble(a_source)?;
+    let b_records = assemble(b_source)?;
+    let no_images = [];
+    let root_forms = [name(b"A")];
+    let a_forms = [name(b"B")];
+    let root = page_program(root_source, &root_records, &no_images, &root_forms);
+    let a = form_program(a_source, &a_records, &no_images, &a_forms, name(b"A"));
+    let b = form_program(b_source, &b_records, &no_images, &[], name(b"B"));
+    let mut resolver = NestedResolver { a, b };
+    let mut b_states = Vec::new();
+
+    CallMachine::walk(root, &mut resolver, |event| {
+        if event.path.frames.len() == 2 {
+            b_states.push(Rc::clone(&event.op.state));
+        }
+    })
+    .map_err(|error| format!("{error:?}"))?;
+
+    let b_first = b_states.first().ok_or("B should be visited")?;
+    assert_eq!(nonstroking(b_first), (ColorSpace::DeviceGray, vec![0.6]));
+    assert_eq!(b_first.ctm, [2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+    Ok(())
+}
+
+#[test]
+// Exact CTM transport is part of the inheritance contract: strict compare.
+#[allow(clippy::float_cmp)]
+fn callee_mutations_do_not_leak_to_caller_or_sibling_invocation() -> Result<(), String> {
+    // `F` mutates colour, CTM, text rendering mode, and font selection. The
+    // caller op between/after the two invocations and the SIBLING invocation's
+    // inherited state must all keep the caller's own state.
+    let root_source = b"1 0 0 rg /F Do f /F Do f";
+    let form_source = b"n 0 1 0 rg 3 3 3 3 3 3 cm 2 Tr /F1 8 Tf f";
+    let root_records = assemble(root_source)?;
+    let form_records = assemble(form_source)?;
+    let no_images = [];
+    let forms = [name(b"F")];
+    let root = page_program(root_source, &root_records, &no_images, &forms);
+    let callee = form_program(form_source, &form_records, &no_images, &[], name(b"F"));
+    let mut resolver = StaticResolver {
+        callee,
+        calls: Vec::new(),
+    };
+
+    let seen = collect_events(root, &mut resolver)?;
+
+    // Both caller paints keep the caller's red, identity CTM, Fill mode, and
+    // Unset font — none of the callee's mutations leaked back.
+    let caller_paints: Vec<&PaintOp> = seen
+        .iter()
+        .filter(|(path, op)| {
+            path.frames.is_empty() && matches!(op.kind, PaintOpKind::PathPaint { .. })
+        })
+        .map(|(_, op)| op)
+        .collect();
+    assert_eq!(caller_paints.len(), 2);
+    for paint in &caller_paints {
+        assert_eq!(
+            nonstroking(&paint.state),
+            (ColorSpace::DeviceRgb, vec![1.0, 0.0, 0.0])
+        );
+        assert_eq!(paint.state.ctm, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(paint.state.text_rendering_mode, TextRenderingMode::Fill);
+        assert_eq!(paint.state.font_selection, FontSelectionState::Unset);
+    }
+
+    // The sibling (second) invocation inherits from ITS OWN `Do` state — the
+    // caller's red again, untouched by the first callee's green/CTM/text edits.
+    let sibling_first = seen
+        .iter()
+        .find(|(path, _)| path.frames.first().is_some_and(|frame| frame.ordinal == 1))
+        .map(|(_, op)| op)
+        .ok_or("second invocation first op")?;
+    assert_eq!(
+        nonstroking(&sibling_first.state),
+        (ColorSpace::DeviceRgb, vec![1.0, 0.0, 0.0])
+    );
+    assert_eq!(sibling_first.state.ctm, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    assert_eq!(
+        sibling_first.state.font_selection,
+        FontSelectionState::Unset
+    );
+    Ok(())
+}
+
+#[test]
+fn q_scoped_state_seeds_the_form_and_restores_after_return() -> Result<(), String> {
+    // q / state change / Do / Q: the form starts from the INNER (0.8) state;
+    // the caller paint after `Q` sees the pre-`q` (0.2) state.
+    let root_source = b"0.2 g q 0.8 g /F Do Q f";
+    let form_source = b"n";
+    let root_records = assemble(root_source)?;
+    let form_records = assemble(form_source)?;
+    let no_images = [];
+    let forms = [name(b"F")];
+    let root = page_program(root_source, &root_records, &no_images, &forms);
+    let callee = form_program(form_source, &form_records, &no_images, &[], name(b"F"));
+    let mut resolver = StaticResolver {
+        callee,
+        calls: Vec::new(),
+    };
+
+    let seen = collect_events(root, &mut resolver)?;
+
+    let callee_op = seen
+        .iter()
+        .find(|(path, _)| path.frames.len() == 1)
+        .map(|(_, op)| op)
+        .ok_or("callee op")?;
+    assert_eq!(
+        nonstroking(&callee_op.state),
+        (ColorSpace::DeviceGray, vec![0.8])
+    );
+
+    let caller_paint = seen
+        .iter()
+        .filter(|(path, op)| {
+            path.frames.is_empty() && matches!(op.kind, PaintOpKind::PathPaint { .. })
+        })
+        .map(|(_, op)| op)
+        .next_back()
+        .ok_or("caller paint after Q")?;
+    assert_eq!(
+        nonstroking(&caller_paint.state),
+        (ColorSpace::DeviceGray, vec![0.2])
+    );
+    Ok(())
+}
+
+#[test]
+fn callee_local_stack_starts_empty_so_unmatched_q_underflows() -> Result<(), String> {
+    // The caller holds an open `q` save, but the callee's local stack starts
+    // EMPTY: its unmatched `Q` must underflow instead of popping the caller's
+    // save across the form boundary.
+    let root_source = b"q /F Do Q";
+    let form_source = b"Q";
+    let root_records = assemble(root_source)?;
+    let form_records = assemble(form_source)?;
+    let no_images = [];
+    let forms = [name(b"F")];
+    let root = page_program(root_source, &root_records, &no_images, &forms);
+    let callee = form_program(form_source, &form_records, &no_images, &[], name(b"F"));
+    let mut resolver = StaticResolver {
+        callee,
+        calls: Vec::new(),
+    };
+
+    let error = CallMachine::walk(root, &mut resolver, |_| {})
+        .err()
+        .ok_or("unmatched callee Q should abort the walk")?;
+    assert_eq!(
+        error.kind,
+        crate::GraphicsWalkErrorKind::GraphicsStateStackUnderflow
+    );
     Ok(())
 }
 

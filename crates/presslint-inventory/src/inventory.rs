@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use presslint_syntax::OperatorRecord;
 use presslint_types::{
     BoundingBox, ColorObservation, ColorSpace, ColorUsage, ContentScope, EditCapability,
@@ -9,8 +11,8 @@ use crate::digest::{
     form_object_digest, image_object_digest, text_object_digest, usize_to_u32, vector_object_digest,
 };
 use presslint_paint::{
-    ColorSpaceEnv, GraphicsStateSnapshot, GraphicsWalkError, PaintOp, PaintOpKind, PaintProgram,
-    PathPaintKind, TextRenderingMode,
+    ColorSpaceEnv, ExtGStateEnv, GraphicsStateSnapshot, GraphicsWalkError, PaintOp, PaintOpKind,
+    PaintOps, PaintProgram, PathPaintKind, TextRenderingMode,
 };
 
 /// The empty invocation path folded into every single-stream (page or form)
@@ -216,14 +218,76 @@ pub fn build_inventory_with_color_space_env(
     form_xobject_names: &[PdfName],
     color_space_env: ColorSpaceEnv<'_>,
 ) -> Result<Inventory, GraphicsWalkError> {
-    collect_entries_streaming(source, records, color_space_env, |event, sequence| {
-        // Same fixed dispatch order as `inventory_from_graphics_events`: image is
-        // tried before form so a name present in both lists wins as an image.
-        vector_entry(page, scope, event, sequence)
-            .or_else(|| text_entry(page, scope, event, sequence))
-            .or_else(|| image_entry(page, scope, event, image_xobject_names, sequence))
-            .or_else(|| form_entry(page, scope, event, form_xobject_names, sequence))
-    })
+    build_inventory_with_initial_state_and_envs(
+        source,
+        records,
+        page,
+        scope,
+        image_xobject_names,
+        form_xobject_names,
+        Rc::new(GraphicsStateSnapshot::page_default()),
+        color_space_env,
+        ExtGStateEnv::empty(),
+    )
+}
+
+/// Build a combined page-object inventory whose walk starts from a supplied
+/// shared graphics-state snapshot and resolves resource names against both
+/// borrowed environments.
+///
+/// This is the seeded sibling of [`build_inventory_with_color_space_env`] for
+/// invocation-specific Form `XObject` templates (ISO 32000-1 §8.10.1): the walk
+/// begins from `initial_state` — normally the exact caller state at the Form's
+/// `Do` event — instead of [`GraphicsStateSnapshot::page_default`], with an
+/// empty local `q`/`Q` stack. Resource lookup stays a separate axis: `cs`/`scn`
+/// resolve against `color_space_env` and `gs` against `extgstate_env` (both
+/// scope-LOCAL by the caller's contract), never against the inherited state.
+/// Installing the seed is an `Rc` refcount bump; the first mutating operator
+/// copies-on-write, so the caller-held snapshot is never mutated.
+///
+/// A sourced vector/text colour that still equals the corresponding seed
+/// colour is inherited provenance without owning-stream identity. Such an entry
+/// omits [`EditCapability::RewriteColorOperand`] until a local colour operator
+/// establishes distinct provenance; unrelated capabilities are unchanged.
+///
+/// Passing [`GraphicsStateSnapshot::page_default`], any `color_space_env`, and
+/// [`ExtGStateEnv::empty`] is byte-identical to
+/// [`build_inventory_with_color_space_env`], which delegates here. Form
+/// `/Matrix` concatenation, `/BBox` clipping, and transparency-group entry
+/// resets are NOT applied by this builder.
+///
+/// # Errors
+///
+/// Returns a structured graphics-state walker error for malformed records in the
+/// supported operator set or invalid source ranges.
+#[allow(clippy::too_many_arguments)]
+pub fn build_inventory_with_initial_state_and_envs(
+    source: &[u8],
+    records: &[OperatorRecord],
+    page: PageIndex,
+    scope: &ContentScope,
+    image_xobject_names: &[PdfName],
+    form_xobject_names: &[PdfName],
+    initial_state: Rc<GraphicsStateSnapshot>,
+    color_space_env: ColorSpaceEnv<'_>,
+    extgstate_env: ExtGStateEnv<'_>,
+) -> Result<Inventory, GraphicsWalkError> {
+    let capability_seed = Rc::clone(&initial_state);
+    let program = PaintProgram::with_envs(source, records, color_space_env, extgstate_env);
+    collect_entries_from_ops(
+        program.ops_with_initial_state(initial_state),
+        |event, sequence| {
+            combined_entry(
+                page,
+                scope,
+                event,
+                image_xobject_names,
+                form_xobject_names,
+                sequence,
+            )
+            .map(|entry| withhold_inherited_color_rewrite(entry, event, &capability_seed))
+        },
+    )
 }
 
 /// Build vector inventory entries from graphics-state events.
@@ -313,6 +377,12 @@ pub fn form_inventory_from_graphics_events(
 /// Each merged entry's kind, provenance, colors, and capabilities equal what the
 /// matching per-kind builder would produce for the same event; only the
 /// `sequence` (and therefore the digest) differs, because the counter is global.
+///
+/// This materialized helper has no initial-state parameter, so it cannot
+/// distinguish a caller-stream colour source inherited by a Form. Use
+/// [`build_inventory_with_initial_state_and_envs`] for seeded, action-capable
+/// Form inventory; that builder withholds rewrite capability when the seed
+/// identifies inherited source provenance.
 #[must_use]
 pub fn inventory_from_graphics_events(
     page: PageIndex,
@@ -322,14 +392,32 @@ pub fn inventory_from_graphics_events(
     form_xobject_names: &[PdfName],
 ) -> Inventory {
     collect_entries(events, |event, sequence| {
-        // Dispatch in fixed order; the helpers are mutually exclusive by event
-        // kind except for `XObjectInvoke`, where image is tried before form so
-        // a name present in both lists is classified as an image.
-        vector_entry(page, scope, event, sequence)
-            .or_else(|| text_entry(page, scope, event, sequence))
-            .or_else(|| image_entry(page, scope, event, image_xobject_names, sequence))
-            .or_else(|| form_entry(page, scope, event, form_xobject_names, sequence))
+        combined_entry(
+            page,
+            scope,
+            event,
+            image_xobject_names,
+            form_xobject_names,
+            sequence,
+        )
     })
+}
+
+/// Classify one event using the combined inventory's fixed dispatch order.
+/// Image classification precedes Form classification for a name present in
+/// both caller-supplied lists.
+fn combined_entry(
+    page: PageIndex,
+    scope: &ContentScope,
+    event: &PaintOp,
+    image_xobject_names: &[PdfName],
+    form_xobject_names: &[PdfName],
+    sequence: u32,
+) -> Option<InventoryEntry> {
+    vector_entry(page, scope, event, sequence)
+        .or_else(|| text_entry(page, scope, event, sequence))
+        .or_else(|| image_entry(page, scope, event, image_xobject_names, sequence))
+        .or_else(|| form_entry(page, scope, event, form_xobject_names, sequence))
 }
 
 /// Walk events once, assigning a shared monotonic content-order `sequence` to
@@ -367,10 +455,25 @@ fn collect_entries_streaming(
     source: &[u8],
     records: &[OperatorRecord],
     color_space_env: ColorSpaceEnv<'_>,
+    classify: impl FnMut(&PaintOp, u32) -> Option<InventoryEntry>,
+) -> Result<Inventory, GraphicsWalkError> {
+    collect_entries_from_ops(
+        PaintProgram::new(source, records, color_space_env).ops(),
+        classify,
+    )
+}
+
+/// Drive one already-started [`PaintOps`] walk, classifying each op as it
+/// streams past. This is the shared tail of [`collect_entries_streaming`] and
+/// the seeded builder: the walk's initial state and environments were fixed by
+/// whoever constructed the iterator, so default and seeded paths share the same
+/// sequence assignment, error short-circuit, and O(1) event retention.
+fn collect_entries_from_ops(
+    ops: PaintOps<'_>,
     mut classify: impl FnMut(&PaintOp, u32) -> Option<InventoryEntry>,
 ) -> Result<Inventory, GraphicsWalkError> {
     let mut entries = Vec::new();
-    for op in PaintProgram::new(source, records, color_space_env) {
+    for op in ops {
         let event = op?;
         let sequence = usize_to_u32(entries.len());
         if let Some(entry) = classify(&event, sequence) {
@@ -666,6 +769,43 @@ fn text_capabilities(colors: &[ColorObservation]) -> Vec<EditCapability> {
             EditCapability::AddTextSpreadStroke,
         ]
     }
+}
+
+/// Fail closed when an entry observes a sourced colour carried in by the
+/// supplied initial state. Its bare range may address the caller stream, while
+/// the entry's scope addresses the callee stream, so it is evidence for
+/// observation/identity only and cannot authorize a local operand rewrite.
+///
+/// Equality compares the whole corresponding `GraphicsColor`, including source
+/// provenance and the resource name that is not published on the observation.
+/// A local colour operator can therefore regain the normal capability. If two
+/// streams happen to produce an identical colour at an identical decoded range,
+/// the conservative false positive removes capability; it can never grant
+/// capability to inherited provenance.
+fn withhold_inherited_color_rewrite(
+    mut entry: InventoryEntry,
+    event: &PaintOp,
+    initial_state: &GraphicsStateSnapshot,
+) -> InventoryEntry {
+    if matches!(entry.kind, ObjectKind::Vector | ObjectKind::Text)
+        && entry.colors.iter().any(|color| {
+            color.source.is_some()
+                && match color.usage {
+                    ColorUsage::Stroke => {
+                        event.state.stroking_color == initial_state.stroking_color
+                    }
+                    ColorUsage::Fill => {
+                        event.state.nonstroking_color == initial_state.nonstroking_color
+                    }
+                    ColorUsage::Image | ColorUsage::Shading => false,
+                }
+        })
+    {
+        entry
+            .capabilities
+            .retain(|capability| *capability != EditCapability::RewriteColorOperand);
+    }
+    entry
 }
 
 const fn image_color_observation() -> ColorObservation {
