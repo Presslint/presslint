@@ -129,7 +129,7 @@ fn duplicate_extgstate_resource_name_is_structured_skip() {
 #[test]
 fn page_report_transports_font_effect_through_inherited_resources() {
     let pdf = fixture(&[
-        b"1 0 obj\n<< /Type /Pages /Kids [2 0 R] /Count 1 /Resources << /ExtGState << /GS0 << /Font [3 0 R 9.5] >> >> >> >>\nendobj\n",
+        b"1 0 obj\n<< /Type /Pages /Kids [2 0 R] /Count 1 /Resources << /ExtGState << /GS0 << /F#6fnt [3 0 R 9.5] >> >> >> >>\nendobj\n",
         b"2 0 obj\n<< /Type /Page /Parent 1 0 R /MediaBox [0 0 10 10] >>\nendobj\n",
         b"3 0 obj\n<< /Type /Font /Subtype /Type1 >>\nendobj\n",
     ]);

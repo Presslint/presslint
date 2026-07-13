@@ -7,9 +7,9 @@ use presslint_types::ByteRange;
 use super::{assemble, mini_json, name};
 use crate::DecodedRange;
 use crate::{
-    ColorSpaceEnv, ExtGStateEnv, ExtGStateParams, ExtGStateResource, FontSelectionState,
-    GraphicsStateWalker, GraphicsWalkErrorKind, GsParam, PaintOp, PaintOpKind, PaintProgram,
-    TextRenderingMode, TextShowOperator, walk_graphics_state,
+    ColorSpaceEnv, ExtGStateEnv, ExtGStateFontDirective, ExtGStateParams, ExtGStateResource,
+    FontSelectionState, GraphicsStateWalker, GraphicsWalkErrorKind, GsParam, PaintOp, PaintOpKind,
+    PaintProgram, TextRenderingMode, TextShowOperator, walk_graphics_state,
 };
 
 fn walk(input: &[u8]) -> Result<Vec<PaintOp>, String> {
@@ -236,6 +236,7 @@ fn every_gs_case_is_indeterminate_and_later_tf_recovers() -> Result<(), String> 
             name: name(b"Synthetic"),
             params: ExtGStateParams::empty(),
             has_unclassified_keys: false,
+            font: ExtGStateFontDirective::Unknown,
         },
         ExtGStateResource {
             name: name(b"Classified"),
@@ -244,6 +245,7 @@ fn every_gs_case_is_indeterminate_and_later_tf_recovers() -> Result<(), String> 
                 ..ExtGStateParams::empty()
             },
             has_unclassified_keys: false,
+            font: ExtGStateFontDirective::Unknown,
         },
     ];
     for (gs_name, env) in [
@@ -294,6 +296,15 @@ fn font_state_setter_and_text_show_serde_shapes_are_locked() -> Result<(), mini_
     assert_eq!(
         mini_json::to_json(&FontSelectionState::Indeterminate)?,
         r#"{"kind":"indeterminate"}"#
+    );
+    assert_eq!(
+        mini_json::to_json(&FontSelectionState::ResolvedIndirect {
+            object_number: 17,
+            generation: 3,
+            object_byte_offset: 901,
+            size: -0.0,
+        })?,
+        r#"{"kind":"resolved_indirect","object_number":17,"generation":3,"object_byte_offset":901,"size":-0}"#
     );
     assert_eq!(
         mini_json::to_json(&PaintOpKind::SetFont {

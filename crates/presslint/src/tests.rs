@@ -8,6 +8,7 @@ use crate::{
 mod color_audit;
 mod default_color_space_audit;
 mod extgstate_wiring;
+mod font_wiring;
 mod form_inventory;
 mod form_inventory_golden;
 mod form_state_inheritance;

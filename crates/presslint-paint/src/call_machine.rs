@@ -29,8 +29,8 @@ use presslint_syntax::OperatorRecord;
 use presslint_types::{ContentScope, InvocationFrame, InvocationPath, PdfName};
 
 use crate::{
-    ColorSpaceEnv, ExtGStateEnv, GraphicsStateSnapshot, GraphicsWalkError, PaintOp, PaintOpKind,
-    PaintOps, PaintProgram,
+    ColorSpaceEnv, ExtGStateEnv, FontEnv, GraphicsStateSnapshot, GraphicsWalkError, PaintOp,
+    PaintOpKind, PaintOps, PaintProgram,
 };
 
 /// Borrowed descriptor for one paint sub-program.
@@ -48,6 +48,8 @@ pub struct PaintSubProgram<'a> {
     pub color_space_env: ColorSpaceEnv<'a>,
     /// `ExtGState` environment used by the paint walker for `gs`.
     pub extgstate_env: ExtGStateEnv<'a>,
+    /// Font environment used by the paint walker for `Tf` and `gs`.
+    pub font_env: FontEnv<'a>,
     /// Names classified by the caller as image `XObject`s.
     pub image_xobject_names: &'a [PdfName],
     /// Names classified by the caller as form `XObject`s.
@@ -241,11 +243,12 @@ impl<'a> WalkFrame<'a> {
         seed: Rc<GraphicsStateSnapshot>,
         pop_path_on_return: bool,
     ) -> Self {
-        let ops = PaintProgram::with_envs(
+        let ops = PaintProgram::with_all_envs(
             program.source,
             program.records,
             program.color_space_env,
             program.extgstate_env,
+            program.font_env,
         )
         .ops_with_initial_state(seed);
         Self {

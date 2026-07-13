@@ -13,7 +13,8 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 
 use presslint_inventory::{
-    Inventory, InventoryEntry, build_inventory_with_initial_state_and_envs, expanded_entry_identity,
+    FontBinding, FontEnv, Inventory, InventoryEntry,
+    build_inventory_with_initial_state_and_all_envs, expanded_entry_identity,
 };
 use presslint_paint::{
     CallSite, ColorSpaceEnv, ExtGStateEnv, FormResolver, GraphicsStateSnapshot, GraphicsWalkError,
@@ -23,14 +24,14 @@ use presslint_pdf::{
     ObjectLookup, PageXObjectResourceTarget, SkippedPageXObjectResource,
     SkippedPageXObjectResourceReason, inspect_content_stream_data_extent_with_lookup,
     inspect_form_color_space_resources, inspect_form_extgstate_resources,
-    inspect_form_xobject_resources,
+    inspect_form_font_resources, inspect_form_xobject_resources,
 };
 use presslint_syntax::{OperatorRecord, assemble_operators, tokenize};
 use presslint_types::{ContentScope, InvocationFrame, InvocationPath, PageIndex, PdfName};
 
 use crate::document_inventory::{
     InventoryPageSkip, color_space_env_resources, decode_page_content, extgstate_env_resources,
-    inventory_names,
+    font_env_from_bindings, font_env_resources, inventory_names,
 };
 use crate::form_inventory::{
     FormExpandedInventory, FormWalkContext, SkippedFormInventory, SkippedFormInventoryReason,
@@ -94,6 +95,7 @@ struct FormProgramData<'input> {
     resource_skips: Vec<SkippedPageXObjectResource>,
     color_spaces: Vec<presslint_inventory::ColorSpaceResource>,
     extgstates: Vec<presslint_inventory::ExtGStateResource>,
+    fonts: Option<Vec<FontBinding>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -127,10 +129,10 @@ impl FormObjectKey {
 /// invocation path are folded into the digest at construction, not rebased
 /// afterwards.
 ///
-/// Form `XObject` content keeps its OWN resource environment and must NOT
-/// inherit the page one, so each form walk resolves `cs`/`scn` against a LOCAL
-/// colour-space env AND `gs` against a LOCAL `ExtGState` env, both built from
-/// that form's own `/Resources` and never merged with the page's.
+/// Form `XObject` content keeps its OWN resource environments and must NOT
+/// inherit the page ones, so each form walk resolves `cs`/`scn`, `gs`, and `Tf`
+/// against LOCAL colour-space, `ExtGState`, and font envs built from that form's
+/// own `/Resources` and never merged with the page's.
 ///
 /// Effective graphics STATE is the opposite axis (ISO 32000-1 §8.10.1): every
 /// descended form starts from the exact caller state at its `Do` invocation —
@@ -159,6 +161,38 @@ pub fn build_page_inventory_with_forms(
     page_extgstates: &[presslint_inventory::ExtGStateResource],
     context: FormWalkContext,
 ) -> Result<FormExpandedInventory, InventoryPageSkip> {
+    build_page_inventory_with_forms_and_font_env(
+        input,
+        lookup,
+        page,
+        page_index,
+        max_decoded_stream_bytes,
+        page_image_names,
+        page_form_names,
+        form_targets,
+        page_color_spaces,
+        page_extgstates,
+        FontEnv::disabled(),
+        context,
+    )
+}
+
+/// Internal all-environment page/Form bridge used by both PDF access paths.
+#[allow(clippy::too_many_arguments)]
+pub fn build_page_inventory_with_forms_and_font_env(
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    page: &presslint_pdf::DocumentPageContentExtentInspection,
+    page_index: PageIndex,
+    max_decoded_stream_bytes: usize,
+    page_image_names: &[PdfName],
+    page_form_names: &[PdfName],
+    form_targets: &[PageXObjectResourceTarget],
+    page_color_spaces: &[presslint_inventory::ColorSpaceResource],
+    page_extgstates: &[presslint_inventory::ExtGStateResource],
+    page_font_env: FontEnv<'_>,
+    context: FormWalkContext,
+) -> Result<FormExpandedInventory, InventoryPageSkip> {
     let (page_bytes, first_stream_offset) =
         decode_page_content(input, page, max_decoded_stream_bytes)?;
     let source = page_bytes.as_slice();
@@ -172,12 +206,10 @@ pub fn build_page_inventory_with_forms(
             error,
         })?;
 
-    // Page template: page-default state plus BOTH page environments, matching
-    // the root traversal program below, so template and traversal environment
-    // construction is coherent at both levels. The classified `ExtGState` facts
-    // are not digest inputs and `gs` already made font selection indeterminate
-    // under the empty env, so page-only output stays byte-identical.
-    let page_inventory = build_inventory_with_initial_state_and_envs(
+    // Page template: page-default state plus all page resource environments,
+    // matching the root traversal below so resolved font state and text identity
+    // cannot diverge between the template and traversal paths.
+    let page_inventory = build_inventory_with_initial_state_and_all_envs(
         source,
         &assembled.records,
         page_index,
@@ -187,6 +219,7 @@ pub fn build_page_inventory_with_forms(
         Rc::new(GraphicsStateSnapshot::page_default()),
         ColorSpaceEnv::new(page_color_spaces),
         ExtGStateEnv::new(page_extgstates),
+        page_font_env,
     )
     .map_err(|error| InventoryPageSkip::GraphicsWalkFailed {
         object_byte_offset: first_stream_offset,
@@ -206,6 +239,7 @@ pub fn build_page_inventory_with_forms(
         records: &assembled.records,
         color_space_env: ColorSpaceEnv::new(page_color_spaces),
         extgstate_env: ExtGStateEnv::new(page_extgstates),
+        font_env: page_font_env,
         image_xobject_names: page_image_names,
         form_xobject_names: page_form_names,
         scope: ContentScope::Page,
@@ -381,11 +415,12 @@ impl<'arena> FormResolver<'arena> for UmbrellaFormResolver<'arena, '_> {
         // Invocation-specific template: seeded from the EXACT caller state at
         // this `Do` event (`Rc::clone`, no deep copy) — the same seed the
         // `CallMachine` independently installs for the descended walk — plus the
-        // Form-LOCAL colour-space and `ExtGState` environments, so the template
-        // and the descended interpretation cannot diverge. The template is
+        // three Form-LOCAL resource environments, so the template and the
+        // descended interpretation cannot diverge. The template is
         // caller-dependent by construction and is therefore rebuilt per
         // invocation, never cached in the `OnceLock` with the decoded data.
-        let inventory = match build_inventory_with_initial_state_and_envs(
+        let font_env = font_env_from_bindings(data.fonts.as_deref());
+        let inventory = match build_inventory_with_initial_state_and_all_envs(
             data.content.as_slice(),
             &data.records,
             self.page_index,
@@ -395,6 +430,7 @@ impl<'arena> FormResolver<'arena> for UmbrellaFormResolver<'arena, '_> {
             Rc::clone(&call.event.state),
             ColorSpaceEnv::new(&data.color_spaces),
             ExtGStateEnv::new(&data.extgstates),
+            font_env,
         ) {
             Ok(inventory) => inventory,
             Err(error) => {
@@ -419,6 +455,7 @@ impl<'arena> FormResolver<'arena> for UmbrellaFormResolver<'arena, '_> {
             records: &data.records,
             color_space_env: ColorSpaceEnv::new(&data.color_spaces),
             extgstate_env: ExtGStateEnv::new(&data.extgstates),
+            font_env,
             image_xobject_names: &data.image_names,
             form_xobject_names: &data.form_names,
             scope,
@@ -577,6 +614,8 @@ fn prepare_form_object<'input>(
     let form_extgstates =
         inspect_form_extgstate_resources(input, lookup, target.object_byte_offset);
     let extgstates = extgstate_env_resources(&form_extgstates.extgstates, &form_extgstates.skipped);
+    let form_fonts = inspect_form_font_resources(input, lookup, target.object_byte_offset);
+    let fonts = font_env_resources(&form_fonts.fonts, &form_fonts.skipped);
     // Materialise empty child slots for this form's own declared form resources.
     // They are inspected/decoded only if a nested invocation in turn reaches
     // them, keeping the whole descent lazy and bounded.
@@ -594,6 +633,7 @@ fn prepare_form_object<'input>(
         resource_skips,
         color_spaces,
         extgstates,
+        fonts,
     })
 }
 

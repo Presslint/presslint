@@ -12,17 +12,19 @@ use presslint_pdf::{
     inspect_document_page_color_space_resources_with_lookup,
     inspect_document_page_content_extents_resolved,
     inspect_document_page_extgstate_resources_with_lookup,
+    inspect_document_page_font_resources_with_lookup,
     inspect_document_page_xobject_resources_with_lookup, resolve_object,
 };
 use presslint_types::PageIndex;
 use serde::{Deserialize, Serialize};
 
 use crate::document_inventory::{
-    InventoryPageSkip, inventory_names, page_color_space_env, page_extgstates_at, page_index,
-    split_color_space_report,
+    InventoryPageSkip, font_env_from_bindings, inventory_names, page_color_space_env,
+    page_extgstates_at, page_font_bindings_at, page_index, split_color_space_report,
 };
 use crate::form_inventory::{
-    FormExpandedInventory, FormWalkContext, SkippedFormInventory, build_page_inventory_with_forms,
+    FormExpandedInventory, FormWalkContext, SkippedFormInventory,
+    build_page_inventory_with_forms_and_font_env,
 };
 
 /// Result of building inventory from a backend-neutral PDF.
@@ -290,6 +292,13 @@ pub fn build_pdf_inventory(
     .ok()
     .map(|report| report.pages);
     let extgstate_pages = extgstate_pages.as_ref();
+    let font_pages = inspect_document_page_font_resources_with_lookup(
+        input,
+        lookup,
+        access.page_tree_root.object_byte_offset,
+    )
+    .ok()
+    .map(|report| report.pages);
 
     let mut inventory = Inventory::default();
     let mut pages = Vec::with_capacity(extents.pages.len());
@@ -313,7 +322,9 @@ pub fn build_pdf_inventory(
         let form_targets = resources.map_or(&[][..], |r| r.form_xobjects.as_slice());
         let page_color_spaces = color_space_page.map_or_else(Vec::new, page_color_space_env);
         let page_extgstates = page_extgstates_at(extgstate_pages, page.ordinal);
-        let result = match build_page_inventory_with_forms(
+        let page_fonts = page_font_bindings_at(font_pages.as_deref(), page);
+        let page_font_env = font_env_from_bindings(page_fonts.as_deref());
+        let result = match build_page_inventory_with_forms_and_font_env(
             input,
             lookup,
             page,
@@ -324,6 +335,7 @@ pub fn build_pdf_inventory(
             form_targets,
             &page_color_spaces,
             &page_extgstates,
+            page_font_env,
             FormWalkContext::bounded_default(),
         ) {
             Ok(expanded) => {

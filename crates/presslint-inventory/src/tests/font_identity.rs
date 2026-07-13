@@ -1,4 +1,4 @@
-//! Text-v4 identity locks for effective raw font selection.
+//! Text-v5 identity locks for raw and resolved effective font selection.
 
 use std::rc::Rc;
 
@@ -17,6 +17,15 @@ fn name(bytes: &[u8]) -> PdfName {
 fn selected(name_bytes: &[u8], size: f64) -> FontSelectionState {
     FontSelectionState::Selected {
         name: name(name_bytes),
+        size,
+    }
+}
+
+fn resolved(object_number: u32, generation: u16, offset: usize, size: f64) -> FontSelectionState {
+    FontSelectionState::ResolvedIndirect {
+        object_number,
+        generation,
+        object_byte_offset: offset,
         size,
     }
 }
@@ -58,18 +67,22 @@ fn text_digest(font_selection: FontSelectionState) -> [u8; 32] {
 }
 
 #[test]
-fn text_v4_distinguishes_all_font_state_discriminators() {
+fn text_v5_distinguishes_all_font_state_discriminators() {
     let unset = text_digest(FontSelectionState::Unset);
     let selected = text_digest(selected(b"F1", 12.0));
+    let resolved = text_digest(resolved(9, 2, 401, 12.0));
     let indeterminate = text_digest(FontSelectionState::Indeterminate);
 
     assert_ne!(unset, selected);
+    assert_ne!(unset, resolved);
     assert_ne!(unset, indeterminate);
+    assert_ne!(selected, resolved);
     assert_ne!(selected, indeterminate);
+    assert_ne!(resolved, indeterminate);
 }
 
 #[test]
-fn text_v4_hashes_raw_name_and_exact_size_bits() {
+fn text_v5_hashes_legacy_raw_name_and_exact_size_bits() {
     assert_ne!(
         text_digest(selected(b"F1", 12.0)),
         text_digest(selected(b"F#31", 12.0)),
@@ -83,6 +96,21 @@ fn text_v4_hashes_raw_name_and_exact_size_bits() {
         text_digest(selected(b"F1", 0.0)),
         text_digest(selected(b"F1", -0.0)),
         "the size sign bit is identity input"
+    );
+}
+
+#[test]
+fn text_v5_resolved_identity_ignores_alias_but_hashes_reached_tuple_and_size_bits() {
+    let alias_a = text_digest(resolved(9, 2, 401, 12.0));
+    let alias_b = text_digest(resolved(9, 2, 401, 12.0));
+    assert_eq!(alias_a, alias_b, "resolved state carries no resource name");
+    assert_ne!(alias_a, text_digest(resolved(10, 2, 401, 12.0)));
+    assert_ne!(alias_a, text_digest(resolved(9, 3, 401, 12.0)));
+    assert_ne!(alias_a, text_digest(resolved(9, 2, 907, 12.0)));
+    assert_ne!(alias_a, text_digest(resolved(9, 2, 401, 12.25)));
+    assert_ne!(
+        text_digest(resolved(9, 2, 401, 0.0)),
+        text_digest(resolved(9, 2, 401, -0.0))
     );
 }
 

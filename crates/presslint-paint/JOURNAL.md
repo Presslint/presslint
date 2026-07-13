@@ -1,5 +1,29 @@
 # presslint-paint Journal
 
+## Borrowed semantic FontEnv and effective font state
+
+- `FontEnv<'a>` is the single new paint-native abstraction. It distinguishes
+  disabled compatibility, completely known bindings (including known-empty),
+  and structurally unknown coverage without importing PDF object types. Each
+  binding caches a decoded semantic name and either an exact scalar indirect
+  identity `(object number, generation, reached offset)` or an unresolved fact.
+- All-environment walker/program entry points resolve `Tf` through the local
+  namespace and apply each mapped ExtGState directive as leave-current,
+  atomic resolved font-plus-size selection, or unknown. Missing, malformed,
+  ambiguous, direct-without-identity, and unknown paths clear stale selection;
+  a proven absent `/Font` performs no font-specific COW mutation. `q`/`Q`
+  restores the whole selection and `BT`/`ET` does not reset it.
+- `FontSelectionState::ResolvedIndirect` is additive and retains exact finite
+  size bits, including negative zero, without carrying or inventing a resource
+  name. Existing constructors delegate with `FontEnv::disabled()`, preserving
+  raw `Tf` and conservative every-`gs` invalidation. `PaintSubProgram` carries
+  the local borrowed environment, while the call machine still seeds Forms from
+  the exact caller snapshot; shared and nested calls remain caller-isolated.
+- The environment and compact scalar directives are `Copy`; lookup is a linear
+  scan over cached per-scope names and each `Tf` operand is decoded once. No
+  glyph decoding, text geometry, Type3 semantics, or writer-safety authority is
+  implied.
+
 ## Seeded replay and machine-owned Form caller-state inheritance
 
 - `GraphicsStateWalker::with_initial_state_and_envs` installs a supplied

@@ -4,6 +4,22 @@ Older accumulated journal history lives in [JOURNAL-archive-4.md](JOURNAL-archiv
 
 ## Current State
 
+### Semantic font names and duplicate poisoning
+
+- `/Font` namespace keys, ExtGState `/Font` effect keys, and names inside a
+  font resource dictionary now compare as decoded PDF names. The shared bounded
+  decoder borrows unescaped bytes and allocates at most one raw-name-sized
+  buffer for escaped names; malformed, truncated, non-hexadecimal, literal-null,
+  or null-producing spellings fail closed.
+- Public report names remain their exact raw `PdfName` bytes and every existing
+  serde shape is retained. Exact-plus-escaped spellings are semantic duplicates,
+  so neither namespaces nor bindings use first-wins recovery; an unrelated
+  unknown ExtGState key remains distinct from a semantic `/Font` duplicate.
+- The correction intentionally spans the structural fact producer and its
+  paint/inventory consumers in one vertical: discarded raw-key distinctions
+  cannot be recovered safely above this crate. No glyph, CMap, embedded-program,
+  CID-descendant, or Type3 interpretation was added.
+
 ### T183 - Exact ExtGState Font effect descriptor (read-only, no consumers)
 
 - `ClassifiedExtGStateResource` gains one additive `#[serde(default)]` field

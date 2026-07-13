@@ -14,6 +14,7 @@
 //!   all-`Unresolved` miss, empty-env parameter preservation, and `q`/`Q` restore.
 //! - [`font_state`]: raw `Tf` state, `gs` uncertainty, save/restore, errors, and
 //!   serde shape locks.
+//! - [`font_env`]: enabled semantic `Tf`/`gs` resolution and fail-closed coverage.
 //! - [`mini_json`]: the dependency-free JSON serializer/parser shared by the
 //!   serde-transparency and invocation-path locks.
 //!
@@ -25,10 +26,11 @@
 use presslint_syntax::{OperatorRecord, assemble_operators, tokenize};
 use presslint_types::{ContentScope, PdfName};
 
-use crate::{ColorSpaceEnv, ExtGStateEnv, PaintSubProgram};
+use crate::{ColorSpaceEnv, ExtGStateEnv, FontEnv, PaintSubProgram};
 
 mod call_machine;
 mod extgstate_env;
+mod font_env;
 mod font_state;
 mod mini_json;
 mod mutation_class;
@@ -58,6 +60,7 @@ pub fn page_program<'a>(
         records,
         color_space_env: ColorSpaceEnv::empty(),
         extgstate_env: ExtGStateEnv::empty(),
+        font_env: FontEnv::disabled(),
         image_xobject_names: images,
         form_xobject_names: forms,
         scope: ContentScope::Page,
@@ -76,6 +79,7 @@ pub fn form_program<'a>(
         records,
         color_space_env: ColorSpaceEnv::empty(),
         extgstate_env: ExtGStateEnv::empty(),
+        font_env: FontEnv::disabled(),
         image_xobject_names: images,
         form_xobject_names: forms,
         scope: ContentScope::FormXObject { name: form_name },

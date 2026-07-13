@@ -100,3 +100,16 @@ fn form_own_resources_without_font_is_missing_font() {
         SkippedFontResourceReason::MissingFont
     );
 }
+
+#[test]
+fn form_recognizes_escaped_font_namespace_and_preserves_raw_binding_name() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /F#6fnt << /F#31 << /Type /Font /Subtype /Type1 >> >> >> >>\nstream\n\nendstream\nendobj\n",
+    ]);
+
+    let report = inspect_form_font_resources(&pdf.source, pdf.lookup(), pdf.object_offset(1));
+
+    assert!(report.skipped.is_empty());
+    assert_eq!(report.fonts.len(), 1);
+    assert_eq!(report.fonts[0].name, PdfName(b"F#31".to_vec()));
+}

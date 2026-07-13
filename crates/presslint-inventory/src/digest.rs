@@ -38,7 +38,7 @@ pub fn text_object_digest(
     colors: &[ColorObservation],
 ) -> [u8; 32] {
     let mut digest = StableDigest::new();
-    digest.push_bytes(b"presslint.text.v4");
+    digest.push_bytes(b"presslint.text.v5");
     push_event_header(&mut digest, page, sequence, scope, path, event);
     digest.push_u8(text_show_operator_tag(operator));
     digest.push_text_rendering_mode(rendering_mode);
@@ -155,6 +155,12 @@ impl StableDigest {
         }
     }
 
+    fn push_u16(&mut self, value: u16) {
+        for byte in value.to_le_bytes() {
+            self.push_u8(byte);
+        }
+    }
+
     fn push_u64(&mut self, value: u64) {
         for byte in value.to_le_bytes() {
             self.push_u8(byte);
@@ -236,6 +242,18 @@ impl StableDigest {
                 self.push_f64(*size);
             }
             FontSelectionState::Indeterminate => self.push_u8(2),
+            FontSelectionState::ResolvedIndirect {
+                object_number,
+                generation,
+                object_byte_offset,
+                size,
+            } => {
+                self.push_u8(3);
+                self.push_u32(*object_number);
+                self.push_u16(*generation);
+                self.push_usize(*object_byte_offset);
+                self.push_f64(*size);
+            }
         }
     }
 

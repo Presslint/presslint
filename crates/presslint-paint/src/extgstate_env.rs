@@ -4,9 +4,9 @@
 //! This mirrors [`ColorSpaceEnv`](crate::ColorSpaceEnv): a thin borrowed view over
 //! a per-scope slice of classified `ExtGState` resources, keyed by resource name.
 //! The walker interprets `gs` against it. With a default-empty environment, `gs`
-//! leaves these seven classified parameters untouched. Independently, every
-//! valid `gs` makes the walker's raw font selection indeterminate because this
-//! environment does not classify the `ExtGState` `/Font` entry.
+//! leaves these seven classified parameters untouched. In all-environment
+//! mode, each resource also carries a compact mapped `/Font` directive; legacy
+//! constructors retain the earlier every-`gs` invalidation behavior.
 //!
 //! The model is inventory-native: values are CLASSIFIED, never simulated. No PDF
 //! defaults are invented, no alpha math is done, and no `PdfName` blend-mode name
@@ -19,6 +19,8 @@
 //! parses PDF dictionaries.
 
 use presslint_types::PdfName;
+
+use crate::font_env::ExtGStateFontDirective;
 
 /// Per-parameter classification of one `ExtGState` graphics-state value.
 ///
@@ -151,6 +153,8 @@ pub struct ExtGStateResource {
     pub params: ExtGStateParams,
     /// True when the dictionary carried keys outside the Phase-1 safety set.
     pub has_unclassified_keys: bool,
+    /// Consumer-mapped `/Font` effect for all-environment walks.
+    pub font: ExtGStateFontDirective,
 }
 
 /// Classified `ExtGState` state carried on the graphics-state snapshot.

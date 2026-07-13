@@ -1,29 +1,34 @@
 //! Public bridge from classic-xref PDF bytes to page-object inventory.
 
 use presslint_inventory::{
-    AlphaClass, BlendModeClass, ColorSpaceResource, ExtGStateParams, ExtGStateResource,
-    GraphicsWalkError, GsParam, Inventory, OverprintMode, SoftMaskClass,
+    AlphaClass, BlendModeClass, ColorSpaceResource, ExtGStateFontDirective, ExtGStateParams,
+    ExtGStateResource, FontBinding, FontBindingTarget, FontEnv, GraphicsWalkError, GsParam,
+    Inventory, OverprintMode, ResolvedFont, SoftMaskClass,
 };
 use presslint_pdf::{
     ClassicXrefTableInspection, ClassifiedColorSpaceResource, ClassifiedExtGStateResource,
-    ColorSpaceFamily, ContentStreamDataExtentInspectionError, ContentStreamDataSliceError,
-    ContentStreamFilterClassification, ContentStreamFilterClassificationError,
-    DocumentPageColorSpaceResourcesInspection, DocumentPageColorSpaceResourcesInspectionError,
-    DocumentPageContentExtentInspection, DocumentPageContentExtentResult,
-    DocumentPageContentExtentsInspectionError, ExtGStateAlpha, ExtGStateBlendMode,
-    ExtGStateOverprintMode, ExtGStateParamClass, ExtGStateSoftMask,
-    FlateDecodeParametersResolution, FlateDecodeParametersResolutionError, FlateDecodeStreamError,
-    ObjectLookup, PageColorSpaceResourcesInspection, PageExtGStateResourcesInspection,
-    SkippedColorSpaceResource, SkippedExtGStateResource, SkippedPageContentTargetReason,
+    ClassifiedFontResource, ColorSpaceFamily, ContentStreamDataExtentInspectionError,
+    ContentStreamDataSliceError, ContentStreamFilterClassification,
+    ContentStreamFilterClassificationError, DocumentPageColorSpaceResourcesInspection,
+    DocumentPageColorSpaceResourcesInspectionError, DocumentPageContentExtentInspection,
+    DocumentPageContentExtentResult, DocumentPageContentExtentsInspectionError, ExtGStateAlpha,
+    ExtGStateBlendMode, ExtGStateFontEffect, ExtGStateOverprintMode, ExtGStateParamClass,
+    ExtGStateSoftMask, FlateDecodeParametersResolution, FlateDecodeParametersResolutionError,
+    FlateDecodeStreamError, FontDictionaryTypeFact, FontSubtypeClass, ObjectLookup,
+    PageColorSpaceResourcesInspection, PageExtGStateResourcesInspection,
+    PageFontResourcesInspection, SkippedColorSpaceResource, SkippedExtGStateResource,
+    SkippedFontResource, SkippedFontResourceReason, SkippedPageContentTargetReason,
     inspect_classic_document_access, inspect_document_page_color_space_resources,
     inspect_document_page_content_extents, inspect_document_page_extgstate_resources,
+    inspect_document_page_font_resources,
 };
 use presslint_syntax::{AssembleError, TokenizeError};
 use presslint_types::{ColorSpace, PageIndex, PdfName};
 use serde::{Deserialize, Serialize};
 
 use crate::form_inventory::{
-    FormExpandedInventory, FormWalkContext, SkippedFormInventory, build_page_inventory_with_forms,
+    FormExpandedInventory, FormWalkContext, SkippedFormInventory,
+    build_page_inventory_with_forms_and_font_env,
 };
 use crate::page_content::{PageContentBytes, page_content_bytes};
 
@@ -285,6 +290,13 @@ pub fn build_classic_pdf_inventory(
         &access.xref_table,
         access.page_tree_root.object_byte_offset,
     );
+    let font_pages = inspect_document_page_font_resources(
+        input,
+        &access.xref_table,
+        access.page_tree_root.object_byte_offset,
+    )
+    .ok()
+    .map(|report| report.pages);
 
     let lookup = ObjectLookup::ClassicXref(&access.xref_table);
     let mut inventory = Inventory::default();
@@ -307,7 +319,9 @@ pub fn build_classic_pdf_inventory(
             resources.map_or(&[][..], |resources| resources.form_xobjects.as_slice());
         let page_color_spaces = color_space_page.map_or_else(Vec::new, page_color_space_env);
         let page_extgstates = page_extgstates_at(extgstate_pages.as_ref(), page.ordinal);
-        let result = match build_page_inventory_with_forms(
+        let page_fonts = page_font_bindings_at(font_pages.as_deref(), page);
+        let page_font_env = font_env_from_bindings(page_fonts.as_deref());
+        let result = match build_page_inventory_with_forms_and_font_env(
             input,
             lookup,
             page,
@@ -318,6 +332,7 @@ pub fn build_classic_pdf_inventory(
             form_targets,
             &page_color_spaces,
             &page_extgstates,
+            page_font_env,
             FormWalkContext::bounded_default(),
         ) {
             Ok(expanded) => {
@@ -446,8 +461,8 @@ const fn color_space_from_family(family: ColorSpaceFamily) -> ColorSpace {
 ///   unresolved indirect reference, a non-dictionary entry, a malformed entry
 ///   dictionary) surfaces with EVERY parameter [`GsParam::Unresolved`], so a
 ///   `gs` on that name is honestly unknown rather than silently swallowed. A
-///   named skip whose resource is already classified (e.g. a duplicate-name
-///   diagnostic) is dropped, since the classified entry already stands for it.
+///   named skip whose resource is already classified preserves the seven
+///   classified parameters but poisons its font directive to `Unknown`.
 ///
 /// Resources-level skips (a missing/duplicate/malformed `/ExtGState` dictionary,
 /// which carry no resource name) cannot key an env entry and are deferred to the
@@ -460,7 +475,12 @@ pub fn extgstate_env_resources(
     let mut resources: Vec<ExtGStateResource> = classified.iter().map(extgstate_resource).collect();
     for skip in skipped {
         if let Some(name) = &skip.resource_name {
-            if !resources.iter().any(|resource| resource.name.0 == name.0) {
+            if let Some(resource) = resources
+                .iter_mut()
+                .find(|resource| resource.name.0 == name.0)
+            {
+                resource.font = ExtGStateFontDirective::Unknown;
+            } else {
                 resources.push(unresolved_extgstate_resource(&name.0));
             }
         }
@@ -518,6 +538,7 @@ fn extgstate_resource(resource: &ClassifiedExtGStateResource) -> ExtGStateResour
             soft_mask: map_param(&resource.soft_mask, |value| map_soft_mask(*value)),
         },
         has_unclassified_keys: resource.has_unclassified_keys,
+        font: extgstate_font_directive(resource),
     }
 }
 
@@ -534,6 +555,115 @@ fn unresolved_extgstate_resource(name: &[u8]) -> ExtGStateResource {
             soft_mask: GsParam::Unresolved,
         },
         has_unclassified_keys: false,
+        font: ExtGStateFontDirective::Unknown,
+    }
+}
+
+const fn extgstate_font_directive(
+    resource: &ClassifiedExtGStateResource,
+) -> ExtGStateFontDirective {
+    match &resource.font_effect {
+        ExtGStateFontEffect::StructurallyValid {
+            reference,
+            object_byte_offset,
+            size_bits,
+            ..
+        } => ExtGStateFontDirective::Select {
+            font: ResolvedFont {
+                object_number: reference.object_number,
+                generation: reference.generation,
+                object_byte_offset: *object_byte_offset,
+            },
+            size_bits: *size_bits,
+        },
+        ExtGStateFontEffect::Unset if !resource.has_unclassified_keys => {
+            ExtGStateFontDirective::LeaveUnchanged
+        }
+        _ => ExtGStateFontDirective::Unknown,
+    }
+}
+
+/// Map a completely classified page/Form `/Font` report into cached semantic
+/// bindings. `None` means namespace coverage is structurally unknown; an empty
+/// vector is the distinct known-empty namespace.
+#[must_use]
+pub fn font_env_resources(
+    classified: &[ClassifiedFontResource],
+    skipped: &[SkippedFontResource],
+) -> Option<Vec<FontBinding>> {
+    let mut bindings = Vec::with_capacity(classified.len());
+    for resource in classified {
+        let target = match (resource.reference, resource.object_byte_offset) {
+            (Some(reference), Some(object_byte_offset)) if has_selectable_font_type(resource) => {
+                FontBindingTarget::Resolved(ResolvedFont {
+                    object_number: reference.object_number,
+                    generation: reference.generation,
+                    object_byte_offset,
+                })
+            }
+            _ => FontBindingTarget::Unresolved,
+        };
+        bindings.push(FontBinding::from_pdf_name_bytes(&resource.name.0, target)?);
+    }
+
+    for skip in skipped {
+        let Some(name) = &skip.resource_name else {
+            if !matches!(skip.reason, SkippedFontResourceReason::MissingFont) {
+                return None;
+            }
+            continue;
+        };
+        let poison = FontBinding::from_pdf_name_bytes(&name.0, FontBindingTarget::Unresolved)?;
+        if let Some(existing) = bindings
+            .iter_mut()
+            .find(|binding| binding.semantic_name() == poison.semantic_name())
+        {
+            *existing = poison;
+        } else {
+            bindings.push(poison);
+        }
+    }
+    Some(bindings)
+}
+
+const fn has_selectable_font_type(resource: &ClassifiedFontResource) -> bool {
+    matches!(resource.dictionary_type, FontDictionaryTypeFact::Font)
+        && matches!(
+            resource.subtype,
+            FontSubtypeClass::Type1
+                | FontSubtypeClass::MmType1
+                | FontSubtypeClass::TrueType
+                | FontSubtypeClass::Type0
+                | FontSubtypeClass::Type3
+        )
+}
+
+/// Join page font facts by ordinal, page reference, and reached page offset.
+/// A missing, duplicated, or mismatched report becomes unknown rather than
+/// falling back to document-vector position.
+#[must_use]
+pub fn page_font_bindings_at(
+    pages: Option<&[PageFontResourcesInspection]>,
+    page: &DocumentPageContentExtentInspection,
+) -> Option<Vec<FontBinding>> {
+    let mut matches = pages?.iter().filter(|candidate| {
+        candidate.ordinal == page.ordinal
+            && candidate.page_reference == page.leaf.reference
+            && candidate.page_object_byte_offset == page.leaf.object_byte_offset
+    });
+    let report = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    font_env_resources(&report.fonts, &report.skipped)
+}
+
+/// Borrow an exact known namespace or represent failed coverage as unknown.
+#[must_use]
+pub const fn font_env_from_bindings(bindings: Option<&[FontBinding]>) -> FontEnv<'_> {
+    match bindings {
+        Some(bindings) => FontEnv::known(bindings),
+        None => FontEnv::unknown(),
     }
 }
 

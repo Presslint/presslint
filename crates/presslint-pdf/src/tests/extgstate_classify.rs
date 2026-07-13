@@ -228,11 +228,45 @@ fn absent_font_key_is_unset_effect_without_unclassified_flag() {
 }
 
 #[test]
-fn escaped_font_spelling_stays_unclassified_and_never_proves_absence() {
+fn escaped_font_spelling_is_the_semantic_font_effect_key() {
     let resource = classify_direct(b"<< /GS << /Fo#6Et [2 0 R 12] >> >>");
 
-    assert_eq!(resource.font_effect, ExtGStateFontEffect::Unset);
+    assert!(matches!(
+        resource.font_effect,
+        ExtGStateFontEffect::UnresolvedTarget {
+            reference: IndirectRef {
+                object_number: 2,
+                generation: 0
+            },
+            ..
+        }
+    ));
     assert!(resource.has_unclassified_keys);
+}
+
+#[test]
+fn exact_and_escaped_font_keys_poison_as_a_semantic_duplicate() {
+    let resource = classify_direct(b"<< /GS << /Font [2 0 R 12] /F#6fnt [3 0 R 9] >> >>");
+
+    assert!(matches!(
+        resource.font_effect,
+        ExtGStateFontEffect::DuplicateKey { .. }
+    ));
+    assert!(resource.has_unclassified_keys);
+}
+
+#[test]
+fn unrelated_and_malformed_keys_remain_distinct_from_semantic_font() {
+    let unrelated = classify_direct(b"<< /GS << /Font [2 0 R 12] /LineWidth 2 >> >>");
+    assert!(matches!(
+        unrelated.font_effect,
+        ExtGStateFontEffect::UnresolvedTarget { .. }
+    ));
+    assert!(unrelated.has_unclassified_keys);
+
+    let malformed = classify_direct(b"<< /GS << /F#6znt [2 0 R 12] >> >>");
+    assert_eq!(malformed.font_effect, ExtGStateFontEffect::Unset);
+    assert!(malformed.has_unclassified_keys);
 }
 
 #[test]

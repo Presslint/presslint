@@ -9,7 +9,8 @@ mod tests;
 
 pub use inventory::{
     Inventory, InventoryEntry, build_form_inventory, build_image_inventory, build_inventory,
-    build_inventory_with_color_space_env, build_inventory_with_initial_state_and_envs,
+    build_inventory_with_all_envs, build_inventory_with_color_space_env,
+    build_inventory_with_initial_state_and_all_envs, build_inventory_with_initial_state_and_envs,
     build_text_inventory, build_vector_inventory, expanded_entry_identity,
     form_inventory_from_graphics_events, image_inventory_from_graphics_events,
     inventory_from_graphics_events, text_inventory_from_graphics_events,
@@ -17,9 +18,9 @@ pub use inventory::{
 };
 pub use presslint_paint::{
     AlphaClass, BlendModeClass, ColorSpaceEnv, ColorSpaceResource, DecodedRange, ExtGStateEnv,
-    ExtGStateParams, ExtGStateResource, FontSelectionState, GraphicsColor,
-    GraphicsExtGStateSnapshot, GraphicsStateSnapshot, GraphicsStateWalker, GraphicsWalkError,
-    GraphicsWalkErrorKind, GsParam, MutationClass, OverprintMode, PaintOp, PaintOpKind,
-    PathPaintKind, SoftMaskClass, SourceRange, TextRenderingMode, TextShowOperator,
-    walk_graphics_state,
+    ExtGStateFontDirective, ExtGStateParams, ExtGStateResource, FontBinding, FontBindingTarget,
+    FontEnv, FontSelectionState, GraphicsColor, GraphicsExtGStateSnapshot, GraphicsStateSnapshot,
+    GraphicsStateWalker, GraphicsWalkError, GraphicsWalkErrorKind, GsParam, MutationClass,
+    OverprintMode, PaintOp, PaintOpKind, PathPaintKind, ResolvedFont, SoftMaskClass, SourceRange,
+    TextRenderingMode, TextShowOperator, walk_graphics_state,
 };

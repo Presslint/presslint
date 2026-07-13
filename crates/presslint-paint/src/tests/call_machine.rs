@@ -19,9 +19,19 @@ use presslint_types::{ColorSpace, InvocationFrame, InvocationPath, PdfName};
 
 use super::{assemble, form_program, mini_json, name, page_program};
 use crate::{
-    CallEvent, CallMachine, CallSite, FontSelectionState, FormResolver, GraphicsStateSnapshot,
-    GraphicsWalkError, PaintOp, PaintOpKind, PaintSubProgram, ResolveForm, TextRenderingMode,
+    CallEvent, CallMachine, CallSite, FontBinding, FontBindingTarget, FontEnv, FontSelectionState,
+    FormResolver, GraphicsStateSnapshot, GraphicsWalkError, PaintOp, PaintOpKind, PaintSubProgram,
+    ResolveForm, ResolvedFont, TextRenderingMode,
 };
+
+fn resolved_font(object_number: u32, offset: usize, size: f64) -> FontSelectionState {
+    FontSelectionState::ResolvedIndirect {
+        object_number,
+        generation: 0,
+        object_byte_offset: offset,
+        size,
+    }
+}
 
 fn collect_xobject_paths(event: CallEvent<'_>, paths: &mut Vec<(InvocationPath, PdfName)>) {
     if let PaintOpKind::XObjectInvoke { name } = &event.op.kind {
@@ -95,6 +105,81 @@ fn call_machine_repeated_same_form_gets_local_ordinals_and_descends_twice() -> R
                     name: form_name,
                 }],
             },
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn caller_font_inherits_exactly_and_form_tf_uses_only_local_environment() -> Result<(), String> {
+    let root_source = b"/F1 8 Tf /A Do (P) Tj /F2 9 Tf /A Do";
+    let form_source = b"n /Local 7 Tf n";
+    let root_records = assemble(root_source)?;
+    let form_records = assemble(form_source)?;
+    let no_images = [];
+    let forms = [name(b"A")];
+    let root_bindings = [
+        FontBinding::from_pdf_name_bytes(
+            b"F1",
+            FontBindingTarget::Resolved(ResolvedFont {
+                object_number: 11,
+                generation: 0,
+                object_byte_offset: 101,
+            }),
+        )
+        .ok_or("F1 binding")?,
+        FontBinding::from_pdf_name_bytes(
+            b"F2",
+            FontBindingTarget::Resolved(ResolvedFont {
+                object_number: 12,
+                generation: 0,
+                object_byte_offset: 202,
+            }),
+        )
+        .ok_or("F2 binding")?,
+    ];
+    let local_bindings = [FontBinding::from_pdf_name_bytes(
+        b"Local",
+        FontBindingTarget::Resolved(ResolvedFont {
+            object_number: 30,
+            generation: 0,
+            object_byte_offset: 303,
+        }),
+    )
+    .ok_or("local binding")?];
+
+    let mut root = page_program(root_source, &root_records, &no_images, &forms);
+    root.font_env = FontEnv::known(&root_bindings);
+    let mut callee = form_program(form_source, &form_records, &no_images, &[], name(b"A"));
+    callee.font_env = FontEnv::known(&local_bindings);
+    let mut resolver = StaticResolver {
+        callee,
+        calls: Vec::new(),
+    };
+    let mut form_states = Vec::new();
+    let mut page_text_state = None;
+
+    CallMachine::walk(root, &mut resolver, |event| {
+        if event.path.frames.is_empty() {
+            if matches!(event.op.kind, PaintOpKind::TextShow { .. }) {
+                page_text_state = Some(event.op.state.font_selection.clone());
+            }
+        } else {
+            form_states.push(event.op.state.font_selection.clone());
+        }
+    })
+    .map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(page_text_state, Some(resolved_font(11, 101, 8.0)));
+    assert_eq!(
+        form_states,
+        vec![
+            resolved_font(11, 101, 8.0),
+            resolved_font(30, 303, 7.0),
+            resolved_font(30, 303, 7.0),
+            resolved_font(12, 202, 9.0),
+            resolved_font(30, 303, 7.0),
+            resolved_font(30, 303, 7.0),
         ]
     );
     Ok(())

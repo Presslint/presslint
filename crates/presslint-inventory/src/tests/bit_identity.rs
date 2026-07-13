@@ -14,11 +14,11 @@ use presslint_types::{
 };
 
 use crate::{
-    ColorSpaceEnv, ColorSpaceResource, DecodedRange, ExtGStateEnv, FontSelectionState,
+    ColorSpaceEnv, ColorSpaceResource, DecodedRange, ExtGStateEnv, FontEnv, FontSelectionState,
     GraphicsColor, GraphicsStateSnapshot, GraphicsStateWalker, GraphicsWalkError,
     GraphicsWalkErrorKind, Inventory, PaintOp, TextRenderingMode, build_inventory,
-    build_inventory_with_color_space_env, build_inventory_with_initial_state_and_envs,
-    inventory_from_graphics_events,
+    build_inventory_with_color_space_env, build_inventory_with_initial_state_and_all_envs,
+    build_inventory_with_initial_state_and_envs, inventory_from_graphics_events,
 };
 
 const PAGE: PageIndex = PageIndex(2);
@@ -209,7 +209,20 @@ fn seeded_builder_with_page_default_and_empty_envs_matches_legacy_builders()
             ColorSpaceEnv::empty(),
             ExtGStateEnv::empty(),
         )?;
+        let all_envs_disabled = build_inventory_with_initial_state_and_all_envs(
+            input,
+            &records,
+            PAGE,
+            &ContentScope::Page,
+            &im1,
+            &fm1,
+            Rc::new(GraphicsStateSnapshot::page_default()),
+            ColorSpaceEnv::empty(),
+            ExtGStateEnv::empty(),
+            FontEnv::disabled(),
+        )?;
         assert_eq!(legacy, seeded);
+        assert_eq!(legacy, all_envs_disabled);
     }
     Ok(())
 }
@@ -487,8 +500,8 @@ const MIXED_DIGESTS: &[[u8; 32]] = &[
         164, 229, 34, 149, 70, 250, 22, 233, 237, 66, 136, 65, 10,
     ],
     [
-        97, 200, 184, 89, 218, 165, 14, 19, 64, 187, 124, 19, 61, 98, 174, 150, 32, 18, 69, 169,
-        47, 242, 77, 14, 154, 174, 137, 189, 155, 232, 211, 237,
+        199, 40, 128, 64, 5, 248, 44, 51, 83, 60, 25, 130, 22, 71, 234, 217, 202, 40, 240, 94, 251,
+        35, 246, 132, 102, 154, 195, 123, 234, 195, 183, 241,
     ],
     [
         93, 241, 210, 114, 9, 98, 211, 91, 101, 128, 45, 107, 246, 216, 90, 115, 131, 79, 38, 60,
@@ -501,8 +514,8 @@ const MANY_NOOP_DIGESTS: &[[u8; 32]] = &[
         158, 22, 242, 124, 1, 25, 138, 141, 223, 5, 172,
     ],
     [
-        247, 118, 85, 37, 207, 163, 252, 251, 133, 108, 193, 215, 149, 158, 78, 185, 69, 222, 197,
-        103, 3, 170, 124, 194, 192, 83, 19, 17, 112, 190, 119, 200,
+        237, 97, 75, 253, 212, 122, 161, 48, 137, 126, 77, 122, 173, 156, 61, 61, 249, 57, 150,
+        227, 251, 202, 106, 17, 111, 155, 111, 255, 199, 48, 62, 51,
     ],
     [
         105, 214, 162, 255, 212, 119, 40, 215, 132, 176, 10, 146, 214, 11, 196, 1, 130, 217, 86,
@@ -531,7 +544,7 @@ const FORM_SCOPE_DIGESTS: &[[u8; 32]] = &[
         143, 188, 121, 99, 108, 157, 175, 101, 170, 147, 207, 73, 225,
     ],
     [
-        204, 124, 230, 97, 253, 67, 138, 89, 174, 44, 177, 27, 92, 61, 156, 249, 68, 103, 145, 240,
-        150, 169, 172, 132, 252, 84, 170, 249, 125, 147, 180, 34,
+        116, 64, 169, 163, 116, 188, 2, 73, 108, 247, 171, 246, 173, 253, 41, 135, 89, 250, 39, 1,
+        90, 226, 252, 182, 134, 22, 171, 159, 220, 26, 185, 203,
     ],
 ];

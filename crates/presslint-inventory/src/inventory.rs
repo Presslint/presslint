@@ -11,8 +11,8 @@ use crate::digest::{
     form_object_digest, image_object_digest, text_object_digest, usize_to_u32, vector_object_digest,
 };
 use presslint_paint::{
-    ColorSpaceEnv, ExtGStateEnv, GraphicsStateSnapshot, GraphicsWalkError, PaintOp, PaintOpKind,
-    PaintOps, PaintProgram, PathPaintKind, TextRenderingMode,
+    ColorSpaceEnv, ExtGStateEnv, FontEnv, GraphicsStateSnapshot, GraphicsWalkError, PaintOp,
+    PaintOpKind, PaintOps, PaintProgram, PathPaintKind, TextRenderingMode,
 };
 
 /// The empty invocation path folded into every single-stream (page or form)
@@ -272,8 +272,82 @@ pub fn build_inventory_with_initial_state_and_envs(
     color_space_env: ColorSpaceEnv<'_>,
     extgstate_env: ExtGStateEnv<'_>,
 ) -> Result<Inventory, GraphicsWalkError> {
+    build_inventory_with_initial_state_and_all_envs(
+        source,
+        records,
+        page,
+        scope,
+        image_xobject_names,
+        form_xobject_names,
+        initial_state,
+        color_space_env,
+        extgstate_env,
+        FontEnv::disabled(),
+    )
+}
+
+/// Build a page-default inventory with colour, `ExtGState`, and font lookup.
+///
+/// Unlike compatibility builders, `font_env` enables semantic `Tf` resolution
+/// and mapped direct `gs` font effects. It remains borrowed for the duration of
+/// the walk and adds no retained owned environment to the inventory.
+///
+/// # Errors
+///
+/// Returns a structured graphics-state walker error for malformed records in
+/// the supported operator set or invalid source ranges.
+#[allow(clippy::too_many_arguments)]
+pub fn build_inventory_with_all_envs(
+    source: &[u8],
+    records: &[OperatorRecord],
+    page: PageIndex,
+    scope: &ContentScope,
+    image_xobject_names: &[PdfName],
+    form_xobject_names: &[PdfName],
+    color_space_env: ColorSpaceEnv<'_>,
+    extgstate_env: ExtGStateEnv<'_>,
+    font_env: FontEnv<'_>,
+) -> Result<Inventory, GraphicsWalkError> {
+    build_inventory_with_initial_state_and_all_envs(
+        source,
+        records,
+        page,
+        scope,
+        image_xobject_names,
+        form_xobject_names,
+        Rc::new(GraphicsStateSnapshot::page_default()),
+        color_space_env,
+        extgstate_env,
+        font_env,
+    )
+}
+
+/// Seed a combined inventory walk while resolving all borrowed environments.
+///
+/// The supplied snapshot is authoritative caller state. In particular, an
+/// inherited resolved font is not looked up again in the local `font_env`; only
+/// a later local `Tf` or mapped `gs` font directive can replace it.
+///
+/// # Errors
+///
+/// Returns a structured graphics-state walker error for malformed records in
+/// the supported operator set or invalid source ranges.
+#[allow(clippy::too_many_arguments)]
+pub fn build_inventory_with_initial_state_and_all_envs(
+    source: &[u8],
+    records: &[OperatorRecord],
+    page: PageIndex,
+    scope: &ContentScope,
+    image_xobject_names: &[PdfName],
+    form_xobject_names: &[PdfName],
+    initial_state: Rc<GraphicsStateSnapshot>,
+    color_space_env: ColorSpaceEnv<'_>,
+    extgstate_env: ExtGStateEnv<'_>,
+    font_env: FontEnv<'_>,
+) -> Result<Inventory, GraphicsWalkError> {
     let capability_seed = Rc::clone(&initial_state);
-    let program = PaintProgram::with_envs(source, records, color_space_env, extgstate_env);
+    let program =
+        PaintProgram::with_all_envs(source, records, color_space_env, extgstate_env, font_env);
     collect_entries_from_ops(
         program.ops_with_initial_state(initial_state),
         |event, sequence| {

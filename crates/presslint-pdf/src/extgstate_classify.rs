@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use crate::font_classify::classify_font_dictionary_facts;
 use crate::page_resource_inheritance::{ResolveReferenceError, ResourceContext, resolve_reference};
 use crate::source_utils::{
-    is_pdf_delimiter, is_pdf_whitespace, parse_u64_decimal, skip_scalar_token,
+    decode_pdf_name, is_pdf_delimiter, is_pdf_whitespace, parse_u64_decimal, skip_scalar_token,
     skip_whitespace_and_comments,
 };
 use crate::{
@@ -43,13 +43,12 @@ pub struct ClassifiedExtGStateResource {
     /// Soft mask (`SMask`) presence classification.
     pub soft_mask: ExtGStateParamClass<ExtGStateSoftMask>,
     /// True when the dictionary contains keys outside the Phase-1 safety set
-    /// plus `/Type`. `/Font` still counts as unclassified in this slice even
+    /// plus `/Type`. A semantic `/Font` key still counts as unclassified even
     /// though [`ClassifiedExtGStateResource::font_effect`] records its exact
-    /// classification: existing findings treat this aggregate flag fail-closed
-    /// and no consumer reads the new fact yet, so
-    /// [`ExtGStateFontEffect::Unset`] alone is never proof of absence while
-    /// this flag is true (a semantically escaped `/Font` spelling stays
-    /// unclassified here).
+    /// classification. Existing safety findings still treat this aggregate
+    /// flag fail-closed; font consumers may use a classified present effect,
+    /// but [`ExtGStateFontEffect::Unset`] proves absence only when this flag is
+    /// false.
     pub has_unclassified_keys: bool,
     /// Exact classified `/Font` effect (ISO 32000-1 Table 58), recorded
     /// without changing any of the seven safety parameter classifications.
@@ -191,13 +190,13 @@ pub enum ExtGStateSoftMask {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "effect", rename_all = "snake_case")]
 pub enum ExtGStateFontEffect {
-    /// No exact raw `/Font` key is present in this dictionary. While
+    /// No well-formed semantic `/Font` key is present in this dictionary. While
     /// [`ClassifiedExtGStateResource::has_unclassified_keys`] is true this is
-    /// not proof of absence: a semantically escaped `/Font` spelling stays
-    /// unclassified.
+    /// not proof of absence: an unrelated or malformed key remains outside
+    /// this classifier's vocabulary.
     #[default]
     Unset,
-    /// The exact `/Font` key occurred more than once. No first- or last-wins
+    /// The semantic `/Font` key occurred more than once. No first- or last-wins
     /// recovery is applied.
     DuplicateKey {
         /// First `/Font` key range observed.
@@ -678,6 +677,27 @@ fn classify_dictionary(
 
     let mut font_entry: Option<DictionaryEntrySpan> = None;
     for entry in entries {
+        let raw_key = &input[entry.key_range.start + 1..entry.key_range.end];
+        if decode_pdf_name(raw_key).is_some_and(|name| name.as_ref() == b"Font") {
+            // `/Font` stays an unclassified key in this slice: the aggregate
+            // flag is what existing findings fail closed on.
+            resource.has_unclassified_keys = true;
+            match font_entry {
+                None => font_entry = Some(*entry),
+                Some(first) => {
+                    if !matches!(
+                        resource.font_effect,
+                        ExtGStateFontEffect::DuplicateKey { .. }
+                    ) {
+                        resource.font_effect = ExtGStateFontEffect::DuplicateKey {
+                            first_key_range: first.key_range,
+                            duplicate_key_range: entry.key_range,
+                        };
+                    }
+                }
+            }
+            continue;
+        }
         match &input[entry.key_range.start..entry.key_range.end] {
             b"/Type" => {}
             b"/OP" => resource.op_stroking = classify_bool(input, entry),
@@ -687,25 +707,6 @@ fn classify_dictionary(
             b"/ca" => resource.nonstroking_alpha = classify_alpha(input, entry),
             b"/BM" => resource.blend_mode = classify_blend_mode(input, entry),
             b"/SMask" => resource.soft_mask = classify_soft_mask(input, entry),
-            b"/Font" => {
-                // `/Font` stays an unclassified key in this slice: the
-                // aggregate flag is what existing findings fail closed on.
-                resource.has_unclassified_keys = true;
-                match font_entry {
-                    None => font_entry = Some(*entry),
-                    Some(first) => {
-                        if !matches!(
-                            resource.font_effect,
-                            ExtGStateFontEffect::DuplicateKey { .. }
-                        ) {
-                            resource.font_effect = ExtGStateFontEffect::DuplicateKey {
-                                first_key_range: first.key_range,
-                                duplicate_key_range: entry.key_range,
-                            };
-                        }
-                    }
-                }
-            }
             _ => resource.has_unclassified_keys = true,
         }
     }

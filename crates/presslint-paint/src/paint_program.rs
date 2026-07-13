@@ -2,7 +2,7 @@
 //!
 //! [`PaintProgram`] is a cheap, `Copy` descriptor of everything the graphics-state
 //! walker needs to run: the source bytes, the assembled operator records, and the
-//! borrowed [`ColorSpaceEnv`] and [`ExtGStateEnv`]. It owns no walk state and
+//! borrowed [`ColorSpaceEnv`], [`ExtGStateEnv`], and [`FontEnv`]. It owns no walk state and
 //! materializes no `Vec`, so the SAME program can be replayed: each `.ops()` (or
 //! `into_iter()`) constructs a FRESH [`GraphicsStateWalker`] and re-walks
 //! `records` from index `0`.
@@ -26,6 +26,7 @@ use presslint_syntax::OperatorRecord;
 
 use crate::color_space_env::ColorSpaceEnv;
 use crate::extgstate_env::ExtGStateEnv;
+use crate::font_env::FontEnv;
 use crate::walker::{GraphicsStateSnapshot, GraphicsStateWalker, GraphicsWalkError, PaintOp};
 
 /// Cheap, replayable descriptor of a paint program.
@@ -41,6 +42,7 @@ pub struct PaintProgram<'a> {
     records: &'a [OperatorRecord],
     env: ColorSpaceEnv<'a>,
     extgstate_env: ExtGStateEnv<'a>,
+    font_env: FontEnv<'a>,
 }
 
 impl<'a> PaintProgram<'a> {
@@ -66,11 +68,24 @@ impl<'a> PaintProgram<'a> {
         env: ColorSpaceEnv<'a>,
         extgstate_env: ExtGStateEnv<'a>,
     ) -> Self {
+        Self::with_all_envs(source, records, env, extgstate_env, FontEnv::disabled())
+    }
+
+    /// Describe a paint program with all borrowed resource environments.
+    #[must_use]
+    pub const fn with_all_envs(
+        source: &'a [u8],
+        records: &'a [OperatorRecord],
+        env: ColorSpaceEnv<'a>,
+        extgstate_env: ExtGStateEnv<'a>,
+        font_env: FontEnv<'a>,
+    ) -> Self {
         Self {
             source,
             records,
             env,
             extgstate_env,
+            font_env,
         }
     }
 
@@ -101,10 +116,11 @@ impl<'a> PaintProgram<'a> {
         initial_state: Rc<GraphicsStateSnapshot>,
     ) -> PaintOps<'a> {
         PaintOps {
-            walker: GraphicsStateWalker::with_initial_state_and_envs(
+            walker: GraphicsStateWalker::with_initial_state_and_all_envs(
                 initial_state,
                 self.env,
                 self.extgstate_env,
+                self.font_env,
             ),
             source: self.source,
             records: self.records,

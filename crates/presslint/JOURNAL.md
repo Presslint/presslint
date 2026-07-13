@@ -2,6 +2,30 @@
 
 Older accumulated journal history lives in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## Page/Form semantic font-environment wiring
+
+- Classic and backend-neutral inventory bridges inspect page font resources and
+  join them to content pages by the full `(ordinal, page reference, page object
+  offset)` identity. Classified names and named skips map once into exact
+  bindings; semantic collisions poison, direct dictionaries remain present but
+  unresolved, and incomplete or mismatched reports become unknown.
+- Form preparation lazily caches only each Form's own mapped font facts beside
+  its existing decoded program and resource environments. Missing or
+  uninspectable own resources are unknown; there is no page-resource fallback
+  or page/Form namespace merge. Invocation templates and descended programs
+  borrow the same Form environment and exact caller seed, so inherited resolved
+  state persists until a local `Tf` or font-bearing `gs` replaces it.
+- ExtGState effects map consumer-specifically: structurally valid effects select
+  the exact indirect tuple and size, proven absence leaves current state, and
+  every malformed, unresolved, ambiguous, skipped, or otherwise unproved effect
+  clears stale state. Direct `gs` selection invents no resource name.
+- End-to-end locks cover classic/neutral parity, semantic aliases, direct-`gs`
+  convergence, reached-offset divergence, direct-dictionary refusal, exact page
+  report joins, Form-local rebinding, and deterministic rebuilds. Public report,
+  action, selector, CLI, conversion, and writer surfaces are unchanged; text
+  admission and writer policy remain a separate future direction. Type3
+  interpretation and ordinary Form `/Matrix` semantics remain deferred.
+
 ## Dual-path Form caller-state inheritance in the expansion machine
 
 - Both consumers of a Form invocation now start from the same state. The

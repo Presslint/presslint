@@ -80,6 +80,50 @@ fn classify_object_entry(
 }
 
 #[test]
+fn decoded_font_resource_name_collisions_poison_without_rewriting_raw_names() {
+    let input =
+        b"<< /F1 << /Type /Font /Subtype /Type1 >> /F#31 << /Type /Font /Subtype /Type1 >> >>";
+    let entries = inspect_dictionary_entries(input, 0).expect("font dictionary should inspect");
+    let pdf = fixture(&[]);
+    let mut skipped = Vec::new();
+    let fonts = crate::font_classify::classify_font_entries(
+        input,
+        pdf.lookup(),
+        17,
+        entries.entries,
+        &mut skipped,
+    );
+
+    assert_eq!(fonts.len(), 1);
+    assert_eq!(fonts[0].name, PdfName(b"F1".to_vec()));
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].resource_name, Some(PdfName(b"F#31".to_vec())));
+    assert!(matches!(
+        skipped[0].reason,
+        SkippedFontResourceReason::DuplicateFontName { .. }
+    ));
+}
+
+#[test]
+fn malformed_or_null_pdf_name_escapes_fail_closed() {
+    for raw in [
+        b"F#".as_slice(),
+        b"F#3".as_slice(),
+        b"F#zz".as_slice(),
+        b"F#00".as_slice(),
+        b"F\0".as_slice(),
+    ] {
+        assert!(crate::source_utils::decode_pdf_name(raw).is_none());
+    }
+    assert_eq!(
+        crate::source_utils::decode_pdf_name(b"F#31")
+            .expect("valid escape")
+            .as_ref(),
+        b"F1"
+    );
+}
+
+#[test]
 fn classifies_all_five_legal_tf_subtypes_exactly() {
     let cases: &[(&[u8], FontSubtypeClass)] = &[
         (b"Type1", FontSubtypeClass::Type1),

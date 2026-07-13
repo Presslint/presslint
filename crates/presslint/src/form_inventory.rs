@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::pdf_inventory::PdfInventorySkip;
 
 pub use crate::form_expansion_machine::build_page_inventory_with_forms;
+pub use crate::form_expansion_machine::build_page_inventory_with_forms_and_font_env;
 
 /// Combined page inventory plus per-form expansion diagnostics for one page.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

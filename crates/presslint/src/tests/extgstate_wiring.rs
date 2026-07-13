@@ -16,8 +16,9 @@
 #![allow(clippy::expect_used)]
 
 use presslint_inventory::{
-    AlphaClass, BlendModeClass, ColorSpaceEnv, ExtGStateEnv, ExtGStateResource,
-    GraphicsStateWalker, GsParam, OverprintMode, PaintOp, SoftMaskClass,
+    AlphaClass, BlendModeClass, ColorSpaceEnv, ExtGStateEnv, ExtGStateFontDirective,
+    ExtGStateResource, FontBinding, FontBindingTarget, FontEnv, FontSelectionState,
+    GraphicsStateWalker, GsParam, OverprintMode, PaintOp, ResolvedFont, SoftMaskClass,
 };
 use presslint_pdf::{
     DocumentAccessBackend, ObjectLookup, inspect_document_access,
@@ -48,6 +49,16 @@ fn page_without_extgstate_pdf(content: &[u8]) -> Vec<u8> {
     let page: &[u8] = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n";
     let content_object = stream_object(4, "", content);
     classic_pdf(&[CATALOG, PAGES, page, &content_object])
+}
+
+fn page_with_extgstate_font_pdf(dict: &str, content: &[u8]) -> Vec<u8> {
+    let page = format!(
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /ExtGState << {dict} >> >> /Contents 4 0 R >>\nendobj\n"
+    )
+    .into_bytes();
+    let content_object = stream_object(4, "", content);
+    let font: &[u8] = b"5 0 obj\n<< /Type /Font /Subtype /Type1 >>\nendobj\n";
+    classic_pdf(&[CATALOG, PAGES, &page, &content_object, font])
 }
 
 /// Build the page-scope `ExtGState` env exactly as the production bridges do:
@@ -81,6 +92,26 @@ fn walk(content: &[u8], extgstates: &[ExtGStateResource]) -> Vec<PaintOp> {
     let assembled = assemble_operators(&tokens).expect("assemble");
     let mut walker =
         GraphicsStateWalker::with_envs(ColorSpaceEnv::empty(), ExtGStateEnv::new(extgstates));
+    assembled
+        .records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| walker.step(content, index, record).expect("walk step"))
+        .collect()
+}
+
+fn walk_all(
+    content: &[u8],
+    extgstates: &[ExtGStateResource],
+    fonts: &[FontBinding],
+) -> Vec<PaintOp> {
+    let tokens = tokenize(content).expect("tokenize");
+    let assembled = assemble_operators(&tokens).expect("assemble");
+    let mut walker = GraphicsStateWalker::with_all_envs(
+        ColorSpaceEnv::empty(),
+        ExtGStateEnv::new(extgstates),
+        FontEnv::known(fonts),
+    );
     assembled
         .records
         .iter()
@@ -221,10 +252,89 @@ fn unresolved_entry_surfaces_in_env_as_all_unresolved() {
     let gs0 = find(&env, b"GS0");
     assert_eq!(gs0.params.overprint_fill, GsParam::Unresolved);
     assert_eq!(gs0.params.blend_mode, GsParam::Unresolved);
+    assert_eq!(gs0.font, ExtGStateFontDirective::Unknown);
 
     let ops = walk(b"/GS0 gs", &env);
     assert_eq!(ops[0].state.extgstate.overprint_fill, GsParam::Unresolved);
     assert_eq!(ops[0].state.extgstate.soft_mask, GsParam::Unresolved);
+}
+
+#[test]
+fn structurally_valid_direct_font_effect_maps_exact_reference_offset_and_size() {
+    let source =
+        page_with_extgstate_font_pdf("/GS0 << /F#6fnt [ 5 0 R -0.0 ] >>", b"/GS0 gs (A) Tj");
+    let env = page_env(&source);
+    let gs0 = find(&env, b"GS0");
+    assert!(matches!(gs0.font, ExtGStateFontDirective::Select { .. }));
+    let ExtGStateFontDirective::Select { font, size_bits } = gs0.font else {
+        return;
+    };
+    assert_eq!(font.object_number, 5);
+    assert_eq!(font.generation, 0);
+    assert!(font.object_byte_offset > 0);
+    assert_eq!(size_bits, (-0.0f64).to_bits());
+
+    let ops = walk_all(b"/GS0 gs (A) Tj", &env, &[]);
+    assert_eq!(
+        ops[0].state.font_selection,
+        FontSelectionState::ResolvedIndirect {
+            object_number: 5,
+            generation: 0,
+            object_byte_offset: font.object_byte_offset,
+            size: -0.0,
+        }
+    );
+    assert_eq!(ops[1].state.font_selection, ops[0].state.font_selection);
+}
+
+#[test]
+fn absent_font_preserves_selection_while_unknown_effects_clear_it() {
+    let absent_source = page_with_extgstate_pdf("/GS0 << /op true >>", b"/GS0 gs");
+    let absent_env = page_env(&absent_source);
+    assert_eq!(
+        find(&absent_env, b"GS0").font,
+        ExtGStateFontDirective::LeaveUnchanged
+    );
+    let font = ResolvedFont {
+        object_number: 7,
+        generation: 1,
+        object_byte_offset: 303,
+    };
+    let bindings = [
+        FontBinding::from_pdf_name_bytes(b"F1", FontBindingTarget::Resolved(font))
+            .expect("binding"),
+    ];
+    let ops = walk_all(b"/F1 7 Tf /GS0 gs", &absent_env, &bindings);
+    assert_eq!(ops[1].state.font_selection, ops[0].state.font_selection);
+
+    for dict in ["/GS0 << /Font [ 99 0 R 12 ] >>", "/GS0 << /Unrelated 1 >>"] {
+        let source = page_with_extgstate_pdf(dict, b"/GS0 gs");
+        let env = page_env(&source);
+        assert_eq!(find(&env, b"GS0").font, ExtGStateFontDirective::Unknown);
+        let ops = walk_all(b"/F1 7 Tf /GS0 gs", &env, &bindings);
+        assert_eq!(
+            ops[1].state.font_selection,
+            FontSelectionState::Indeterminate
+        );
+    }
+}
+
+#[test]
+fn valid_font_effect_survives_an_unrelated_unclassified_key() {
+    let source =
+        page_with_extgstate_font_pdf("/GS0 << /Font [ 5 0 R 12 ] /Unrelated 1 >>", b"/GS0 gs");
+    let gs0 = find(&page_env(&source), b"GS0");
+    assert!(gs0.has_unclassified_keys);
+    assert!(matches!(
+        gs0.font,
+        ExtGStateFontDirective::Select {
+            font: ResolvedFont {
+                object_number: 5,
+                ..
+            },
+            ..
+        }
+    ));
 }
 
 #[test]

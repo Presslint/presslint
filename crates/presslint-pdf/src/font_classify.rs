@@ -10,11 +10,13 @@
 //! makes no safety or admissibility judgement.
 
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use crate::page_resource_inheritance::{
     ResolveReferenceError, ResourceContext, resolve_reference, unique_entry,
 };
+use crate::source_utils::decode_pdf_name;
 use crate::{
     DictionaryEntryByteRange, DictionaryEntryInspectionError, DictionaryEntrySpan,
     DictionaryValueKind, IndirectObjectDictionaryInspectionError, IndirectRef,
@@ -27,8 +29,8 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClassifiedFontResource {
     /// Resource name (without the leading slash) selected by the `Tf`
-    /// operator. Raw source bytes are preserved; `#xx` escapes are not
-    /// decoded and no collision semantics are applied.
+    /// operator. Raw source bytes are preserved even though classification
+    /// compares decoded PDF-name values and poisons semantic collisions.
     pub name: PdfName,
     /// Exact `/Type` dictionary fact, recorded without guessing.
     pub dictionary_type: FontDictionaryTypeFact,
@@ -262,10 +264,14 @@ pub fn classify_font_entries(
     skipped: &mut Vec<SkippedFontResource>,
 ) -> Vec<ClassifiedFontResource> {
     let mut classified = Vec::new();
-    let mut seen_names = BTreeMap::new();
+    let mut seen_names: BTreeMap<FontNameKey<'_>, DictionaryEntryByteRange> = BTreeMap::new();
     for entry in entries {
-        let name = PdfName(input[entry.key_range.start + 1..entry.key_range.end].to_vec());
-        if let Some(first_key_range) = seen_names.get(&name) {
+        let raw_name = &input[entry.key_range.start + 1..entry.key_range.end];
+        let name = PdfName(raw_name.to_vec());
+        let collision_key = decode_pdf_name(raw_name)
+            .map(FontNameKey::Semantic)
+            .unwrap_or(FontNameKey::Malformed(raw_name));
+        if let Some(first_key_range) = seen_names.get(&collision_key) {
             skipped.push(skipped_entry(
                 object_byte_offset,
                 Some(name),
@@ -276,7 +282,7 @@ pub fn classify_font_entries(
             ));
             continue;
         }
-        seen_names.insert(name.clone(), entry.key_range);
+        seen_names.insert(collision_key, entry.key_range);
         match classify_font_entry(input, lookup, &name, entry) {
             Ok(resource) => classified.push(resource),
             Err(reason) => skipped.push(skipped_entry(object_byte_offset, Some(name), reason)),
@@ -311,7 +317,7 @@ pub fn inspect_effective_font_resource_entries(
         return effective_resources(Vec::new(), skipped);
     };
 
-    let Some(font_entry) = (match unique_entry(input, &resources.entries, b"/Font") {
+    let Some(font_entry) = (match unique_semantic_entry(input, &resources.entries, b"Font") {
         Ok(entry) => entry,
         Err((first_key_range, duplicate_key_range)) => {
             skipped.push(skipped_entry(
@@ -364,6 +370,31 @@ pub fn inspect_effective_font_resource_entries(
         &mut skipped,
     );
     effective_resources(fonts, skipped)
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum FontNameKey<'a> {
+    Semantic(Cow<'a, [u8]>),
+    Malformed(&'a [u8]),
+}
+
+fn unique_semantic_entry(
+    input: &[u8],
+    entries: &[DictionaryEntrySpan],
+    expected: &[u8],
+) -> Result<Option<DictionaryEntrySpan>, (DictionaryEntryByteRange, DictionaryEntryByteRange)> {
+    let mut found: Option<DictionaryEntrySpan> = None;
+    for entry in entries {
+        let raw = &input[entry.key_range.start + 1..entry.key_range.end];
+        if decode_pdf_name(raw).is_none_or(|name| name.as_ref() != expected) {
+            continue;
+        }
+        if let Some(first) = found {
+            return Err((first.key_range, entry.key_range));
+        }
+        found = Some(*entry);
+    }
+    Ok(found)
 }
 
 fn effective_resources(

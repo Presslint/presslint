@@ -109,6 +109,36 @@ fn page_without_resources_inherits_nearest_ancestor_fonts() {
 }
 
 #[test]
+fn escaped_font_namespace_is_inherited_as_one_whole_semantic_value() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /Pages /Kids [2 0 R] /Count 1 /Resources << /F#6fnt << /F#31 << /Type /Font /Subtype /Type1 >> >> >> >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Page /Parent 1 0 R /MediaBox [0 0 10 10] >>\nendobj\n",
+    ]);
+
+    let report = inspect(&pdf);
+
+    assert!(report.pages[0].skipped.is_empty());
+    assert_eq!(report.pages[0].fonts.len(), 1);
+    assert_eq!(report.pages[0].fonts[0].name, PdfName(b"F#31".to_vec()));
+}
+
+#[test]
+fn exact_and_escaped_font_namespace_keys_poison_inheritance() {
+    let pdf = fixture(&[
+        b"1 0 obj\n<< /Type /Pages /Kids [2 0 R] /Count 1 /Resources << /Font << >> /F#6fnt << >> >> >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Page /Parent 1 0 R /MediaBox [0 0 10 10] >>\nendobj\n",
+    ]);
+
+    let report = inspect(&pdf);
+
+    assert!(report.pages[0].fonts.is_empty());
+    assert!(matches!(
+        report.pages[0].skipped[0].reason,
+        SkippedFontResourceReason::DuplicateFont { .. }
+    ));
+}
+
+#[test]
 fn empty_replacement_resources_and_empty_font_are_present_not_omitted() {
     let pdf = fixture(&[
         b"1 0 obj\n<< /Type /Pages /Kids [2 0 R 3 0 R] /Count 2 /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 >> >> >> >>\nendobj\n",

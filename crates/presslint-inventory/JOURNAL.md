@@ -1,5 +1,22 @@
 # presslint-inventory Journal
 
+## Text identity v5 and all-environment builders
+
+- Text identity alone advances to `presslint.text.v5`. Existing Unset, raw
+  Selected, and Indeterminate inputs retain explicit stable tags; the additive
+  resolved tag encodes object number, generation, reached object offset, and
+  exact `f64` size bits. Resource aliases therefore converge when they reach the
+  same indirect body, while another reached offset diverges.
+- Exactly three text golden constants moved: `MIXED_DIGESTS[2]`,
+  `MANY_NOOP_DIGESTS[1]`, and `FORM_SCOPE_DIGESTS[1]`. Vector, image, Form,
+  resource-colour, colour-source, and shared-invocation constants and domain
+  tags remain byte-identical.
+- Additive default and seeded all-environment builders borrow `FontEnv` and
+  replay through the same streaming collector. Existing builders delegate with
+  the disabled environment and are snapshot-compatible; `InventoryEntry` and
+  text-show report shapes are unchanged. Indirect identity is observation and
+  digest evidence only, never mutation or writer authority.
+
 ## Seeded inventory builder for invocation-specific Form templates
 
 - Additive `build_inventory_with_initial_state_and_envs`: the existing combined

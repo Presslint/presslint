@@ -13,6 +13,7 @@ mod call_machine;
 mod color_space_env;
 mod extgstate_env;
 mod flat_projection;
+mod font_env;
 mod mutation_class;
 mod operands;
 mod paint_program;
@@ -31,6 +32,7 @@ pub use extgstate_env::{
     GraphicsExtGStateSnapshot, GsParam, OverprintMode, SoftMaskClass,
 };
 pub use flat_projection::{FlatPaintOp, flat_call_events};
+pub use font_env::{ExtGStateFontDirective, FontBinding, FontBindingTarget, FontEnv, ResolvedFont};
 pub use mutation_class::MutationClass;
 pub use paint_program::{PaintOps, PaintProgram};
 pub use provenance::{DecodedRange, SourceRange};

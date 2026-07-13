@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 pub fn count_leading_digits(bytes: &[u8]) -> usize {
     bytes
         .iter()
@@ -192,6 +194,50 @@ pub const fn is_pdf_delimiter(byte: u8) -> bool {
         byte,
         b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
     )
+}
+
+/// Decode the bytes of one PDF name object after its leading `/`.
+///
+/// The unescaped fast path borrows the input. An escaped name allocates at most
+/// one output buffer whose capacity is bounded by the raw name length. Every
+/// `#` shall be followed by exactly two hexadecimal digits; truncated,
+/// non-hexadecimal, and null-producing escapes fail closed. A literal null byte
+/// is rejected for the same reason (ISO 32000-1 §7.3.5).
+pub fn decode_pdf_name(name: &[u8]) -> Option<Cow<'_, [u8]>> {
+    if !name.contains(&b'#') {
+        return (!name.contains(&0)).then_some(Cow::Borrowed(name));
+    }
+
+    let mut decoded = Vec::with_capacity(name.len());
+    let mut cursor = 0;
+    while cursor < name.len() {
+        if name[cursor] != b'#' {
+            if name[cursor] == 0 {
+                return None;
+            }
+            decoded.push(name[cursor]);
+            cursor += 1;
+            continue;
+        }
+        let high = hex_value(*name.get(cursor + 1)?)?;
+        let low = hex_value(*name.get(cursor + 2)?)?;
+        let byte = (high << 4) | low;
+        if byte == 0 {
+            return None;
+        }
+        decoded.push(byte);
+        cursor += 3;
+    }
+    Some(Cow::Owned(decoded))
+}
+
+const fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub fn skip_name(input: &[u8], start: usize, limit: usize) -> usize {

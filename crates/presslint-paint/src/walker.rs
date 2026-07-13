@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::color_space_env::{ColorSpaceEnv, ColorSpaceResource};
 use crate::extgstate_env::{ExtGStateEnv, GraphicsExtGStateSnapshot};
+use crate::font_env::{ExtGStateFontDirective, FontBindingTarget, FontEnv, ResolvedFont};
 use crate::operands::{
     checked_source, color_operands, concat_matrix, device_color, expect_operands, font_operands,
     integer_operand, name_operand, numeric_operands,
@@ -102,7 +103,7 @@ pub struct GraphicsStateSnapshot {
     pub nonstroking_color: GraphicsColor,
     /// Current text rendering mode.
     pub text_rendering_mode: TextRenderingMode,
-    /// Effective raw, unresolved text font selection.
+    /// Effective raw or resolved text font selection.
     pub font_selection: FontSelectionState,
     /// Current classified `ExtGState` state (values only; no resource names).
     pub extgstate: GraphicsExtGStateSnapshot,
@@ -135,12 +136,13 @@ impl GraphicsStateSnapshot {
     }
 }
 
-/// Effective raw text-font selection carried by the graphics state.
+/// Effective text-font selection carried by the graphics state.
 ///
-/// This is deliberately unresolved: a selected name is the exact `Tf` resource
-/// name bytes without the leading slash. It is not decoded or joined to a font
-/// resource. Any `gs` makes the selection indeterminate because an `ExtGState`
-/// dictionary may carry `/Font` and this slice does not inspect that effect.
+/// The raw `Selected` variant is retained for disabled compatibility
+/// constructors. All-environment walks use `ResolvedIndirect` only when an
+/// exact eligible indirect identity is proved; every missing, malformed,
+/// ambiguous, direct-without-identity, or structurally unknown binding becomes
+/// `Indeterminate` and clears stale state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FontSelectionState {
@@ -153,7 +155,18 @@ pub enum FontSelectionState {
         /// Exact finite font-size value, including the sign bit of zero.
         size: f64,
     },
-    /// A `gs` may have changed the font and its exact effect is not classified.
+    /// Exact resolved indirect font identity and finite size.
+    ResolvedIndirect {
+        /// PDF indirect object number.
+        object_number: u32,
+        /// PDF indirect object generation.
+        generation: u16,
+        /// Byte offset of the reached current indirect-object body.
+        object_byte_offset: usize,
+        /// Exact finite font-size value, including the sign bit of zero.
+        size: f64,
+    },
+    /// The effective selection cannot be proved.
     Indeterminate,
 }
 
@@ -348,8 +361,9 @@ pub enum PaintOpKind {
     /// Carries the resource-name operand without the leading slash, mirroring
     /// [`XObjectInvoke`](Self::XObjectInvoke). This event only surfaces the
     /// invocation and its provenance. The seven classified `ExtGState` parameter
-    /// semantics are applied when available, and font selection always becomes
-    /// [`FontSelectionState::Indeterminate`] because `/Font` is not inspected.
+    /// semantics are applied when available. In all-environment mode a proven
+    /// absent `/Font` leaves the selection unchanged, a valid direct effect
+    /// selects its exact indirect target, and an unknown effect clears it.
     SetExtGState {
         /// Resource name operand without the leading slash.
         name: PdfName,
@@ -446,13 +460,16 @@ pub enum GraphicsWalkErrorKind {
 /// environments preserve the legacy seven-parameter `ExtGState` behaviour: with
 /// an empty colour-space env no `cs` name resolves, and with an empty
 /// `ExtGState` env `gs` leaves those seven parameters untouched. Every valid
-/// `gs` still makes font selection indeterminate.
+/// `gs` still makes font selection indeterminate. All-environment constructors
+/// additionally resolve named `Tf` and mapped `gs` font effects through a
+/// borrowed [`FontEnv`].
 #[derive(Debug, Clone)]
 pub struct GraphicsStateWalker<'a> {
     state: Rc<GraphicsStateSnapshot>,
     stack: Vec<Rc<GraphicsStateSnapshot>>,
     color_space_env: ColorSpaceEnv<'a>,
     extgstate_env: ExtGStateEnv<'a>,
+    font_env: FontEnv<'a>,
 }
 
 impl<'a> GraphicsStateWalker<'a> {
@@ -476,10 +493,21 @@ impl<'a> GraphicsStateWalker<'a> {
     /// and `gs` against an `ExtGState` environment.
     #[must_use]
     pub fn with_envs(color_space_env: ColorSpaceEnv<'a>, extgstate_env: ExtGStateEnv<'a>) -> Self {
-        Self::with_initial_state_and_envs(
+        Self::with_all_envs(color_space_env, extgstate_env, FontEnv::disabled())
+    }
+
+    /// Create a walker resolving colour, `ExtGState`, and font environments.
+    #[must_use]
+    pub fn with_all_envs(
+        color_space_env: ColorSpaceEnv<'a>,
+        extgstate_env: ExtGStateEnv<'a>,
+        font_env: FontEnv<'a>,
+    ) -> Self {
+        Self::with_initial_state_and_all_envs(
             Rc::new(GraphicsStateSnapshot::page_default()),
             color_space_env,
             extgstate_env,
+            font_env,
         )
     }
 
@@ -503,11 +531,28 @@ impl<'a> GraphicsStateWalker<'a> {
         color_space_env: ColorSpaceEnv<'a>,
         extgstate_env: ExtGStateEnv<'a>,
     ) -> Self {
+        Self::with_initial_state_and_all_envs(
+            initial_state,
+            color_space_env,
+            extgstate_env,
+            FontEnv::disabled(),
+        )
+    }
+
+    /// Seed a walker while resolving all three borrowed environments.
+    #[must_use]
+    pub const fn with_initial_state_and_all_envs(
+        initial_state: Rc<GraphicsStateSnapshot>,
+        color_space_env: ColorSpaceEnv<'a>,
+        extgstate_env: ExtGStateEnv<'a>,
+        font_env: FontEnv<'a>,
+    ) -> Self {
         Self {
             state: initial_state,
             stack: Vec::new(),
             color_space_env,
             extgstate_env,
+            font_env,
         }
     }
 
@@ -767,9 +812,10 @@ impl<'a> GraphicsStateWalker<'a> {
 
     /// Mutate the snapshot's classified `ExtGState` state for one `gs` operator.
     ///
-    /// Font selection first becomes indeterminate for EVERY valid `gs`, because
-    /// this slice has no uniform proof that the invoked dictionary lacks
-    /// `/Font`. The seven classified parameters retain their tri-level rule:
+    /// Disabled compatibility mode makes selection indeterminate for every
+    /// valid `gs`. All-environment mode applies the resolved resource's mapped
+    /// font directive, or clears stale selection on a miss/unknown directive.
+    /// The seven classified parameters retain their tri-level rule:
     ///
     /// - empty environment (feature off): leave the seven parameters untouched;
     /// - non-empty environment, name NOT found: set ALL seven params to
@@ -778,17 +824,33 @@ impl<'a> GraphicsStateWalker<'a> {
     /// - name found: layer the resource's params over the current state, leaving
     ///   fields the dictionary does not carry untouched.
     fn apply_extgstate(&mut self, name: &PdfName) {
-        self.state_mut().font_selection = FontSelectionState::Indeterminate;
-        if self.extgstate_env.is_empty() {
-            return;
-        }
-        // Copy the resolved params out (they are `Copy`) so the borrow of the env
-        // is released before the copy-on-write `state_mut`.
+        // Copy compact facts out before any copy-on-write state mutation.
         let resolved = self
             .extgstate_env
             .resolve(name)
-            .map(|resource| resource.params);
-        match resolved {
+            .map(|resource| (resource.params, resource.font));
+        if self.font_env.is_disabled() {
+            self.state_mut().font_selection = FontSelectionState::Indeterminate;
+        } else {
+            match resolved.map(|(_, font)| font) {
+                Some(ExtGStateFontDirective::LeaveUnchanged) => {}
+                Some(ExtGStateFontDirective::Select { font, size_bits }) => {
+                    let size = f64::from_bits(size_bits);
+                    self.state_mut().font_selection = if size.is_finite() {
+                        resolved_selection(font, size)
+                    } else {
+                        FontSelectionState::Indeterminate
+                    };
+                }
+                Some(ExtGStateFontDirective::Unknown) | None => {
+                    self.state_mut().font_selection = FontSelectionState::Indeterminate;
+                }
+            }
+        }
+        if self.extgstate_env.is_empty() {
+            return;
+        }
+        match resolved.map(|(params, _)| params) {
             Some(params) => self.state_mut().extgstate.apply(&params),
             None => self.state_mut().extgstate.set_all_unresolved(),
         }
@@ -801,10 +863,18 @@ impl<'a> GraphicsStateWalker<'a> {
         record: &OperatorRecord,
     ) -> Result<PaintOpKind, GraphicsWalkError> {
         let (name, size) = font_operands(source, operator, record)?;
-        self.state_mut().font_selection = FontSelectionState::Selected {
-            name: name.clone(),
-            size,
+        let selection = if self.font_env.is_disabled() {
+            FontSelectionState::Selected {
+                name: name.clone(),
+                size,
+            }
+        } else {
+            match self.font_env.resolve(&name) {
+                Some(FontBindingTarget::Resolved(font)) => resolved_selection(font, size),
+                Some(FontBindingTarget::Unresolved) | None => FontSelectionState::Indeterminate,
+            }
         };
+        self.state_mut().font_selection = selection;
         Ok(PaintOpKind::SetFont { name, size })
     }
 
@@ -841,6 +911,15 @@ impl<'a> GraphicsStateWalker<'a> {
             operator: show_operator,
             rendering_mode,
         })
+    }
+}
+
+const fn resolved_selection(font: ResolvedFont, size: f64) -> FontSelectionState {
+    FontSelectionState::ResolvedIndirect {
+        object_number: font.object_number,
+        generation: font.generation,
+        object_byte_offset: font.object_byte_offset,
+        size,
     }
 }
 

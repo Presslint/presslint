@@ -10,8 +10,9 @@ use std::rc::Rc;
 
 use super::{assemble, name};
 use crate::{
-    AlphaClass, BlendModeClass, ColorSpaceEnv, ExtGStateEnv, ExtGStateParams, ExtGStateResource,
-    FontSelectionState, GraphicsExtGStateSnapshot, GraphicsStateWalker, GsParam, PaintOp,
+    AlphaClass, BlendModeClass, ColorSpaceEnv, ExtGStateEnv, ExtGStateFontDirective,
+    ExtGStateParams, ExtGStateResource, FontSelectionState, GraphicsExtGStateSnapshot,
+    GraphicsStateWalker, GsParam, PaintOp,
 };
 
 /// Walk `input` with a borrowed `ExtGState` environment, materializing every op.
@@ -36,6 +37,7 @@ fn resource(gs_name: &[u8], set: ExtGStateParams) -> ExtGStateResource {
         name: name(gs_name),
         params: set,
         has_unclassified_keys: false,
+        font: ExtGStateFontDirective::Unknown,
     }
 }
 

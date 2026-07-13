@@ -74,7 +74,7 @@ fn form_own_extgstate_classifies_bm() {
 #[test]
 fn form_own_scope_transports_font_effect() {
     let pdf = fixture(&[
-        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ExtGState << /GS1 << /Font [2 0 R 7.5] >> >> >> >>\nstream\n\nendstream\nendobj\n",
+        b"1 0 obj\n<< /Type /XObject /Subtype /Form /Length 0 /Resources << /ExtGState << /GS1 << /F#6fnt [2 0 R 7.5] >> >> >> >>\nstream\n\nendstream\nendobj\n",
         b"2 0 obj\n<< /Type /Font /Subtype /TrueType >>\nendobj\n",
     ]);
 
