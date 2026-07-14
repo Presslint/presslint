@@ -59,6 +59,7 @@ pub(crate) mod content_object_ownership;
 mod content_sequence_pipeline;
 mod content_stream_plan;
 mod extgstate_page_guard;
+mod form_xobject_effect;
 mod link_routing;
 mod page_box_serialize;
 mod page_boxes;

@@ -44,6 +44,7 @@
 // crate and do not force backticks on it.
 #![allow(clippy::doc_markdown)]
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
@@ -51,7 +52,8 @@ use presslint_color_lcms::{ColorEngine, DeviceLinkSpace, LcmsColorEngine, LcmsEr
 use presslint_paint::{GraphicsStateSnapshot, PaintOpKind, PaintProgram};
 use presslint_pdf::{
     DictionaryValueKind, DocumentAccessError, IndirectObjectEditDisposition, IndirectRef,
-    PageExtGStateResourcesInspection, PageFontResourcesInspection, PageXObjectResourcesInspection,
+    ObjectLookup, PageExtGStateResourcesInspection, PageFontResourcesInspection,
+    PageXObjectResourcesInspection,
 };
 use presslint_selectors::Selector;
 use presslint_types::{ColorUsage, PageIndex};
@@ -66,6 +68,7 @@ use crate::{
     },
     content_sequence_pipeline::{PageSequenceEdit, edit_page_content_incremental_sequence},
     extgstate_page_guard::{extgstate_page_skip_reason, transparency_group_page_skip_reason},
+    form_xobject_effect::FormXObjectEffectAnalyzer,
     link_routing::{
         DeviceLinkInput, LinkConversionCounts, LinkRouting, RoutedLink, build_link_routing,
     },
@@ -526,6 +529,10 @@ pub fn convert_content_colors_incremental(
 
     let target = request.target.as_ref();
 
+    // One request-scoped root Form colour-effect analyzer, shared (with its
+    // exact-identity cache and aggregate bounds) across every selected page.
+    let analyzer = RefCell::new(FormXObjectEffectAnalyzer::new());
+
     let output = edit_page_content_incremental_sequence(
         input,
         &request.pages,
@@ -536,7 +543,7 @@ pub fn convert_content_colors_incremental(
             transparency_group_page_skip_reason(group_page)
                 .or_else(|| extgstate_page_skip_reason(extgstate_page, sequence))
         },
-        |page_index, sequence, facts, xobjects, fonts, extgstates| {
+        |page_index, sequence, facts, xobjects, fonts, extgstates, lookup| {
             convert_sequence(
                 page_index,
                 sequence,
@@ -547,6 +554,9 @@ pub fn convert_content_colors_incremental(
                 &routing,
                 request.black_preservation,
                 target,
+                input,
+                lookup,
+                &analyzer,
             )
         },
     )
@@ -608,6 +618,9 @@ fn convert_sequence(
     routing: &LinkRouting,
     black_preservation: BlackPreservationPolicy,
     target: Option<&Selector>,
+    input: &[u8],
+    lookup: ObjectLookup<'_>,
+    analyzer: &RefCell<FormXObjectEffectAnalyzer>,
 ) -> Option<PageSequenceEdit<ConvertedPage>> {
     let decoded = sequence.bytes();
     // The page device-space policy replaces the earlier always-empty
@@ -616,8 +629,12 @@ fn convert_sequence(
     let policy = PageDeviceSpacePolicy::from_page_facts(facts);
     // The page-exact XObject colour-effect map: one deterministic build per
     // analysed page from the matched advisory report; a failed inspection or
-    // identity join classifies every named `Do` as unknown, fail-closed.
-    let xobject_policy = PageXObjectPolicy::new(xobject_report);
+    // identity join classifies every named `Do` as unknown, fail-closed. Exact
+    // Form targets stay unresolved in this SAME sole semantic-name map until a
+    // valid outer `Do` demands them, then resolve through the shared request
+    // analyzer and cache only their fixed two-lane effect. Every Form byte stays
+    // untouched and there is no separate demand scan.
+    let xobject_policy = PageXObjectPolicy::analyzed(xobject_report, input, lookup, analyzer);
     // The page font policy maps the exact matched /Font and /ExtGState reports
     // into the effective FontEnv/ExtGStateEnv views plus the corroborated
     // ordinary-font admission set. A failed inspection or identity join makes

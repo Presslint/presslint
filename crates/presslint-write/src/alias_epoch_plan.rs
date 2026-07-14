@@ -48,8 +48,11 @@
 //! snapshot. A named `Do` is classified through the page's exact matched
 //! [`PageXObjectPolicy`]: an ordinary image is colour-neutral, a structurally
 //! valid `/ImageMask true` stencil consumes the current nonstroking colour
-//! (§8.9.6.2) exactly like a fill paint, and a form, an unknown or unproven
-//! name, or an invalid image keeps the historical fail-closed refusal.
+//! (§8.9.6.2) exactly like a fill paint, a demanded ordinary form proved by the
+//! request analyzer consumes only the inherited stroking/nonstroking lanes its
+//! path paints read (a neutral form consumes neither and leaves roots live), and
+//! a structural/unknown/unproven form, an unknown name, or an invalid image
+//! keeps the historical fail-closed refusal.
 //! Refusal affects alias plans only; the neighbouring direct-device
 //! shortcut conversion keeps its own guards, decision order, and counts.
 //!
@@ -156,9 +159,10 @@ pub enum EpochRefusalReason {
     /// uninterpreted value outside 0-7. An admitted ordinary font consumes the
     /// mode's lanes instead of refusing.
     TextShow,
-    /// A form, unknown, unproven, or invalid named `Do` while an alias was
-    /// live. Proven ordinary images are neutral and proven stencils consume
-    /// the nonstroking lane instead of refusing.
+    /// A structural/unknown/unproven form, or an unknown or invalid named `Do`
+    /// while an alias was live. Proven ordinary images are neutral, proven
+    /// stencils consume the nonstroking lane, and an analyzed form consumes only
+    /// its proven inherited lanes instead of refusing.
     XObjectInvoke,
     /// `BI`/`ID`/`EI` inline image or stencil semantics.
     InlineImage,
@@ -324,7 +328,7 @@ pub struct AliasEpochPlan<'a> {
     policy: &'a PageDeviceSpacePolicy,
     routing: &'a LinkRouting,
     /// Page-exact named `XObject` colour effects for `Do` classification.
-    xobjects: &'a PageXObjectPolicy,
+    xobjects: &'a PageXObjectPolicy<'a>,
     /// Page-exact font policy: exact ordinary-font admission for `TextShow`.
     fonts: &'a PageFontPolicy,
     target: Option<&'a Selector>,
@@ -355,7 +359,7 @@ impl<'a> AliasEpochPlan<'a> {
     pub fn new(
         policy: &'a PageDeviceSpacePolicy,
         routing: &'a LinkRouting,
-        xobjects: &'a PageXObjectPolicy,
+        xobjects: &'a PageXObjectPolicy<'a>,
         fonts: &'a PageFontPolicy,
         target: Option<&'a Selector>,
         page_index: PageIndex,
@@ -455,6 +459,21 @@ impl<'a> AliasEpochPlan<'a> {
                     match self.xobjects.effect_of(name) {
                         PageXObjectEffect::OrdinaryImage => {}
                         PageXObjectEffect::Stencil => self.consume(LaneSide::Nonstroking, op),
+                        // A demanded ordinary Form proved a bounded inherited-
+                        // lane effect: it consumes ONLY the lanes its path paints
+                        // read from the caller. A neutral analyzed Form (neither
+                        // lane) leaves alias roots live and is not a refusal.
+                        PageXObjectEffect::AnalyzedForm {
+                            consumes_stroking,
+                            consumes_nonstroking,
+                        } => {
+                            if consumes_stroking {
+                                self.consume(LaneSide::Stroking, op);
+                            }
+                            if consumes_nonstroking {
+                                self.consume(LaneSide::Nonstroking, op);
+                            }
+                        }
                         PageXObjectEffect::Form | PageXObjectEffect::Unknown => {
                             self.refuse_open(op, EpochRefusalReason::XObjectInvoke);
                         }

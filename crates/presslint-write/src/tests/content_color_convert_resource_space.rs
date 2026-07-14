@@ -335,6 +335,13 @@ fn child_resources_replace_inherited_aliases_instead_of_merging() {
 
 #[test]
 fn form_local_alias_does_not_leak_into_the_page_policy_or_descend() {
+    // Root Form analysis is now enabled, but it uses an EMPTY resource
+    // environment: the demanded Form's body reaches a `cs` resource colour, so
+    // its exact analysis is Unknown and the Form never leaks its own
+    // `/Resources /ColorSpace` alias into the page policy. The page declares no
+    // `/ColorSpace`, so its `cs` stays unresolved and no epoch forms; the Form
+    // dictionary and stream stay byte-identical and the object is not
+    // re-appended.
     let page_stream = b"/GrayAlias cs 0.5 sc\n/Fm Do\n";
     let form_stream = b"/GrayAlias cs 0.6 sc\n";
     let input = assemble_classic(&[
@@ -421,13 +428,16 @@ fn ownership_vetoed_alias_selection_still_feeds_a_private_setter() {
 #[test]
 fn form_and_other_conservative_boundaries_keep_counts_bytes_and_direct_conversion() {
     // This page declares NO /Font namespace, so the `Tj` runs under an Unset
-    // font (unknown/unadmitted) and keeps the fail-closed TextShow refusal;
-    // Form invocation, compatibility sections, and unknown operators refuse the
-    // same PRIVATE alias epoch. The structural setter counts, every alias byte,
-    // and the neighbouring direct shortcut conversion are all unchanged.
-    // Ordinary-font text conversion and the Type3 boundary are locked by the
-    // dedicated tests below; ordinary images and valid stencils live in the
-    // focused XObject matrix.
+    // font (unknown/unadmitted) and ALREADY refuses the PRIVATE alias epoch with
+    // the fail-closed TextShow reason before the outer `/Fm Do`; compatibility
+    // sections and unknown operators would refuse the same epoch. The empty Form
+    // is now demanded and analyzed neutral, but that neither un-refuses the
+    // already-poisoned root nor consumes a lane. The structural setter counts,
+    // every alias byte, the untouched Form stream, and the neighbouring direct
+    // shortcut conversion are all unchanged. Ordinary-font text conversion and
+    // the Type3 boundary are locked by the dedicated tests below; ordinary
+    // images, valid stencils, and analyzed Form lane effects live in the focused
+    // XObject and Form matrices.
     let stream = b"/GrayAlias cs 0.5 sc BT (x) Tj ET /Fm Do BX EX XY 1 0 0 rg\n";
     let input = assemble_classic(&[
         CATALOG.to_vec(),

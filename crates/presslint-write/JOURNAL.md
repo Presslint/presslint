@@ -2,6 +2,111 @@
 
 Earlier entries are preserved in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T187 - Root Form inherited-colour effect admission
+
+### Colour-dependency authority boundary
+
+This slice extends the page alias-epoch proof across a narrow class of root-page
+Form `XObject` invocations WITHOUT writing a single Form byte. It makes only a
+colour-lane-dependency claim: does painting inside a demanded root Form consume
+the caller's inherited stroking and/or nonstroking colour? A proven consuming
+Form lets the outer `/Fm Do` close only the matching page alias lanes; every
+Form dictionary/stream byte, page ownership, root closure, dry-run, transaction,
+append-only prefix and reopen behaviour stay byte-identical. No Form object,
+resource binding, clone, or allocation is ever authored, so the future Form
+ownership/mutation problem is deliberately untouched.
+
+`/Matrix` and `/BBox` are unmodelled and make no conformance claim: a
+non-identity `/Matrix` cannot change which colour lane a path paint reads, and
+`/BBox` clipping can only suppress paint, so ignoring both may at worst
+over-report consumption (a visually inert positive under the existing colour
+route) and can never fabricate an unsafe false Neutral. Matrix/BBox need a later
+geometry/bounds/render consumer; a Type3 substrate needs its own
+string/Encoding/CharProc execution vertical.
+
+### One abstraction: the request-scoped analyzer
+
+The single new domain abstraction is the private `FormXObjectEffectAnalyzer`
+(`form_xobject_effect.rs`). It is request-scoped and shared across every selected
+page. It caches `Option<[bool; 2]>` (stroking-first lanes; `None` = Unknown)
+keyed by the EXACT tuple `(object number, generation, reached object byte
+offset)`; map presence distinguishes a cached Unknown from an unseen target, and
+both positive and refused results are cached. A fixed 256 first-seen target cap
+and ONE aggregate decoded-byte budget (`MAX_CONTENT_STREAM_BYTES`) bound the
+whole request, not each page; exhaustion deterministically caches Unknown.
+Corroboration re-resolves the reference through the current request
+`ObjectLookup` and requires an in-use, source-addressable object whose
+generation and byte offset match; compressed, free, missing, ambiguous or
+out-of-range targets are Unknown.
+
+### Semantic dictionary gate, then two content layers
+
+Immediately after exact identity corroboration, and before filter
+classification, extent discovery, slicing or decoding, the analyzer performs one
+top-level dictionary preflight using decoded PDF-name equality. Undecodable keys
+are Unknown. Any semantic `/F`, `/Ref`, `/OC` or `/OPI` refuses under canonical
+or escaped spelling: external stream data, imported-page substitution, optional
+visibility and OPI substitution are all outside the admitted execution model.
+The raw-key-delegated safety keys `/Group`, `/Length`, `/Filter` and
+`/DecodeParms` must be canonical and semantically unique, so an escaped alias or
+duplicate cannot evade the existing group, stream-extent or filter inspectors.
+Those inspectors continue to own the corresponding value semantics.
+
+Neither layer may be omitted. Layer 1 tokenizes/assembles the demanded Form once
+and runs a strict CLOSED raw-record preflight: the allowlist is `q Q`, `cm`,
+direct `G g RG rg K k`, path construction `m l c v y h re`, clipping `W W*`, and
+path paint/end `S s f F f* B B* b b* n`, each with exact arity, finite `f64`
+numeric operands, and a path/`q`-stack context grammar (§8.2); `m`/`re` open or continue,
+`l/c/v/y/h/W/W*` require an open path, paint/`n` require and close it, and the
+stream end requires no open path and balanced `q/Q`. Every other operator —
+resource colours `CS cs SC SCN sc scn`, line/text state, `ri`, `gs`, text/show,
+`Do`, `sh`, inline images, `BX/EX`, marked content, `d0/d1`, unknowns — refuses,
+so a positive prefix never survives a later unsupported record. The raw pass is
+the ONLY validator for the path-construction/clipping operators the walker
+collapses to no-ops.
+
+Layer 2 runs exactly one `PaintProgram::ops_with_initial_state` walk seeded with
+distinct source-less inherited stroking/nonstroking sentinels (`source: None`).
+The walker owns `q`/`Q`, direct setter lane kills, and finiteness; each PathPaint
+consumes a lane only when the live colour still equals its sentinel. Because
+every valid direct setter stamps a concrete source range, even a numerically
+sentinel-valued setter cannot recreate inheritance. Transparency grouping is
+proven absent through the existing `inspect_form_transparency_group` (accepting
+only `group.is_none()` AND `skipped.is_empty()`); only raw or single
+default-predictor `/FlateDecode` bodies decode (bounded by the remaining
+aggregate budget, dropped after caching the two-bit effect); everything else is
+Unknown.
+
+### Decoded-name integration and outer Do
+
+`PageXObjectPolicy` stays the SOLE decoded semantic-name/collision/skip map. Its
+private effect family gains `AnalyzedForm { consumes_stroking,
+consumes_nonstroking }`; the existing `new(report)` structural constructor still
+refuses every Form and is retained for focused tests and fail-closed callers.
+The production constructor stores exact unresolved Form targets in that same
+map. There is no demand-name collection pass or `BTreeSet<Vec<u8>>`: after the
+single page walk reaches an outer `Do` and passes the invalid graphics-object
+context check, the policy resolves that one entry through the request analyzer
+and replaces it with the proven effect or refusal. Repeated names and aliases
+reuse the exact analyzer cache; declared-but-uninvoked Forms are never analyzed;
+decoded-name collision, malformed-name, named-skip and page-wide poisoning all
+win before resolution and can never be overridden. A neutral analyzed Form
+leaves alias roots live; known lane effects call the existing
+`AliasEpochPlan::consume` for only those lanes; structural/unknown Forms keep the
+historical `XObjectInvoke` refusal; ordinary image/stencil behaviour is
+unchanged.
+
+### Plumbing
+
+The private sequence edit callback changed from `Fn` to `FnMut` and now receives
+the existing Copy `ObjectLookup`; every sequence argument/order, the preflight
+`Fn`, and the sole production caller are otherwise preserved. The conversion
+request builds ONE analyzer and threads `input`/`lookup` into the page
+conversion closure, which builds the lazy production policy around that shared
+request cache. No public request/output/report shape, `EpochRefusalReason`, skip
+reason, `CandidateKind`, serde, digest, or PDF/paint API changed. File sizes stay
+well under the gate.
+
 ## T186 - Page font policy and ordinary TextShow alias admission
 
 ### Mechanical split

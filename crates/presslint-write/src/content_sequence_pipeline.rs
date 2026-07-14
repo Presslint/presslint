@@ -25,7 +25,7 @@ use presslint_actions::PlannedDirtyObject;
 use presslint_pdf::{
     DocumentAccessError, DocumentAccessRejection, DocumentPageTransparencyGroupsInspection,
     DocumentPageTransparencyGroupsInspectionError, FlateDecodeParameters,
-    IndirectObjectEditDecision, IndirectObjectEditDisposition, IndirectRef,
+    IndirectObjectEditDecision, IndirectObjectEditDisposition, IndirectRef, ObjectLookup,
     PageExtGStateResourcesInspection, PageFontResourcesInspection, PageTransparencyGroupInspection,
     PageXObjectResourcesInspection, content_stream_data_slice, decode_flate_stream,
     encode_flate_stream, inspect_document_access,
@@ -92,14 +92,17 @@ struct PreparedSequenceObject<'a> {
 /// join did not match); the exact identity-matched page `/Font` report (advisory
 /// — a `None` fact makes the caller's font policy unknown and never skips the
 /// page); and the exact identity-matched page `/ExtGState` report (the SAME
-/// report used by the safety preflight, never inspected twice). Each `None`
-/// advisory fact degrades the callback's knowledge, never the page itself.
+/// report used by the safety preflight, never inspected twice); and the request
+/// `ObjectLookup` (Copy), so an `FnMut` callback can resolve exact demanded
+/// objects (for example root Form colour-effect analysis) through the
+/// already-open backend without reopening the document. Each `None` advisory
+/// fact degrades the callback's knowledge, never the page itself.
 #[allow(clippy::too_many_lines)]
 pub fn edit_page_content_incremental_sequence<T, P, F>(
     input: &[u8],
     pages: &PageSelection,
     preflight: P,
-    edit: F,
+    mut edit: F,
 ) -> Result<PageSequenceOutput<T>, EditPageContentError>
 where
     P: Fn(
@@ -108,13 +111,14 @@ where
         Option<&PageTransparencyGroupInspection>,
         &PageContentSequence,
     ) -> Option<PipelineSkipReason>,
-    F: Fn(
+    F: FnMut(
         PageIndex,
         &PageContentSequence,
         &PageColorFacts<'_>,
         Option<&PageXObjectResourcesInspection>,
         Option<&PageFontResourcesInspection>,
         Option<&PageExtGStateResourcesInspection>,
+        ObjectLookup<'_>,
     ) -> Option<PageSequenceEdit<T>>,
 {
     let access = inspect_document_access(input).map_err(|error| EditPageContentError::Open {
@@ -331,6 +335,7 @@ where
             xobject_page,
             font_page,
             extgstate_page,
+            lookup,
         ) else {
             skipped.push(whole_page_skip(
                 page_index,

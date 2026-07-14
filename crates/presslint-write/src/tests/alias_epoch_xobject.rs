@@ -361,8 +361,13 @@ fn image_body(entries: &str) -> Vec<u8> {
     stream_body(&format!(" /Type /XObject /Subtype /Image {entries}"), b"x")
 }
 
+/// A demanded Form whose body uses a resource colour operator (`cs`), so its
+/// exact analysis is Unknown and the outer `Do` keeps the fail-closed refusal.
 fn form_body() -> Vec<u8> {
-    stream_body(" /Type /XObject /Subtype /Form /BBox [0 0 1 1]", b"")
+    stream_body(
+        " /Type /XObject /Subtype /Form /BBox [0 0 1 1]",
+        b"/CS0 cs 0 0 m 1 1 l f",
+    )
 }
 
 fn resource_pdf(content: &[u8], resources: &str, xobjects: Vec<Vec<u8>>) -> Vec<u8> {
@@ -441,6 +446,47 @@ fn stencil_consumes_only_nonstroking_and_save_restore_preserves_the_tuple() {
     assert!(!contains(&decoded, b"/GrayAlias cs"));
     assert!(contains(&decoded, b"q"));
     assert!(contains(&decoded, b"Q"));
+}
+
+#[test]
+fn structural_constructor_refuses_forms_that_analysis_would_admit() {
+    // The structural constructor never analyzes: any Form target classifies as a
+    // fail-closed `Form` refusal, even one whose body an analyzer would prove
+    // neutral. Only the production `analyzed` constructor folds a proven effect.
+    let forms = vec![PageXObjectResourceTarget {
+        name: ResourceName(b"Fm".to_vec()),
+        reference: IndirectRef {
+            object_number: 5,
+            generation: 0,
+        },
+        object_byte_offset: 100,
+        image_metadata: None,
+    }];
+    let report = report(Vec::new(), forms, Vec::new());
+    assert_eq!(
+        PageXObjectPolicy::new(Some(&report)).effect_of(&PdfName(b"Fm".to_vec())),
+        PageXObjectEffect::Form
+    );
+
+    // End-to-end, the SAME empty Form is demanded, analyzed neutral, and leaves
+    // the alias root live: no consumer, no refusal, alias bytes verbatim.
+    let resources = format!("{GRAY_ALIAS} /XObject << /Fm 5 0 R >>");
+    let input = resource_pdf(
+        b"/GrayAlias cs 0.5 sc /Fm Do\n",
+        &resources,
+        vec![stream_body(
+            " /Type /XObject /Subtype /Form /BBox [0 0 1 1]",
+            b"",
+        )],
+    );
+    let output = convert(&input);
+    let page = &output.converted[0];
+    assert_eq!(page.resource_alias_candidates_converted, 0);
+    assert_eq!(page.resource_alias_candidates_refused, 0);
+    assert!(contains(
+        &page_decoded_stream(&output.bytes, false),
+        b"/GrayAlias cs 0.5 sc"
+    ));
 }
 
 #[test]
