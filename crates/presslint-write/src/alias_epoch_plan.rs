@@ -26,9 +26,19 @@
 //! LCMS apply are deliberately NOT proven here. The converter dry-runs every
 //! retained candidate before authorizing any splice for the root.
 //!
-//! The proof is FAIL-CLOSED at every boundary the walker cannot certify: text
-//! showing (the snapshot lacks the effective font/subtype, and Type3 glyph
-//! programs inherit graphics state, so `Tr` alone proves nothing), inline
+//! Text showing is admitted as a colour CONSUMER only for an exact ordinary
+//! indirect font (Type1/MMType1/TrueType/Type0) present in the page policy's
+//! unpoisoned admitted set: its render mode consumes the current nonstroking
+//! and/or stroking colour (0/4 fill, 1/5 stroke, 2/6 both, 3/7 neither) exactly
+//! like a fill/stroke paint, and its bytes stay verbatim. Every unproven font
+//! state — Type3, CID descendant, direct-without-identity, stale/missing/
+//! unadmitted tuple, raw/unset/indeterminate selection — and every unsupported
+//! render-mode value keep the historical fail-closed `TextShow` refusal, because
+//! a non-ordinary current font may execute glyph content programs that inherit
+//! graphics state and paint with the current colour.
+//!
+//! The proof is otherwise FAIL-CLOSED at every boundary the walker cannot
+//! certify: inline
 //! images, Type3 `d0`/`d1`, `BX`/`EX` compatibility sections, Pattern-name or
 //! otherwise ineligible setters inside an active epoch, malformed
 //! graphics-object placement (§8.2: text-object and path-object lifecycles
@@ -59,6 +69,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use presslint_paint::{
     DecodedRange, GraphicsColor, GraphicsStateSnapshot, PaintOp, PaintOpKind, PathPaintKind,
+    TextRenderingMode,
 };
 use presslint_pdf::{IndirectObjectEditDisposition, IndirectRef};
 use presslint_selectors::Selector;
@@ -71,6 +82,7 @@ use crate::{
     page_device_space_policy::{
         AliasSetterClass, AliasSetterEvent, PageDeviceSpacePolicy, paint_color_space,
     },
+    page_font_policy::PageFontPolicy,
     page_xobject_policy::{PageXObjectEffect, PageXObjectPolicy},
     selector_match::selector_matches_operator,
 };
@@ -139,7 +151,10 @@ pub enum EpochRefusalReason {
     /// A repeated physical reference produced a different candidate decision
     /// or different symbolic facts for the same local record range.
     RepeatedReferenceMismatch,
-    /// `Tj`/`TJ`/`'`/`"` while an alias was live, regardless of `Tr`.
+    /// `Tj`/`TJ`/`'`/`"` while an alias was live and the effective font was not
+    /// an admitted exact ordinary indirect font, or the render mode was an
+    /// uninterpreted value outside 0-7. An admitted ordinary font consumes the
+    /// mode's lanes instead of refusing.
     TextShow,
     /// A form, unknown, unproven, or invalid named `Do` while an alias was
     /// live. Proven ordinary images are neutral and proven stencils consume
@@ -310,6 +325,8 @@ pub struct AliasEpochPlan<'a> {
     routing: &'a LinkRouting,
     /// Page-exact named `XObject` colour effects for `Do` classification.
     xobjects: &'a PageXObjectPolicy,
+    /// Page-exact font policy: exact ordinary-font admission for `TextShow`.
+    fonts: &'a PageFontPolicy,
     target: Option<&'a Selector>,
     page_index: PageIndex,
     /// Current lane pair: stroking then nonstroking.
@@ -334,10 +351,12 @@ pub struct AliasEpochPlan<'a> {
 
 impl<'a> AliasEpochPlan<'a> {
     /// Build the plan for one parsed logical page sequence.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         policy: &'a PageDeviceSpacePolicy,
         routing: &'a LinkRouting,
         xobjects: &'a PageXObjectPolicy,
+        fonts: &'a PageFontPolicy,
         target: Option<&'a Selector>,
         page_index: PageIndex,
         sequence: &PageContentSequence,
@@ -356,6 +375,7 @@ impl<'a> AliasEpochPlan<'a> {
             policy,
             routing,
             xobjects,
+            fonts,
             target,
             page_index,
             lanes: [None, None],
@@ -420,7 +440,7 @@ impl<'a> AliasEpochPlan<'a> {
                 );
             }
             PaintOpKind::PathPaint { paint } => self.path_paint(*paint, op),
-            PaintOpKind::TextShow { .. } => self.refuse_open(op, EpochRefusalReason::TextShow),
+            PaintOpKind::TextShow { rendering_mode, .. } => self.text_show(op, *rendering_mode),
             // An external object is its own graphics object (§8.2): valid at
             // page-description level only, so invalid placement refuses BEFORE
             // any classification. A proven ordinary image never touches the
@@ -862,6 +882,47 @@ impl<'a> AliasEpochPlan<'a> {
         }
     }
 
+    /// A text-showing operator (`Tj`/`TJ`/`'`/`"`) consumes the current colour
+    /// selected by its text rendering mode — but ONLY when the effective font
+    /// is an exact ordinary indirect font in the page policy's admitted set.
+    ///
+    /// Text showing is valid only inside a text object and never inside an open
+    /// path (§8.2); invalid placement refuses the structural way. An unadmitted
+    /// font (Type3, CID descendant, direct-without-identity, stale offset,
+    /// missing/malformed/duplicate/unsupported, or a raw/unset/indeterminate
+    /// selection) keeps the historical fail-closed `TextShow` refusal, because
+    /// a non-ordinary current font may execute glyph content programs that
+    /// paint with the current colour. For an admitted font the render mode
+    /// selects the consumed lanes (ISO 32000-1 §9.3.6, Table 106): 0/4
+    /// nonstroking, 1/5 stroking, 2/6 both, 3/7 neither. Modes 3/7 mark no root
+    /// used and authorize no colour splice; every other unsupported mode value
+    /// refuses. `TextShow` is a consumer only — no byte, string, spacing, font,
+    /// matrix, or clipping operand is ever a conversion candidate.
+    fn text_show(&mut self, op: &PaintOp, mode: TextRenderingMode) {
+        // An unadmitted font is the primary reason and keeps the historical
+        // `TextShow` refusal regardless of context or mode: a non-ordinary
+        // current font may execute glyph programs that paint. Only an admitted
+        // exact ordinary indirect font is scrutinized for context and mode.
+        if !self.fonts.admits(&op.state.font_selection) {
+            self.refuse_open(op, EpochRefusalReason::TextShow);
+            return;
+        }
+        if !self.in_text_object || self.in_path_object {
+            self.refuse_open(op, EpochRefusalReason::InvalidGraphicsObjectContext);
+            return;
+        }
+        let Some((uses_fill, uses_stroke)) = text_show_lanes(mode) else {
+            self.refuse_open(op, EpochRefusalReason::TextShow);
+            return;
+        };
+        if uses_stroke {
+            self.consume(LaneSide::Stroking, op);
+        }
+        if uses_fill {
+            self.consume(LaneSide::Nonstroking, op);
+        }
+    }
+
     /// Mark the lane's live epoch as consumed, cross-checking that the post-op
     /// snapshot still carries the epoch's paired source state — alias
     /// identity, device family, AND the branch's pending source tuple (the
@@ -990,6 +1051,31 @@ impl<'a> AliasEpochPlan<'a> {
         if epoch.refusal.is_none() {
             epoch.refusal = Some((record_index, reason));
         }
+    }
+}
+
+/// Map a text rendering mode to `(uses_fill, uses_stroke)` lane consumption, or
+/// `None` when the mode value is not one of the interpreted 0-7 lanes.
+///
+/// Modes 4-7 remain paint's raw `Unsupported { value }` representation and are
+/// interpreted writer-locally only: 4/5/6 add clipping to 0/1/2's colour
+/// consumption, and 7 is clip-only. This adds no claim that `PressLint` models
+/// the accumulated clipping path (§9.3.6). Modes 3/7 consume neither lane.
+const fn text_show_lanes(mode: TextRenderingMode) -> Option<(bool, bool)> {
+    match mode {
+        TextRenderingMode::Fill | TextRenderingMode::Unsupported { value: 4 } => {
+            Some((true, false))
+        }
+        TextRenderingMode::Stroke | TextRenderingMode::Unsupported { value: 5 } => {
+            Some((false, true))
+        }
+        TextRenderingMode::FillThenStroke | TextRenderingMode::Unsupported { value: 6 } => {
+            Some((true, true))
+        }
+        TextRenderingMode::Invisible | TextRenderingMode::Unsupported { value: 7 } => {
+            Some((false, false))
+        }
+        TextRenderingMode::Unsupported { .. } => None,
     }
 }
 

@@ -51,7 +51,7 @@ use presslint_color_lcms::{ColorEngine, DeviceLinkSpace, LcmsColorEngine, LcmsEr
 use presslint_paint::{GraphicsStateSnapshot, PaintOpKind, PaintProgram};
 use presslint_pdf::{
     DictionaryValueKind, DocumentAccessError, IndirectObjectEditDisposition, IndirectRef,
-    PageXObjectResourcesInspection,
+    PageExtGStateResourcesInspection, PageFontResourcesInspection, PageXObjectResourcesInspection,
 };
 use presslint_selectors::Selector;
 use presslint_types::{ColorUsage, PageIndex};
@@ -62,15 +62,16 @@ use crate::{
     alias_epoch_plan::{AliasEpochOutcome, AliasEpochPlan, EpochStatus, LaneSide},
     black_preservation::{BlackPreservationPolicy, black_preservation_components},
     content_edit_pipeline::{
-        EditPageContentError, PageSelection, PageSequenceEdit, PipelinePageSkip,
-        PipelineSkipReason, edit_page_content_incremental_sequence,
+        EditPageContentError, PageSelection, PipelinePageSkip, PipelineSkipReason,
     },
+    content_sequence_pipeline::{PageSequenceEdit, edit_page_content_incremental_sequence},
     extgstate_page_guard::{extgstate_page_skip_reason, transparency_group_page_skip_reason},
     link_routing::{
         DeviceLinkInput, LinkConversionCounts, LinkRouting, RoutedLink, build_link_routing,
     },
     page_content_sequence::{LocalSplice, PageContentSequence},
     page_device_space_policy::{PageColorFacts, PageDeviceSpacePolicy},
+    page_font_policy::PageFontPolicy,
     page_xobject_policy::PageXObjectPolicy,
     pdf_number_serialize::serialize_color_component,
     selector_match::{
@@ -535,12 +536,14 @@ pub fn convert_content_colors_incremental(
             transparency_group_page_skip_reason(group_page)
                 .or_else(|| extgstate_page_skip_reason(extgstate_page, sequence))
         },
-        |page_index, sequence, facts, xobjects| {
+        |page_index, sequence, facts, xobjects, fonts, extgstates| {
             convert_sequence(
                 page_index,
                 sequence,
                 facts,
                 xobjects,
+                fonts,
+                extgstates,
                 &routing,
                 request.black_preservation,
                 target,
@@ -594,12 +597,14 @@ pub fn convert_content_colors_incremental(
 /// walks successfully. Occurrence plans without splices still participate in
 /// repeated-object reconciliation; metadata is published only after the caller
 /// stages and validates the complete page transaction.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn convert_sequence(
     page_index: PageIndex,
     sequence: &PageContentSequence,
     facts: &PageColorFacts<'_>,
     xobject_report: Option<&PageXObjectResourcesInspection>,
+    font_report: Option<&PageFontResourcesInspection>,
+    extgstate_report: Option<&PageExtGStateResourcesInspection>,
     routing: &LinkRouting,
     black_preservation: BlackPreservationPolicy,
     target: Option<&Selector>,
@@ -613,7 +618,22 @@ fn convert_sequence(
     // analysed page from the matched advisory report; a failed inspection or
     // identity join classifies every named `Do` as unknown, fail-closed.
     let xobject_policy = PageXObjectPolicy::new(xobject_report);
-    let program = PaintProgram::new(decoded, sequence.records(), policy.color_space_env());
+    // The page font policy maps the exact matched /Font and /ExtGState reports
+    // into the effective FontEnv/ExtGStateEnv views plus the corroborated
+    // ordinary-font admission set. A failed inspection or identity join makes
+    // the environment unknown and refuses TextShow, never skipping the page.
+    let font_policy = PageFontPolicy::new(font_report, extgstate_report);
+    // Switch to the all-environments walk so `Tf`/`gs` resolve into the
+    // effective font state that ordinary TextShow admission consumes. The seven
+    // ExtGState safety parameters stay neutral; the page preflight remains the
+    // controlling overprint/transparency gate.
+    let program = PaintProgram::with_all_envs(
+        decoded,
+        sequence.records(),
+        policy.color_space_env(),
+        font_policy.extgstate_env(),
+        font_policy.font_env(),
+    );
     // The alias-epoch plan observes EVERY walked op before the colour-only
     // branch below. It is the sole producer of the structural alias-setter
     // tallies (unchanged T177 per-setter meaning) and privately retains
@@ -622,6 +642,7 @@ fn convert_sequence(
         &policy,
         routing,
         &xobject_policy,
+        &font_policy,
         target,
         page_index,
         sequence,

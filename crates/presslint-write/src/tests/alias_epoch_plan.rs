@@ -25,6 +25,7 @@ use crate::content_color_convert::DeviceColorSpace;
 use crate::link_routing::{LinkRouting, build_link_routing};
 use crate::page_content_sequence::{OccurrenceInput, PageContentSequence};
 use crate::page_device_space_policy::{PageColorFacts, PageDeviceSpacePolicy};
+use crate::page_font_policy::PageFontPolicy;
 use crate::page_xobject_policy::PageXObjectPolicy;
 
 use super::content_color_convert::{
@@ -96,13 +97,28 @@ fn run_plan(
     target: Option<&Selector>,
     sequence: &PageContentSequence,
 ) -> Option<AliasEpochOutcome> {
-    let program = PaintProgram::new(
+    // The unknown-report font policy mirrors the converter's fail-closed font
+    // path for these device-alias fixtures: no `/Font` namespace resolves, so
+    // every `TextShow` refuses. Admitted-font behaviour lives in the dedicated
+    // `alias_epoch_font` matrix.
+    let fonts = PageFontPolicy::new(None, None);
+    let program = PaintProgram::with_all_envs(
         sequence.bytes(),
         sequence.records(),
         policy.color_space_env(),
+        fonts.extgstate_env(),
+        fonts.font_env(),
     );
     let xobjects = PageXObjectPolicy::new(None);
-    let mut plan = AliasEpochPlan::new(policy, routing, &xobjects, target, PageIndex(0), sequence);
+    let mut plan = AliasEpochPlan::new(
+        policy,
+        routing,
+        &xobjects,
+        &fonts,
+        target,
+        PageIndex(0),
+        sequence,
+    );
     let mut previous = Rc::new(GraphicsStateSnapshot::page_default());
     for op in program.ops() {
         let Ok(op) = op else {
@@ -590,6 +606,22 @@ fn conservative_boundaries_refuse_a_live_root_each_with_its_reason() {
         );
         // The structural tallies never change with epoch refusal.
         assert_eq!(outcome.eligible_setters, vec![1]);
+    }
+}
+
+#[test]
+fn unknown_font_text_show_refuses_under_every_render_mode() {
+    // With no /Font namespace the effective font is unknown/unadmitted, so a
+    // text show keeps the fail-closed TextShow refusal regardless of the Tr
+    // mode value — including the interpreted 0-7 lanes and an out-of-range 8.
+    for mode in 0..=8 {
+        let stream = format!("/GrayAlias cs 0.5 sc BT {mode} Tr (x) Tj ET f\n").into_bytes();
+        let outcome = run(&stream);
+        assert_eq!(
+            refusal(&outcome.epochs[0]),
+            Some(EpochRefusalReason::TextShow),
+            "mode {mode}"
+        );
     }
 }
 

@@ -12,12 +12,14 @@
 //! that have not adopted the per-stream model. The page-aware and re-encode
 //! callers drive [`StreamMode::MultiStream`] and edit every stream object.
 //!
-//! Raw byte callbacks retain their historical per-stream contract. The direct
-//! converter uses a separate private page transaction: unique physical objects
-//! decode once, exact occurrence bytes form one logical sequence, and all
-//! physical rewrites publish only after global post-edit validation.
+//! Raw byte callbacks retain their historical per-stream contract. The logical
+//! page-sequence transaction — unique physical objects decode once, exact
+//! occurrence bytes form one logical sequence, and all physical rewrites publish
+//! only after global post-edit validation — now lives in
+//! [`crate::content_sequence_pipeline`], which reuses the shared write/encode
+//! helpers exposed here.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use presslint_actions::{
     IncrementalRevisionPlan, MutationBoundary, PlannedDirtyObject, PlannedValueProvenance,
@@ -25,19 +27,10 @@ use presslint_actions::{
 use presslint_pdf::{
     ContentStreamDataExtentInspection, ContentStreamFilterClassification, DictionaryEntrySpan,
     DictionaryValueKind, DocumentAccessBackend, DocumentAccessError, DocumentAccessRejection,
-    DocumentPageExtGStateResourcesInspection, DocumentPageExtGStateResourcesInspectionError,
-    DocumentPageTransparencyGroupsInspection, DocumentPageTransparencyGroupsInspectionError,
-    DocumentPageXObjectResourcesInspection, FlateDecodeParameters, FlateDecodeParametersResolution,
-    IndirectObjectEditDecision, IndirectObjectEditDisposition, IndirectRef, ObjectLookup,
-    PageExtGStateResourcesInspection, PageTransparencyGroupInspection,
-    PageXObjectResourcesInspection, classify_content_stream_filter, content_stream_data_slice,
-    decode_flate_stream, encode_flate_stream, inspect_document_access,
-    inspect_document_page_color_space_resources_with_lookup,
-    inspect_document_page_content_extents_with_lookup,
-    inspect_document_page_default_color_spaces_with_lookup,
-    inspect_document_page_extgstate_resources_with_lookup,
-    inspect_document_page_transparency_groups_with_lookup,
-    inspect_document_page_xobject_resources_with_lookup, inspect_indirect_object_dictionary,
+    FlateDecodeParameters, FlateDecodeParametersResolution, IndirectObjectEditDecision,
+    IndirectObjectEditDisposition, IndirectRef, ObjectLookup, classify_content_stream_filter,
+    content_stream_data_slice, decode_flate_stream, encode_flate_stream, inspect_document_access,
+    inspect_document_page_content_extents_with_lookup, inspect_indirect_object_dictionary,
     inspect_object_consumer_index, resolve_flate_decode_parameters,
 };
 use presslint_syntax::{serialize_tokens_unmodified, tokenize};
@@ -51,16 +44,15 @@ use crate::{
         LocatedContentStream, PageStreamsPlan, StreamMode, StreamOutcome, page_index_of,
         plan_page_streams,
     },
-    page_content_sequence::{OccurrenceInput, PageContentSequence, PhysicalObjectPlan},
-    page_device_space_policy::{PageColorFacts, PageColorFactsIndex},
     stream_object_body::build_stream_object_body,
     write_incremental_revision, write_incremental_revision_plan,
 };
 
 const LENGTH_KEY: &[u8] = b"/Length";
 
-/// Upper bound on decoded and re-encoded content-stream buffers.
-const MAX_CONTENT_STREAM_BYTES: usize = 64 * 1024 * 1024;
+/// Upper bound on decoded and re-encoded content-stream buffers. Shared with the
+/// logical page-sequence pipeline in [`crate::content_sequence_pipeline`].
+pub const MAX_CONTENT_STREAM_BYTES: usize = 64 * 1024 * 1024;
 
 /// Which pages a content-stream edit should visit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,518 +231,6 @@ where
     edit_page_content_incremental_indexed_inner(input, pages, mode, &StreamEditCallback::Raw(&edit))
 }
 
-/// Converter-private result for one fully analysed logical page.
-pub struct PageSequenceEdit<T> {
-    pub plans: Vec<PhysicalObjectPlan>,
-    pub metadata: T,
-}
-
-/// Converter-private page transaction output. Metadata is published only for
-/// pages whose complete physical staging succeeded.
-pub struct PageSequenceOutput<T> {
-    pub bytes: Vec<u8>,
-    pub pages: Vec<T>,
-    pub skipped: Vec<PipelinePageSkip>,
-}
-
-struct PreparedSequenceObject<'a> {
-    located: &'a LocatedContentStream<'a>,
-    decoded: Vec<u8>,
-    filter: PipelineFilterKind,
-    length_value_range: ByteRange,
-    dictionary_open: usize,
-    dictionary_end: usize,
-    occurrences: usize,
-    decision: IndirectObjectEditDecision,
-}
-
-/// Decode, analyse, validate, encode, and publish each selected page atomically
-/// in exact logical `/Contents` order.
-///
-/// The edit closure additionally receives the page's advisory colour facts:
-/// the page `/Resources /ColorSpace` and `/Default*` structural inspections
-/// run ONCE per request through the same object lookup, and each report is
-/// matched to the content page by EXACT leaf page reference (corroborated by
-/// object offset and ordinal), never by compacted report vector position. A
-/// failed inspection or a failed match degrades to unknown facts and never
-/// skips the page.
-///
-/// The page `/Resources /XObject` structural inspection also runs ONCE per
-/// request and is delivered as a SEPARATE callback fact (never folded into
-/// [`PageColorFacts`]): the exact identity-matched
-/// [`PageXObjectResourcesInspection`] of the page, or `None` when the
-/// inspection failed or the page-identity join (reference plus offset/ordinal
-/// corroboration, duplicate references poisoned) did not match. A `None` fact
-/// degrades the callback's `XObject` knowledge, never the page itself.
-#[allow(clippy::too_many_lines)]
-pub fn edit_page_content_incremental_sequence<T, P, F>(
-    input: &[u8],
-    pages: &PageSelection,
-    preflight: P,
-    edit: F,
-) -> Result<PageSequenceOutput<T>, EditPageContentError>
-where
-    P: Fn(
-        PageIndex,
-        Option<&PageExtGStateResourcesInspection>,
-        Option<&PageTransparencyGroupInspection>,
-        &PageContentSequence,
-    ) -> Option<PipelineSkipReason>,
-    F: Fn(
-        PageIndex,
-        &PageContentSequence,
-        &PageColorFacts<'_>,
-        Option<&PageXObjectResourcesInspection>,
-    ) -> Option<PageSequenceEdit<T>>,
-{
-    let access = inspect_document_access(input).map_err(|error| EditPageContentError::Open {
-        error: Box::new(error),
-    })?;
-    let lookup = lookup_from_backend(&access.backend);
-    let document = inspect_document_page_content_extents_with_lookup(
-        input,
-        lookup,
-        access.page_tree_root.object_byte_offset,
-    )
-    .map_err(|error| EditPageContentError::Open {
-        error: Box::new(DocumentAccessError {
-            byte_len: input.len(),
-            reason: DocumentAccessRejection::PageTreeLeaves { error: error.error },
-        }),
-    })?;
-    let selected = select_indices(pages, document.pages.len())?;
-    let ownership = ContentObjectOwnershipIndex::new(
-        &document.pages,
-        inspect_object_consumer_index(input, &access),
-    );
-    let extgstate_document = inspect_extgstate_document_for_preflight(
-        input,
-        lookup,
-        access.page_tree_root.object_byte_offset,
-        true,
-    );
-    let group_document = inspect_transparency_group_document_for_preflight(
-        input,
-        lookup,
-        access.page_tree_root.object_byte_offset,
-        true,
-    );
-    // Advisory colour facts: both structural inspections run ONCE per request
-    // through the already-open lookup; a failed inspection degrades to unknown
-    // facts for every page rather than a new pipeline skip.
-    let color_space_document = inspect_document_page_color_space_resources_with_lookup(
-        input,
-        lookup,
-        access.page_tree_root.object_byte_offset,
-    )
-    .ok();
-    let default_document = inspect_document_page_default_color_spaces_with_lookup(
-        input,
-        lookup,
-        access.page_tree_root.object_byte_offset,
-    )
-    .ok();
-    let facts_index =
-        PageColorFactsIndex::new(color_space_document.as_ref(), default_document.as_ref());
-    // Advisory page-XObject facts: ONE bounded shallow document inspection per
-    // request; a failure degrades every page to a `None` fact, never a skip.
-    let xobject_document = inspect_document_page_xobject_resources_with_lookup(
-        input,
-        lookup,
-        access.page_tree_root.object_byte_offset,
-    )
-    .ok();
-    let xobject_index = PageXObjectReportIndex::new(xobject_document.as_ref());
-    let mut published = Vec::new();
-    let mut skipped = Vec::new();
-    let mut dirty_objects = Vec::new();
-
-    for index in selected {
-        let page = &document.pages[index];
-        let page_index = page_index_of(page);
-        let outcomes = match plan_page_streams(page, StreamMode::LogicalSequence) {
-            PageStreamsPlan::Streams(outcomes) => outcomes,
-            PageStreamsPlan::PageSkip {
-                content_object,
-                reason,
-            } => {
-                skipped.push(PipelinePageSkip {
-                    page_index,
-                    stream_ordinal: 0,
-                    content_object,
-                    reason,
-                });
-                continue;
-            }
-        };
-
-        let mut prepared = Vec::new();
-        let mut object_indexes: BTreeMap<IndirectRef, usize> = BTreeMap::new();
-        let mut occurrence_indexes = Vec::with_capacity(outcomes.len());
-        let mut failure = None;
-        for outcome in &outcomes {
-            let StreamOutcome::Located(located) = outcome else {
-                if let StreamOutcome::Skip { reason, .. } = outcome {
-                    failure = Some(*reason);
-                }
-                break;
-            };
-            if let Some(object_index) = object_indexes.get(&located.content_object) {
-                occurrence_indexes.push(*object_index);
-                continue;
-            }
-            match prepare_sequence_object(input, located, &ownership) {
-                Ok(object) => {
-                    let object_index = prepared.len();
-                    object_indexes.insert(located.content_object, object_index);
-                    occurrence_indexes.push(object_index);
-                    prepared.push(object);
-                }
-                Err(reason) => {
-                    failure = Some(reason);
-                    break;
-                }
-            }
-        }
-        if let Some(reason) = failure {
-            skipped.push(whole_page_skip(page_index, reason));
-            continue;
-        }
-
-        let inputs: Vec<_> = outcomes
-            .iter()
-            .zip(&occurrence_indexes)
-            .filter_map(|(outcome, object_index)| {
-                let StreamOutcome::Located(located) = outcome else {
-                    return None;
-                };
-                let object = &prepared[*object_index];
-                Some(OccurrenceInput {
-                    stream_ordinal: located.stream_ordinal,
-                    content_object: located.content_object,
-                    decoded: &object.decoded,
-                    disposition: object.decision.disposition,
-                })
-            })
-            .collect();
-        let Some(sequence) = PageContentSequence::new(&inputs, MAX_CONTENT_STREAM_BYTES) else {
-            skipped.push(whole_page_skip(
-                page_index,
-                PipelineSkipReason::ContentRoundTripMismatch,
-            ));
-            continue;
-        };
-        let extgstate_page = match extgstate_page_for_preflight(&extgstate_document, index) {
-            Ok(value) => value,
-            Err(reason) => {
-                skipped.push(whole_page_skip(page_index, reason));
-                continue;
-            }
-        };
-        let group_page = match transparency_group_page_for_preflight(&group_document, index) {
-            Ok(value) => value,
-            Err(reason) => {
-                skipped.push(whole_page_skip(page_index, reason));
-                continue;
-            }
-        };
-        if let Some(reason) = preflight(page_index, extgstate_page, group_page, &sequence) {
-            skipped.push(whole_page_skip(page_index, reason));
-            continue;
-        }
-        let facts = facts_index.facts_for(
-            page.leaf.reference,
-            page.leaf.object_byte_offset,
-            page.ordinal,
-        );
-        let xobject_page = xobject_index.matched(
-            page.leaf.reference,
-            page.leaf.object_byte_offset,
-            page.ordinal,
-        );
-        let Some(page_edit) = edit(page_index, &sequence, &facts, xobject_page) else {
-            skipped.push(whole_page_skip(
-                page_index,
-                PipelineSkipReason::ContentRoundTripMismatch,
-            ));
-            continue;
-        };
-
-        let mut edited_by_object = BTreeMap::new();
-        let mut stage_failed = false;
-        for plan in &page_edit.plans {
-            let Some(object_index) = object_indexes.get(&plan.content_object).copied() else {
-                stage_failed = true;
-                break;
-            };
-            let object = &prepared[object_index];
-            if object.decision.disposition != IndirectObjectEditDisposition::InPlaceMutation
-                && !plan.splices.is_empty()
-            {
-                stage_failed = true;
-                break;
-            }
-            if plan.splices.is_empty() {
-                continue;
-            }
-            let mut decoded = object.decoded.clone();
-            for splice in plan.splices.iter().rev() {
-                if splice.range.end > decoded.len() {
-                    stage_failed = true;
-                    break;
-                }
-                decoded.splice(
-                    splice.range.start..splice.range.end,
-                    splice.replacement.iter().copied(),
-                );
-            }
-            edited_by_object.insert(plan.content_object, decoded);
-        }
-        let decoded_by_object: BTreeMap<_, _> = prepared
-            .iter()
-            .map(|object| {
-                let content_object = object.located.content_object;
-                let decoded = edited_by_object
-                    .get(&content_object)
-                    .map_or(object.decoded.as_slice(), Vec::as_slice);
-                (content_object, decoded)
-            })
-            .collect();
-        if stage_failed || !sequence.validate_edited(&decoded_by_object, MAX_CONTENT_STREAM_BYTES) {
-            skipped.push(whole_page_skip(
-                page_index,
-                PipelineSkipReason::ContentRoundTripMismatch,
-            ));
-            continue;
-        }
-        drop(decoded_by_object);
-        let mut staged_dirty = Vec::new();
-        for plan in &page_edit.plans {
-            if plan.splices.is_empty() {
-                continue;
-            }
-            let object = &prepared[object_indexes[&plan.content_object]];
-            let Some(decoded) = edited_by_object.remove(&plan.content_object) else {
-                stage_failed = true;
-                break;
-            };
-            let encoded = match object.filter {
-                PipelineFilterKind::Raw => decoded,
-                PipelineFilterKind::Flate => {
-                    let Ok(encoded) = encode_flate_stream(&decoded, MAX_CONTENT_STREAM_BYTES)
-                    else {
-                        stage_failed = true;
-                        break;
-                    };
-                    encoded
-                }
-            };
-            let body = build_stream_object_body(
-                input,
-                object.dictionary_open,
-                object.dictionary_end,
-                object.length_value_range,
-                &encoded,
-            );
-            staged_dirty.push(PlannedDirtyObject {
-                reference: plan.content_object,
-                boundaries: vec![whole_stream_boundary(
-                    plan.content_object,
-                    object.located.extent,
-                    &object.decision,
-                )],
-                body_bytes: body,
-            });
-        }
-        if stage_failed {
-            skipped.push(whole_page_skip(
-                page_index,
-                PipelineSkipReason::ContentRoundTripMismatch,
-            ));
-            continue;
-        }
-        for object in &prepared {
-            if object.decision.disposition != IndirectObjectEditDisposition::InPlaceMutation {
-                skipped.push(PipelinePageSkip {
-                    page_index,
-                    stream_ordinal: object.located.stream_ordinal,
-                    content_object: Some(object.located.content_object),
-                    reason: PipelineSkipReason::OwnershipNotInPlace {
-                        occurrences: object.occurrences,
-                        disposition: object.decision.disposition,
-                    },
-                });
-            }
-        }
-        dirty_objects.extend(staged_dirty);
-        published.push(page_edit.metadata);
-    }
-    merge_duplicate_dirty_objects(&mut dirty_objects);
-    let bytes = write_dirty_objects(input, dirty_objects)?;
-    Ok(PageSequenceOutput {
-        bytes,
-        pages: published,
-        skipped,
-    })
-}
-
-/// Request-local exact join from leaf page references to advisory page
-/// `XObject` reports.
-///
-/// Deliberately separate from [`PageColorFactsIndex`] (which stays a
-/// two-report colour join): the `XObject` fact travels as its own callback
-/// argument. Lookups are ordered (`BTreeMap`) by exact [`IndirectRef`]; a
-/// reference reported more than once is poisoned to a failed match, and every
-/// match is corroborated by page object byte offset and document ordinal.
-struct PageXObjectReportIndex<'a> {
-    slots: BTreeMap<IndirectRef, Option<&'a PageXObjectResourcesInspection>>,
-}
-
-impl<'a> PageXObjectReportIndex<'a> {
-    fn new(document: Option<&'a DocumentPageXObjectResourcesInspection>) -> Self {
-        let mut slots = BTreeMap::new();
-        if let Some(document) = document {
-            for page in &document.pages {
-                slots
-                    .entry(page.page_reference)
-                    .and_modify(|slot| *slot = None)
-                    .or_insert(Some(page));
-            }
-        }
-        Self { slots }
-    }
-
-    /// Resolve one uniquely matched, identity-corroborated report page; any
-    /// missing, duplicate, or inconsistent match is `None`, fail-closed.
-    fn matched(
-        &self,
-        reference: IndirectRef,
-        object_byte_offset: usize,
-        ordinal: usize,
-    ) -> Option<&'a PageXObjectResourcesInspection> {
-        let page = self.slots.get(&reference).copied().flatten()?;
-        (page.page_object_byte_offset == object_byte_offset && page.ordinal == ordinal)
-            .then_some(page)
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::items_after_test_module)]
-mod page_xobject_report_index_tests {
-    use super::*;
-
-    fn page(
-        ordinal: usize,
-        object_number: u32,
-        page_object_byte_offset: usize,
-    ) -> PageXObjectResourcesInspection {
-        PageXObjectResourcesInspection {
-            ordinal,
-            page_reference: IndirectRef {
-                object_number,
-                generation: 0,
-            },
-            page_object_byte_offset,
-            image_xobjects: Vec::new(),
-            form_xobjects: Vec::new(),
-            image_xobject_names: Vec::new(),
-            form_xobject_names: Vec::new(),
-            skipped: Vec::new(),
-        }
-    }
-
-    fn document(
-        pages: Vec<PageXObjectResourcesInspection>,
-    ) -> DocumentPageXObjectResourcesInspection {
-        DocumentPageXObjectResourcesInspection {
-            byte_len: 500,
-            pages,
-            page_tree_skipped: Vec::new(),
-            visited_node_count: 1,
-            truncated: None,
-        }
-    }
-
-    #[test]
-    fn exact_reference_match_requires_offset_and_ordinal_corroboration() {
-        let document = document(vec![page(2, 7, 70)]);
-        let index = PageXObjectReportIndex::new(Some(&document));
-        let reference = IndirectRef {
-            object_number: 7,
-            generation: 0,
-        };
-
-        assert!(index.matched(reference, 70, 2).is_some());
-        assert!(index.matched(reference, 71, 2).is_none());
-        assert!(index.matched(reference, 70, 1).is_none());
-        assert!(
-            index
-                .matched(
-                    IndirectRef {
-                        object_number: 7,
-                        generation: 1,
-                    },
-                    70,
-                    2,
-                )
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn duplicate_page_references_and_missing_documents_are_poisoned() {
-        let document = document(vec![page(0, 3, 30), page(1, 3, 30)]);
-        let reference = IndirectRef {
-            object_number: 3,
-            generation: 0,
-        };
-
-        assert!(
-            PageXObjectReportIndex::new(Some(&document))
-                .matched(reference, 30, 0)
-                .is_none()
-        );
-        assert!(
-            PageXObjectReportIndex::new(None)
-                .matched(reference, 30, 0)
-                .is_none()
-        );
-    }
-}
-
-fn prepare_sequence_object<'a>(
-    input: &[u8],
-    located: &'a LocatedContentStream<'a>,
-    ownership: &ContentObjectOwnershipIndex,
-) -> Result<PreparedSequenceObject<'a>, PipelineSkipReason> {
-    let dictionary = inspect_indirect_object_dictionary(input, located.object_byte_offset)
-        .map_err(|_| PipelineSkipReason::NoContentStream)?;
-    let length_value_range = find_direct_length(input, &dictionary.entries)?;
-    let filter = classify_filter(input, located.object_byte_offset)?;
-    let stream_data = content_stream_data_slice(input, located.extent)
-        .map_err(|_| PipelineSkipReason::NoContentStream)?;
-    let decoded = match filter {
-        PipelineFilterKind::Raw => stream_data.to_vec(),
-        PipelineFilterKind::Flate => decode_flate_stream(
-            stream_data,
-            FlateDecodeParameters::default(),
-            MAX_CONTENT_STREAM_BYTES,
-        )
-        .map_err(|_| PipelineSkipReason::ContentRoundTripMismatch)?,
-    };
-    let (occurrences, decision) = ownership.decide(located.content_object);
-    Ok(PreparedSequenceObject {
-        located,
-        decoded,
-        filter,
-        length_value_range,
-        dictionary_open: dictionary.dictionary_open_byte_offset,
-        dictionary_end: dictionary.after_dictionary_close_byte_offset,
-        occurrences,
-        decision,
-    })
-}
-
 fn edit_page_content_incremental_indexed_inner(
     input: &[u8],
     pages: &PageSelection,
@@ -841,7 +321,7 @@ fn edit_page_content_incremental_indexed_inner(
     })
 }
 
-fn write_dirty_objects(
+pub fn write_dirty_objects(
     input: &[u8],
     dirty_objects: Vec<PlannedDirtyObject>,
 ) -> Result<Vec<u8>, EditPageContentError> {
@@ -858,86 +338,7 @@ fn write_dirty_objects(
     })
 }
 
-type ExtGStateDocumentPreflight = Option<
-    Result<DocumentPageExtGStateResourcesInspection, DocumentPageExtGStateResourcesInspectionError>,
->;
-
-type TransparencyGroupDocumentPreflight = Option<
-    Result<DocumentPageTransparencyGroupsInspection, DocumentPageTransparencyGroupsInspectionError>,
->;
-
-fn inspect_extgstate_document_for_preflight(
-    input: &[u8],
-    lookup: ObjectLookup<'_>,
-    root_node_object_offset: usize,
-    enabled: bool,
-) -> ExtGStateDocumentPreflight {
-    enabled.then(|| {
-        inspect_document_page_extgstate_resources_with_lookup(
-            input,
-            lookup,
-            root_node_object_offset,
-        )
-    })
-}
-
-fn extgstate_page_for_preflight(
-    document: &ExtGStateDocumentPreflight,
-    index: usize,
-) -> Result<Option<&PageExtGStateResourcesInspection>, PipelineSkipReason> {
-    match document {
-        Some(Ok(document)) => Ok(document.pages.get(index)),
-        Some(Err(_)) => Err(PipelineSkipReason::ExtGStateUnsafe {
-            overprint: false,
-            transparency: false,
-            unresolved: true,
-            unclassified: true,
-            gs_count: 0,
-        }),
-        None => Ok(None),
-    }
-}
-
-fn inspect_transparency_group_document_for_preflight(
-    input: &[u8],
-    lookup: ObjectLookup<'_>,
-    root_node_object_offset: usize,
-    enabled: bool,
-) -> TransparencyGroupDocumentPreflight {
-    enabled.then(|| {
-        inspect_document_page_transparency_groups_with_lookup(
-            input,
-            lookup,
-            root_node_object_offset,
-        )
-    })
-}
-
-fn transparency_group_page_for_preflight(
-    document: &TransparencyGroupDocumentPreflight,
-    index: usize,
-) -> Result<Option<&PageTransparencyGroupInspection>, PipelineSkipReason> {
-    match document {
-        Some(Ok(document)) => Ok(document.pages.get(index)),
-        Some(Err(_)) => Err(PipelineSkipReason::TransparencyGroupUnsafe {
-            transparency: false,
-            unresolved: true,
-            unclassified: true,
-        }),
-        None => Ok(None),
-    }
-}
-
-const fn whole_page_skip(page_index: PageIndex, reason: PipelineSkipReason) -> PipelinePageSkip {
-    PipelinePageSkip {
-        page_index,
-        stream_ordinal: 0,
-        content_object: None,
-        reason,
-    }
-}
-
-const fn lookup_from_backend(backend: &DocumentAccessBackend) -> ObjectLookup<'_> {
+pub const fn lookup_from_backend(backend: &DocumentAccessBackend) -> ObjectLookup<'_> {
     match backend {
         DocumentAccessBackend::ClassicXref { xref_table, .. } => {
             ObjectLookup::ClassicXref(xref_table)
@@ -950,7 +351,7 @@ const fn lookup_from_backend(backend: &DocumentAccessBackend) -> ObjectLookup<'_
     }
 }
 
-fn select_indices(
+pub fn select_indices(
     pages: &PageSelection,
     page_count: usize,
 ) -> Result<Vec<usize>, EditPageContentError> {
@@ -981,7 +382,7 @@ fn select_indices(
 
 /// Drop dirty objects that repeat an object number already planned, keeping the
 /// first. Same-object edits are identical, so this is a merge, not a loss.
-fn merge_duplicate_dirty_objects(dirty_objects: &mut Vec<PlannedDirtyObject>) {
+pub fn merge_duplicate_dirty_objects(dirty_objects: &mut Vec<PlannedDirtyObject>) {
     let mut seen: BTreeSet<u32> = BTreeSet::new();
     dirty_objects.retain(|dirty| seen.insert(dirty.reference.object_number));
 }
@@ -1073,7 +474,7 @@ fn plan_stream(
     }
 }
 
-fn find_direct_length(
+pub fn find_direct_length(
     input: &[u8],
     entries: &[DictionaryEntrySpan],
 ) -> Result<ByteRange, PipelineSkipReason> {
@@ -1097,7 +498,7 @@ fn find_direct_length(
     }
 }
 
-fn classify_filter(
+pub fn classify_filter(
     input: &[u8],
     object_byte_offset: usize,
 ) -> Result<PipelineFilterKind, PipelineSkipReason> {
@@ -1187,7 +588,7 @@ fn require_round_trip(decoded: &[u8]) -> Result<(), PipelineSkipReason> {
     }
 }
 
-fn whole_stream_boundary(
+pub fn whole_stream_boundary(
     content_object: IndirectRef,
     extent: &ContentStreamDataExtentInspection,
     ownership: &IndirectObjectEditDecision,

@@ -158,7 +158,13 @@ fn semantic_key(raw_name: &[u8]) -> Vec<u8> {
 /// Decode PDF name `#xx` escapes (ISO 32000-1 §7.3.5). `None` for a malformed
 /// escape: a bare trailing `#`, a non-hex digit, or `#00` (NUL is not
 /// permitted in a name).
-fn decode_pdf_name(raw: &[u8]) -> Option<Cow<'_, [u8]>> {
+///
+/// This bounded writer-local decoder is shared crate-wide (the `ExtGState`
+/// safety preflight and the page font policy reuse it for decoded-name
+/// equality); its XObject-policy behaviour is unchanged. Unescaped names use
+/// the borrowed fast path; an escaped name allocates at most one bounded
+/// name-length buffer.
+pub fn decode_pdf_name(raw: &[u8]) -> Option<Cow<'_, [u8]>> {
     if !raw.contains(&b'#') {
         return Some(Cow::Borrowed(raw));
     }

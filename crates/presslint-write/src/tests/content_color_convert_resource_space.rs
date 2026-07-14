@@ -420,11 +420,14 @@ fn ownership_vetoed_alias_selection_still_feeds_a_private_setter() {
 
 #[test]
 fn form_and_other_conservative_boundaries_keep_counts_bytes_and_direct_conversion() {
-    // Text showing, Form invocation, compatibility sections, and unknown
-    // operators refuse only the PRIVATE alias epoch: the structural setter
-    // counts, every alias byte, and the neighbouring direct shortcut
-    // conversion are all unchanged. Ordinary images and valid stencils have
-    // narrower effects covered by the focused XObject matrix.
+    // This page declares NO /Font namespace, so the `Tj` runs under an Unset
+    // font (unknown/unadmitted) and keeps the fail-closed TextShow refusal;
+    // Form invocation, compatibility sections, and unknown operators refuse the
+    // same PRIVATE alias epoch. The structural setter counts, every alias byte,
+    // and the neighbouring direct shortcut conversion are all unchanged.
+    // Ordinary-font text conversion and the Type3 boundary are locked by the
+    // dedicated tests below; ordinary images and valid stencils live in the
+    // focused XObject matrix.
     let stream = b"/GrayAlias cs 0.5 sc BT (x) Tj ET /Fm Do BX EX XY 1 0 0 rg\n";
     let input = assemble_classic(&[
         CATALOG.to_vec(),
@@ -447,6 +450,63 @@ fn form_and_other_conservative_boundaries_keep_counts_bytes_and_direct_conversio
     assert!(contains(&decoded, b"/GrayAlias cs 0.5 sc"));
     assert!(contains(&decoded, b"BT (x) Tj ET /Fm Do BX EX XY"));
     assert!(!contains(&decoded, b" rg"));
+}
+
+/// A page carrying an ordinary indirect font in `/Resources /Font`, plus the
+/// device-alias colour spaces, over one content stream and one font object.
+fn resource_font_pdf(stream: &[u8], font_body: &[u8]) -> Vec<u8> {
+    assemble_classic(&[
+        CATALOG.to_vec(),
+        PAGES.to_vec(),
+        resource_page_body(
+            "4 0 R",
+            "<< /ColorSpace << /GrayAlias /DeviceGray >> /Font << /F1 5 0 R >> >>",
+        ),
+        stream_body("", stream),
+        font_body.to_vec(),
+    ])
+}
+
+#[test]
+fn ordinary_font_text_show_converts_the_alias_and_keeps_text_bytes_verbatim() {
+    // An admitted Type1 font makes the fill text show a colour consumer, so the
+    // alias epoch closes and its records convert while the text bytes stay
+    // byte-identical.
+    let stream = b"/GrayAlias cs 0.5 sc BT /F1 12 Tf (x) Tj ET\n";
+    let input = resource_font_pdf(
+        stream,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    );
+    let output = convert(&input, GRAY_TO_GRAY_LINK);
+
+    let page = &output.converted[0];
+    assert_eq!(page.resource_alias_setters_eligible, 1);
+    assert_eq!(page.resource_alias_candidates_converted, 2);
+    assert_eq!(page.resource_alias_candidates_refused, 0);
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    let decoded = page_decoded_stream(&output.bytes, false);
+    assert!(!contains(&decoded, b"Alias"));
+    assert!(contains(&decoded, b"BT /F1 12 Tf (x) Tj ET"));
+}
+
+#[test]
+fn type3_font_text_show_refuses_and_holds_alias_bytes_verbatim() {
+    // Type3 glyph programs inherit graphics state, so a Type3 current font is
+    // never admitted: the epoch refuses and every alias byte stays verbatim.
+    let stream = b"/GrayAlias cs 0.5 sc BT /F1 12 Tf (x) Tj ET\n";
+    let input = resource_font_pdf(
+        stream,
+        b"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1 1] >>",
+    );
+    let output = convert(&input, GRAY_TO_GRAY_LINK);
+
+    let page = &output.converted[0];
+    assert_eq!(page.resource_alias_setters_eligible, 1);
+    assert_eq!(page.resource_alias_candidates_converted, 0);
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    let decoded = page_decoded_stream(&output.bytes, false);
+    assert!(contains(&decoded, b"/GrayAlias cs 0.5 sc"));
+    assert!(contains(&decoded, b"BT /F1 12 Tf (x) Tj ET"));
 }
 
 #[test]

@@ -2,6 +2,110 @@
 
 Earlier entries are preserved in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T186 - Page font policy and ordinary TextShow alias admission
+
+### Mechanical split
+
+The logical page-sequence pipeline moved from `content_edit_pipeline.rs` into a
+new `content_sequence_pipeline.rs` with no behaviour change: `PageSequenceEdit`,
+`PageSequenceOutput`, `PreparedSequenceObject`,
+`edit_page_content_incremental_sequence`, the advisory report-index logic and
+tests, sequence-object preparation, and the sequence-only advisory joins all
+moved. The raw/indexed per-stream pipeline and the low-level write/encode
+helpers stayed in the source module and are reused behind the smallest `pub`
+seams in the private module (`select_indices`, `lookup_from_backend`,
+`write_dirty_objects`, `merge_duplicate_dirty_objects`, `find_direct_length`,
+`classify_filter`, `whole_stream_boundary`, `MAX_CONTENT_STREAM_BYTES`). The
+three per-report indexes collapsed into one generic `PageReportIndex` over a
+small `PageIdentityReport` trait; the exact XObject join behaviour is unchanged.
+Post-ablation split sizes: source 607, destination 666, both well under the
+gate. The destination no longer carries disabled preflight states that its only
+entry point cannot construct, and the shared report-identity trait exposes one
+exact identity tuple rather than three repeated accessors.
+
+### One policy, one authority boundary
+
+The single new abstraction is the private `PageFontPolicy`. It maps the exact
+identity-matched page `/Font` and `/ExtGState` reports once into borrowed
+`FontEnv`/`ExtGStateEnv` views plus an independently corroborated ordinary-font
+admitted set keyed by `(object number, generation, reached object offset)`. The
+page report is joined by full page identity (ordinal, leaf reference, page
+object byte offset); a missing, duplicate, mismatched, or malformed report is
+unknown/refusal, never a vector-index guess. Named `Tf` bindings represent every
+selectable root exactly as the environment permits (Type3 included), but the
+admitted set contains only exact indirect Type1/MMType1/TrueType/Type0
+identities. Repeated safe facts converge; any safe/unsafe/conflicting fact for
+one tuple (Type3, CID descendant, inadmissible target, non-`/Font` type) poisons
+it fail-closed. The admitted-set check is corroboration only: it queries no
+object lookup, reopens no font body, and reclassifies nothing. Content
+ownership, sequence localization, root closure, and the page transaction remain
+the only mutation authority. A failed font inspection is advisory — it makes the
+policy unknown and refuses TextShow but adds no page-skip reason.
+
+### All-environments walk and the Tr 0-7 truth table
+
+The converter now builds the single logical-page walk with
+`PaintProgram::with_all_envs`, feeding the policy's `ExtGStateEnv` (neutral seven
+parameters, mapped `/Font` directive) and `FontEnv`. `AliasEpochPlan` requires a
+`ResolvedIndirect` snapshot admitted by the policy before treating any of the
+four text-show operators as a colour consumer, then consumes lanes by render
+mode: `0`/`4` nonstroking, `1`/`5` stroking, `2`/`6` both, `3`/`7` neither (no
+consumer, no splice). Modes 4-7 stay paint's raw `Unsupported { value }` and are
+interpreted writer-locally only; every other unsupported value refuses. An
+unadmitted font (Type3, CID, direct-without-identity, stale/missing tuple,
+raw/unset/indeterminate) keeps the existing `TextShow` refusal, because a
+non-ordinary current font may execute glyph programs that paint. TextShow is a
+consumer only and is never spliced.
+
+### ExtGState semantic-name correction
+
+The writer-local `gs` safety preflight now decodes the operand and the
+classified/skipped resource names before comparison, requiring exactly one
+classified semantic match and no matching skip. `/GS1` and `/GS#31` are the same
+name, so an ambiguous duplicate, a matching skip, or a malformed operand fails
+closed instead of first-winning a raw sibling. The policy applies the same
+collision poisoning to the mapped `ExtGState` font directives. `presslint-pdf`
+and `presslint-paint` are unchanged. A strictly undecodable classified or
+skipped name retains its literal spelling as a poison key only when those bytes
+equal the decoded operand; this covers permissive-reader ambiguity without
+globally poisoning unrelated malformed declarations. A unique declaration
+whose operand and declaration use different raw spellings passes the hardened
+guard but misses paint's raw lookup, clearing font certainty — the deliberate
+safe false-negative `Indeterminate` boundary.
+
+### Review corrections (incomplete-coverage poisoning)
+
+Two fail-closed gaps closed after review. First, the `gs` safety preflight only
+consulted structural skips that carried a resource name; a namespace-level
+(nameless) skip such as a duplicated `/ExtGState` key or a `/Resources`
+inheritance diagnostic left the classified set partial while a `gs` naming a
+surviving classified resource was still accepted. The preflight now treats a
+nameless skip beside any classified resource as incomplete coverage and fails
+closed as unclassified before matching; an empty classified set keeps its
+existing unresolved outcome, so the locked guard results are unchanged. Second,
+`PageFontPolicy` mapped its `ExtGState` `/Font` directives only from the
+classified resources and never consulted the report's skips, so a same-name skip
+left the surviving resource's directive as a positive `Select`. The policy now
+poisons every mapped directive implicated by a skip: a named skip poisons its
+decoded-semantic-name match, and a nameless skip poisons every mapped directive
+so any `gs` clears font certainty. Both are the same fail-closed rule the
+collision poisoning already applied, extended to the skip list; the policy
+computes each mapped resource's semantic key once for both checks. Coverage was
+also widened: all four text-show operators run under the full Tr 0-7 table,
+plus `gs` `LeaveUnchanged`/uncertain directives, `Tf`/`gs` last-writer-wins and
+convergence, `q`/`Q` restoration, `BT`/`ET` font persistence, an open-path
+invalid-context refusal, end-to-end mode 4/7 byte preservation, and the two new
+incomplete-coverage regression fixtures. The cross-stream test harness now gives
+each physical content stream a distinct indirect object.
+
+### Deferrals
+
+Type3 CharProc/`d0`/`d1`/resource/recursion semantics and writer admission,
+Form descent and Form-local fonts, ordinary Form `/Matrix`/`/BBox`/group resets,
+and a global `presslint-pdf`/`presslint-paint` semantic `ExtGState` operand
+change all remain out of scope. No public enum, report, serde, digest, identity,
+capability, action, selector, CLI, or skip-reason surface changed.
+
 ## Paint `SetFont` enum adoption
 
 `AliasEpochPlan` now handles semantic `SetFont` directly as colour-neutral text

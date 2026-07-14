@@ -6,6 +6,16 @@
 //! resources, and resources with only harmless unclassified keys such as `/LW`,
 //! do not block conversion.
 //!
+//! Resource matching is SEMANTIC (ISO 32000-1 §7.3.5): the `gs` operand and the
+//! classified/skipped resource names are decoded before comparison, so `/GS1`
+//! and `/GS#31` are one name. The safety resolution requires exactly one
+//! classified semantic match and no matching skip; multiple matches, a matching
+//! skip, and a malformed/undecodable operand all fail closed rather than
+//! first-winning a semantic duplicate. A strictly undecodable report name is a
+//! literal-spelling poison only when its raw bytes equal the decoded operand,
+//! matching permissive-reader ambiguity without poisoning unrelated names. Raw
+//! public report names are untouched.
+
 use presslint_pdf::{
     ClassifiedExtGStateResource, PageExtGStateResourcesInspection, PageTransparencyGroupInspection,
 };
@@ -13,6 +23,7 @@ use presslint_syntax::{Token, TokenKind};
 
 use crate::{
     content_edit_pipeline::PipelineSkipReason, page_content_sequence::PageContentSequence,
+    page_xobject_policy::decode_pdf_name,
 };
 
 const GS_OPERATOR: &[u8] = b"gs";
@@ -101,7 +112,13 @@ fn scan_sequence(
             continue;
         }
         flags.gs_count = flags.gs_count.saturating_add(1);
-        let Some(name) = gs_operand_name(&record.operands, decoded, tokens) else {
+        let Some(raw_name) = gs_operand_name(&record.operands, decoded, tokens) else {
+            flags.add(ExtGStateUnsafeFlags::UNCLASSIFIED);
+            continue;
+        };
+        // A malformed/undecodable operand can never be proven to name one
+        // classified resource; fail closed.
+        let Some(operand) = decode_pdf_name(raw_name) else {
             flags.add(ExtGStateUnsafeFlags::UNCLASSIFIED);
             continue;
         };
@@ -109,13 +126,31 @@ fn scan_sequence(
             flags.add(ExtGStateUnsafeFlags::UNCLASSIFIED);
             continue;
         };
-        if has_skipped_resource_name(page_resources, name) {
+        // Incomplete coverage: a namespace-level (nameless) structural skip
+        // means the classified set is not authoritative. When resources were
+        // still classified, a `gs` match cannot be trusted to be the whole
+        // story, so fail closed as unclassified rather than accept it. With an
+        // empty classified set the `gs` already falls through to the unresolved
+        // path below, so that outcome is left unchanged.
+        if has_incomplete_coverage(page_resources) {
             flags.add(ExtGStateUnsafeFlags::UNCLASSIFIED);
             continue;
         }
-        let Some(resource) = find_resource(page_resources, name) else {
-            flags.add(ExtGStateUnsafeFlags::UNRESOLVED);
+        if has_matching_skip(page_resources, &operand) {
+            flags.add(ExtGStateUnsafeFlags::UNCLASSIFIED);
             continue;
+        }
+        let resource = match unique_classified_match(page_resources, &operand) {
+            ResourceMatch::Unique(resource) => resource,
+            // Never first-win a semantic duplicate; ambiguity fails closed.
+            ResourceMatch::Multiple | ResourceMatch::LiteralPoison => {
+                flags.add(ExtGStateUnsafeFlags::UNCLASSIFIED);
+                continue;
+            }
+            ResourceMatch::None => {
+                flags.add(ExtGStateUnsafeFlags::UNRESOLVED);
+                continue;
+            }
         };
         if resource.is_overprint_active() {
             flags.add(ExtGStateUnsafeFlags::OVERPRINT);
@@ -147,23 +182,81 @@ fn gs_operand_name<'a>(
     token.source_bytes(decoded)?.strip_prefix(b"/")
 }
 
-fn has_skipped_resource_name(
-    page_resources: &PageExtGStateResourcesInspection,
-    name: &[u8],
-) -> bool {
+/// Result of matching a decoded `gs` operand against the classified resources.
+enum ResourceMatch<'a> {
+    /// No classified resource decodes to the operand's semantic name.
+    None,
+    /// Exactly one classified resource matches semantically.
+    Unique(&'a ClassifiedExtGStateResource),
+    /// Two or more classified resources decode to the same semantic name.
+    Multiple,
+    /// An undecodable classified name has the operand's decoded byte spelling.
+    LiteralPoison,
+}
+
+/// Relationship between one raw report name and a strictly decoded operand.
+enum ResourceNameMatch {
+    None,
+    Semantic,
+    LiteralPoison,
+}
+
+/// Compare one raw report name with a decoded operand. Strictly undecodable
+/// names retain their literal spelling as a bounded poison key: a permissive
+/// reader may treat the malformed `#` literally, so exact raw equality cannot
+/// be discarded or accepted as a safe classified match.
+fn resource_name_match(raw_name: &[u8], operand: &[u8]) -> ResourceNameMatch {
+    match decode_pdf_name(raw_name) {
+        Some(decoded) if decoded.as_ref() == operand => ResourceNameMatch::Semantic,
+        None if raw_name == operand => ResourceNameMatch::LiteralPoison,
+        Some(_) | None => ResourceNameMatch::None,
+    }
+}
+
+/// Whether the classified `ExtGState` set is authoritative but incomplete: at
+/// least one resource was classified while a namespace-level (nameless)
+/// structural skip proves the coverage is partial. A `gs` naming a classified
+/// resource then cannot be trusted, because the skip may hide a same-named
+/// unsafe sibling.
+fn has_incomplete_coverage(page_resources: &PageExtGStateResourcesInspection) -> bool {
+    !page_resources.extgstates.is_empty()
+        && page_resources
+            .skipped
+            .iter()
+            .any(|skip| skip.resource_name.is_none())
+}
+
+/// Whether any named structural skip semantically matches the operand. A
+/// matching skip is an unclassifiable collision and fails closed.
+fn has_matching_skip(page_resources: &PageExtGStateResourcesInspection, operand: &[u8]) -> bool {
     page_resources.skipped.iter().any(|skip| {
-        skip.resource_name
-            .as_ref()
-            .is_some_and(|resource_name| resource_name.0.as_slice() == name)
+        skip.resource_name.as_ref().is_some_and(|resource_name| {
+            !matches!(
+                resource_name_match(&resource_name.0, operand),
+                ResourceNameMatch::None
+            )
+        })
     })
 }
 
-fn find_resource<'a>(
+/// Require exactly one classified semantic match; two or more is an ambiguous
+/// duplicate that must never first-win.
+fn unique_classified_match<'a>(
     page_resources: &'a PageExtGStateResourcesInspection,
-    name: &[u8],
-) -> Option<&'a ClassifiedExtGStateResource> {
-    page_resources
-        .extgstates
-        .iter()
-        .find(|resource| resource.name.0.as_slice() == name)
+    operand: &[u8],
+) -> ResourceMatch<'a> {
+    let mut found: Option<&'a ClassifiedExtGStateResource> = None;
+    for resource in &page_resources.extgstates {
+        match resource_name_match(&resource.name.0, operand) {
+            ResourceNameMatch::None => {}
+            ResourceNameMatch::LiteralPoison => return ResourceMatch::LiteralPoison,
+            ResourceNameMatch::Semantic => {
+                if found.is_some() {
+                    return ResourceMatch::Multiple;
+                }
+                found = Some(resource);
+            }
+        }
+    }
+    found.map_or(ResourceMatch::None, ResourceMatch::Unique)
 }
