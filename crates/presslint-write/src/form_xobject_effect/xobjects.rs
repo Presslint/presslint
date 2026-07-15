@@ -2,7 +2,7 @@
 //! target corroboration.
 //!
 //! [`FormLocalXObjectAuthority`] is the ONE new private domain abstraction of
-//! the T189 slice. It is built at most once per analyzed root Form, and only
+//! the T189 slice. It is built at most once per analyzed Form compute, and only
 //! when a syntactically valid `Do` is actually present, from the Form's OWN
 //! `/Resources /XObject` — never page or caller fallback, never merged scopes.
 //! It answers exactly one question per raw `Do` operand spelling: what does
@@ -13,12 +13,14 @@
 //! `Some((target, effect))` is ONE unambiguous exact typed binding; a per-name
 //! `None` is collision/named-skip/uncertain-target poison; the namespace-wide
 //! poison flag makes no `Do` admissible at all. `/Subtype /Form` targets are
-//! RETAINED with their full target tuple so a later recursion slice can reuse
-//! this authority unchanged, but every invoked Form refuses here — and a Form
-//! tuple is retained as exact only after the SAME identity corroboration the
-//! Image path applies (reference/generation/reached-offset re-resolution, an
-//! exact reinspected dictionary header, and canonical semantically unique
-//! `/Subtype /Form`); an uncorroborated Form target is per-name poison.
+//! RETAINED with their full target tuple; the authority's single
+//! [`FormLocalXObjectAuthority::resolve`] returns that tuple with its effect so
+//! the parent analyzer's bounded recursion (T190) can descend at the invoking
+//! `Do`. A Form tuple is retained as exact only after the SAME identity
+//! corroboration the Image path applies (reference/generation/reached-offset
+//! re-resolution, an exact reinspected dictionary header, and canonical
+//! semantically unique `/Subtype /Form`); an uncorroborated Form target is
+//! per-name poison.
 //!
 //! Before any structural report fact is trusted, the Form's own `/Resources`
 //! and `/XObject` keys must be canonical and semantically unique in
@@ -36,9 +38,9 @@
 //! The authority retains no source bytes, dictionaries, streams, tokens,
 //! records, or image data — only owned decoded names, small target tuples, and
 //! the poison state — and it is dropped with the walk once the analyzed Form's
-//! two-bit effect is cached. Total classified targets plus skips are capped at
-//! 256 before the deterministic `BTreeMap` is populated; excess poisons the
-//! namespace. Image sample data is never read or decoded.
+//! depth-indexed effect is cached. Total classified targets plus skips are
+//! capped at 256 before the deterministic `BTreeMap` is populated; excess
+//! poisons the namespace. Image sample data is never read or decoded.
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
@@ -75,8 +77,8 @@ const STENCIL_GATE_KEYS: [&[u8]; 4] = [b"Width", b"Height", b"BitsPerComponent",
 pub(super) struct FormLocalXObjectAuthority {
     /// Decoded name -> one unambiguous exact typed binding (`Some`), or
     /// collision/named-skip/uncertain-target poison (`None`). Corroborated
-    /// Form bindings keep their exact target tuple for a later recursion
-    /// slice but refuse when invoked in this slice.
+    /// Form bindings keep their exact target tuple for the bounded nested
+    /// descent the parent analyzer runs at an invoking `Do`.
     targets: BTreeMap<Vec<u8>, Option<(PageXObjectResourceTarget, PageXObjectEffect)>>,
     /// Literal spellings of undecodable classified/skipped resource names. A
     /// valid operand decoding to one of these spellings can never be proven
@@ -109,13 +111,13 @@ impl FormLocalXObjectAuthority {
         let mut literal_poison = BTreeSet::new();
         let mut poison_all = false;
 
-        for (list, form_subtype) in [
-            (&inspection.image_xobjects, false),
-            (&inspection.form_xobjects, true),
+        for (targets_to_classify, form_subtype) in [
+            (inspection.image_xobjects, false),
+            (inspection.form_xobjects, true),
         ] {
-            for target in list {
+            for target in targets_to_classify {
                 let Some(decoded) = decode_pdf_name(&target.name.0) else {
-                    literal_poison.insert(target.name.0.clone());
+                    literal_poison.insert(target.name.0);
                     continue;
                 };
                 match targets.entry(decoded.into_owned()) {
@@ -128,19 +130,18 @@ impl FormLocalXObjectAuthority {
                     Entry::Vacant(slot) => {
                         let effect = if form_subtype {
                             // Corroborated exact Form targets are retained for
-                            // the later recursion slice; invoking one still
-                            // refuses.
-                            corroborate_retained_form(input, lookup, target)
+                            // the bounded nested descent at an invoking `Do`.
+                            corroborate_retained_form(input, lookup, &target)
                         } else {
-                            classify_invoked_image(input, lookup, target)
+                            classify_invoked_image(input, lookup, &target)
                         };
-                        slot.insert(effect.map(|effect| (target.clone(), effect)));
+                        slot.insert(effect.map(|effect| (target, effect)));
                     }
                 }
             }
         }
 
-        for skip in &inspection.skipped {
+        for skip in inspection.skipped {
             match skip.reason {
                 // A proven-absent `/Resources` or `/XObject` is not
                 // uncertainty (the canonical authority preflight corroborated
@@ -149,7 +150,7 @@ impl FormLocalXObjectAuthority {
                 | SkippedPageXObjectResourceReason::MissingXObject => continue,
                 _ => {}
             }
-            match &skip.resource_name {
+            match skip.resource_name {
                 None => poison_all = true,
                 Some(name) => match decode_pdf_name(&name.0) {
                     // A named skip always overrides a same-name classified
@@ -158,7 +159,7 @@ impl FormLocalXObjectAuthority {
                         targets.insert(decoded.into_owned(), None);
                     }
                     None => {
-                        literal_poison.insert(name.0.clone());
+                        literal_poison.insert(name.0);
                     }
                 },
             }
@@ -171,14 +172,20 @@ impl FormLocalXObjectAuthority {
         }
     }
 
-    /// Resolve one raw `Do` operand spelling to its proven colour effect.
+    /// Resolve one raw `Do` operand spelling to its unambiguous exact target
+    /// and proven colour effect with one decoded-name lookup.
     ///
     /// `None` is a fail-closed refusal: an undecodable operand, the poisoned
     /// namespace, a literal-poison collision, an unresolved name, or a
     /// per-name poisoned binding. A returned effect is only ever
     /// [`PageXObjectEffect::OrdinaryImage`], [`PageXObjectEffect::Stencil`],
-    /// or the retained [`PageXObjectEffect::Form`] the caller must refuse.
-    pub(super) fn resolve(&self, raw: &[u8]) -> Option<PageXObjectEffect> {
+    /// or [`PageXObjectEffect::Form`]. Form retention proved exact identity and
+    /// canonical semantically unique `/Subtype /Form`; the bounded recursion
+    /// re-runs the complete root admission on the returned tuple.
+    pub(super) fn resolve(
+        &self,
+        raw: &[u8],
+    ) -> Option<(&PageXObjectResourceTarget, PageXObjectEffect)> {
         if self.poison_all {
             return None;
         }
@@ -186,8 +193,8 @@ impl FormLocalXObjectAuthority {
         if self.literal_poison.contains(decoded.as_ref()) {
             return None;
         }
-        let (_, effect) = self.targets.get(decoded.as_ref())?.as_ref()?;
-        Some(*effect)
+        let (target, effect) = self.targets.get(decoded.as_ref())?.as_ref()?;
+        Some((target, *effect))
     }
 
     /// The namespace-poisoned authority: no `Do` is admissible.
@@ -249,10 +256,10 @@ fn classify_invoked_image(
 
 /// Corroborate one classified Form target's exact identity and canonical,
 /// semantically unique `/Subtype /Form` authority before its exact tuple is
-/// retained for the later recursion slice. `None` is an uncertain target that
-/// poisons only its own decoded name. A retained binding still refuses when
-/// invoked in this slice; deeper dictionary preflight remains the recursion
-/// slice's job at analysis time.
+/// retained for the bounded nested descent. `None` is an uncertain target that
+/// poisons only its own decoded name. The deeper dictionary preflight runs at
+/// analysis time, when the recursion enters the retained tuple through the
+/// complete root admission path.
 fn corroborate_retained_form(
     input: &[u8],
     lookup: ObjectLookup<'_>,

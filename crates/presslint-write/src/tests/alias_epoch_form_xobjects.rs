@@ -5,8 +5,10 @@
 //! (canonical-key proof, exact target corroboration, collision/named-skip/
 //! literal/nameless poisoning, the fact cap), the intrinsic ordinary-Image and
 //! stencil lane semantics over the seeded walk's live lanes, and the retained
-//! refusal envelope (nested Forms, substitution escapes, ambiguous stencil
-//! gates). Analyzer UNIT tests call [`FormXObjectEffectAnalyzer::analyze`] on a
+//! refusal envelope (substitution escapes, ambiguous stencil gates, nested
+//! Forms outside the T190 recursion's admission envelope; substantive nested
+//! recursion coverage lives in `alias_epoch_form_recursion.rs`). Analyzer UNIT
+//! tests call [`FormXObjectEffectAnalyzer::analyze`] on a
 //! real Form reached through the request `ObjectLookup`; the END-TO-END tests
 //! drive `convert_content_colors_incremental` to lock the page-only mutation,
 //! the unchanged Form/resource/image bytes, and the outer `Do` lane behaviour.
@@ -776,18 +778,28 @@ fn retained_form_targets_require_exact_identity_and_canonical_subtype() {
 }
 
 #[test]
-fn an_invoked_nested_form_refuses_but_uninvoked_targets_stay_isolated() {
+fn an_invoked_nested_form_proves_while_unsupported_and_uninvoked_targets_stay_isolated() {
+    // The bounded recursion now descends into the retained nested Form: its
+    // fill consumes the parent's still-live inherited nonstroking lane.
     let nested_form_do = [
         xform("/Fm 6 0 R /Im 7 0 R /Bad (x)", b"/Fm Do"),
         form("", b"0 0 m 1 1 l f"),
         image_object(""),
     ];
-    assert_eq!(analyze(&nested_form_do), None);
+    assert_eq!(analyze(&nested_form_do), Some([false, true]));
+    // A nested Form outside the admission envelope (a transparency `/Group`)
+    // still refuses the invoking parent fail-closed.
+    let refused_nested_do = [
+        xform("/Fm 6 0 R /Im 7 0 R /Bad (x)", b"/Fm Do"),
+        form(" /Group << /S /Transparency >>", b"0 0 m 1 1 l f"),
+        image_object(""),
+    ];
+    assert_eq!(analyze(&refused_nested_do), None);
     // The same declaration set with only the Image invoked: the retained Form
     // target and the named skip poison nothing else, and no Form descent runs.
     let image_do = [
         xform("/Fm 6 0 R /Im 7 0 R /Bad (x)", b"/Im Do"),
-        form("", b"0 0 m 1 1 l f"),
+        form(" /Group << /S /Transparency >>", b"0 0 m 1 1 l f"),
         image_object(""),
     ];
     assert_eq!(analyze(&image_do), Some([false, false]));
@@ -977,14 +989,15 @@ fn a_form_local_stencil_under_a_local_colour_leaves_the_page_root_live() {
 
 #[test]
 fn an_unsupported_invoked_target_retains_the_fail_closed_refusal_end_to_end() {
-    // The Form invokes a nested Form: its analysis stays Unknown, the outer
-    // `Do` keeps the historical refusal, and the page alias setter survives.
+    // The Form invokes a nested Form outside the admission envelope (a
+    // transparency `/Group`): its analysis stays Unknown, the outer `Do` keeps
+    // the fail-closed refusal, and the page alias setter survives.
     let form_object = xform("/Nested 6 0 R", b"/Nested Do");
-    let nested = form("", b"0 0 m 1 1 l f");
+    let refused_nested = form(" /Group << /S /Transparency >>", b"0 0 m 1 1 l f");
     let input = resource_pdf(
         b"/GrayAlias cs 0.5 sc /Fm Do\n",
         PAGE_RESOURCES,
-        &[form_object.clone(), nested.clone()],
+        &[form_object.clone(), refused_nested.clone()],
     );
     let output = convert_link(&input, GRAY_TO_GRAY_LINK);
     let page = &output.converted[0];
@@ -997,7 +1010,33 @@ fn an_unsupported_invoked_target_retains_the_fail_closed_refusal_end_to_end() {
         b"/GrayAlias cs 0.5 sc"
     ));
     assert!(contains(&output.bytes, &form_object));
-    assert!(contains(&output.bytes, &nested));
+    assert!(contains(&output.bytes, &refused_nested));
+    assert_eq!(occurrence_count(&output.bytes, b"5 0 obj"), 1);
+    assert_eq!(occurrence_count(&output.bytes, b"6 0 obj"), 1);
+    reopen(&output.bytes);
+
+    // The same invocation over an admissible nested Form now proves through
+    // the bounded recursion: the nested fill consumes the inherited
+    // nonstroking lane, the alias root closes, and only the existing page
+    // setter converts while every Form byte stays identical and unduplicated.
+    let proven_nested = form("", b"0 0 m 1 1 l f");
+    let input = resource_pdf(
+        b"/GrayAlias cs 0.5 sc /Fm Do\n",
+        PAGE_RESOURCES,
+        &[form_object.clone(), proven_nested.clone()],
+    );
+    let output = convert_link(&input, GRAY_TO_GRAY_LINK);
+    let page = &output.converted[0];
+
+    assert_eq!(page.resource_alias_candidates_converted, 2);
+    assert_eq!(page.resource_alias_candidates_refused, 0);
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    assert!(!contains(
+        &page_decoded_stream(&output.bytes, false),
+        b"GrayAlias"
+    ));
+    assert!(contains(&output.bytes, &form_object));
+    assert!(contains(&output.bytes, &proven_nested));
     assert_eq!(occurrence_count(&output.bytes, b"5 0 obj"), 1);
     assert_eq!(occurrence_count(&output.bytes, b"6 0 obj"), 1);
     reopen(&output.bytes);

@@ -2,6 +2,145 @@
 
 Earlier entries are preserved in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T190 - Bounded recursive nested ordinary Form colour-effect analysis
+
+### The depth-slot lattice and why it is intrinsically cacheable
+
+The analyzer now descends into invoked, retained, root-admissible nested
+ordinary Form XObjects. The ONE new domain abstraction is private
+`BoundedFormLaneEffects` (`form_xobject_effect/recurse.rs`): conceptually
+`[Option<FormLaneEffect>; MAX_NESTED_FORM_DEPTH + 1]`, with
+`MAX_NESTED_FORM_DEPTH = 8` counted in nested-Form `Do` EDGES (the root is not
+counted; a full-depth path holds nine form streams). Slot `d` is the
+two-bit/Unknown result with `d` edges remaining; slot 0 refuses every invoked
+nested Form while still admitting local colour, ordinary Images and stencils;
+the public `analyze` result is the maximum-depth slot, so the
+`Option<FormLaneEffect>` seam and everything downstream
+(`page_xobject_policy.rs`, `alias_epoch_plan.rs`) are unchanged.
+
+The lattice is what makes every cached outcome a PURE function of the form's
+own subtree: a single cached two-bit value cannot be both path-depth-aware and
+order-independent, and a transient never-cached depth refusal would make cache
+publication conditional (the bug class earlier turns caught) and re-charge
+decoded bytes on recompute. One walk computes every slot the traversal horizon
+lets it demand (graphics state is shared across slots — ISO 32000-1 §8.10.1
+restores state after every `Do` — so slots differ only at nested-Form folds),
+and publication stays unconditional post-compute. Because slot `d` demands
+child slots down `d` further edges, a frame entered deep on a path can only
+compute its low slots: the lattice therefore carries `computed_through`, the
+highest slot actually computed. Slots above it are UNCOMPUTED — held `None`,
+so they read fail-closed everywhere — never refused: a computed slot's value
+is final and pure, and a shallower re-entry only ever EXTENDS an entry. An
+intrinsic refusal (grammar, preflight, poisoned name, unsupported target or
+malformed authority), as well as an unaffordable first compute, refuses ALL
+slots and caches the complete all-Unknown lattice. `recurse.rs` owns only the
+lattice contract, the depth constant, the constructors, lane marking, the fold
+and the unavailable-descent refusal; resolution, colour validation, caching,
+budgets and decoding stay with their existing owners.
+
+### Recursion, cycles, and charging
+
+Public `analyze` allocates one `IndirectRef`-keyed active-path `BTreeSet`
+(bundled with the request bytes/lookup in a private descent context) and
+delegates to one internal recursive entry; recursion happens on `&mut self`
+under the caller's single outer `RefCell::borrow_mut` and never re-enters
+through `PageXObjectPolicy`. At an invoked nested Form target, in order: (1)
+an active-path re-encounter is a cycle — the child is all-Unknown for that
+fold and nothing is charged or published (each cycle member still closes its
+own cycle from its own compute, so all members cache all-Unknown
+order-independently); (2) the cache serves whenever a compute from this depth
+could not reach past what the entry already holds — every complete entry, and
+a partial entry at or past the horizon; (3) within the horizon, an unseen
+identity runs the full root-identical compute, and a partial entry
+re-entered with more remaining edges than it has computed runs a DEEPENING
+recompute, each with its reference held in the active set; (4) the computed
+lattice publishes unconditionally, extending — never shrinking — a prior
+partial entry. The active set is keyed by `IndirectRef` only (exact
+corroboration admits at most one reached offset per reference per request, so
+ref-only is strictly conservative); the cache key stays
+`(IndirectRef, reached_offset)`. Depth is the recursion path length — no
+second counter.
+
+The TRAVERSAL is bounded to the same horizon as the lattice: an unseen frame
+is entered only while the path stays within eight nested edges, so any
+analysis — provable or adversarially deep — holds at most nine form streams
+on the active path and at most nine lean native compute frames (decoded
+buffers and tokens are heap-owned and dropped per frame). A deeper acyclic
+chain is CUT, not followed: the frame at the horizon computes slot 0 (an
+invoked nested Form with no edge left is Unknown — its true value), leaves
+its higher slots uncomputed, and nothing past the horizon is decoded, charged
+or entered. Every cut frame's cached slots stay pure, so public results are
+order-independent: a horizon-cut mid form later queried as a root (depth 0
+can always demand the full slot range within the horizon) deepens its entry
+and proves or refuses exactly as on a fresh analyzer.
+
+First-seen TARGETS are charged once per unique cache key, root or child;
+aliases, sibling DAG reuse, repeated `Do` and cycle re-encounters recharge
+nothing. Decoded BYTES follow the actual work instead: every successfully
+read raw body or decoded Flate body charges on a first compute and on every
+horizon-cut deepening recompute, while a budget-dependent failed attempt
+exhausts the residual aggregate allowance. In particular, a raw extent larger
+than the remaining allowance and a Flate `OutputLimitExceeded` rejection both
+set the byte budget to zero; later deepening stops at the existing zero-budget
+guard before preflight or inflation. Intrinsic decoder failures remain
+deterministic and leave the residual budget unchanged. This keeps the
+analyzer-owned aggregate budget an honest bound on total decode work and
+closes the repeated bounded-inflation amplification vector. The per-form
+256-fact caps apply per frame unchanged. Budget exhaustion mid-descent caches
+all-Unknown for an unaffordable first-seen frame while cached forms keep
+serving; an unaffordable deepening keeps the previously published partial
+entry and every already-computed pure slot instead of overwriting it.
+
+### Child admission and the fold
+
+A child enters through the complete existing analyzer path verbatim:
+target/byte budgets, exact reference/generation/reached-offset corroboration,
+the semantic dictionary preflight, filter/extent classification, transparency
+`/Group` refusal, the raw grammar with balanced q/Q, and its OWN demand-built
+colour and `XObject` authorities. `canonical_form_resources_entries ==
+Ok(None)` (proven-absent `/Resources`) stays admissible exactly as for a
+root: nothing consults caller/page resources, so whatever remains admissible
+is resource-independent by construction (a resource-less child invoking an
+alias or a `Do` fails to resolve on its own and refuses). Children are ALWAYS
+analyzed sentinel-seeded exactly like roots — never seeded from the parent's
+live colour — so summaries stay state-independent.
+
+At a proven nested-Form `Do`, each parent slot `d >= 1` folds the child's
+slot `d - 1` and parent slot 0 becomes Unknown. Per lane: a child bit
+propagates only while the parent's lane still equals its inherited sentinel
+at the invocation (read from `op.state`, exactly like the shipped stencil
+arm — the walker is state-neutral for `XObjectInvoke`, so post-op equals
+pre-op); a live local parent colour absorbs the consumption; an Unknown child
+slot refuses the parent slot. Child writes never alter subsequent parent
+state (implicit q/Q of §8.10.1; a net-popping child stream is malformed per
+§8.4.2 and refuses through its own raw preflight). A child invoked at several
+sites or under aliases reuses one cached lattice with independent folds. The
+authority's single `pub(super)` resolution returns the retained exact target
+tuple with its effect, so each `Do` spelling is decoded and looked up once.
+
+### Boundary and tests
+
+The entire T184-T189 boundary is unchanged: cache key shape, unconditional
+publication, cached Unknown, the 256 first-seen target cap, the aggregate
+decoded-byte budget, semantic preflights, the raw grammar's admitted operator
+set, one sentinel-seeded walk per compute (a deepening recompute is one more
+such walk, never a second interpreter), the Form-local Device colour
+and `XObject` authorities, `/Default*` rules, exact identity corroboration,
+and page-only byte mutation. `/Matrix`/`/BBox` stay unmodelled and the
+conservative colour-lane argument extends transitively to children. Form,
+resource and image objects remain read-only, byte-identical, and appear once
+in output; no public enum, report, serde, digest, selector or CLI surface
+changed. Substantive coverage lives in `tests/alias_epoch_form_recursion.rs`
+(composition/state independence, cycles, diamond/alias charge-once with tight
+`with_bounds` sums, the eight/nine-edge depth boundary with cache-order
+independence, the deeper-than-nine horizon with exact-sum/one-short charging
+and pure deepening of horizon-cut lattices, deterministic Flate/raw failed-
+attempt exhaustion with partial-cache preservation, admission parity, budget
+exhaustion, end-to-end transaction boundary); the two historical
+nested-refusal pins in
+`alias_epoch_form_xobjects.rs` were assertion-adapted to keep a still-refusing
+variant (transparency-`/Group` child) and pin the new proven outcome.
+
 ## T189 - Root Form local Image and stencil colour-effect admission
 
 ### Mechanical split before growth

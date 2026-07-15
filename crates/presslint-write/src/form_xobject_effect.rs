@@ -1,21 +1,32 @@
-//! Request-scoped exact-identity analysis of root-page Form `XObject`
+//! Request-scoped exact-identity analysis of demanded Form `XObject`
 //! inherited-colour effects.
 //!
 //! [`FormXObjectEffectAnalyzer`] is the ONE new abstraction this slice adds. It
-//! answers exactly one read-only question about a root-page Form demanded by a
-//! `Do`: does painting inside the Form consume the CALLER's inherited stroking
-//! and/or nonstroking colour? It never mutates, clones, stages, or descends into
-//! a Form; it reads the exact demanded stream once, proves a narrow structural
-//! shape, and summarizes a two-bit lane effect.
+//! answers exactly one read-only question about a demanded Form — root-page or
+//! nested: does painting inside the Form consume the CALLER's inherited
+//! stroking and/or nonstroking colour? It never mutates, clones, or stages a
+//! Form; each compute attempt reads one admitted stream, proves a narrow
+//! structural shape, summarizes a two-bit lane effect, and descends only into
+//! invoked, retained nested ordinary Forms through the bounded recursion below
+//! (T190).
 //!
-//! The analyzer is request-scoped and shared across every selected page. It
-//! caches both positive and refused (Unknown) results keyed by the exact tuple
-//! `(object number, generation, reached object byte offset)`, so the same Form
-//! reached under multiple resource names, repeated `Do` invocations, or across
-//! selected pages is analyzed at most once. Map presence distinguishes a cached
-//! Unknown from an unseen target. A fixed first-seen target cap and one
-//! aggregate decoded-byte budget bound the whole request; exhaustion
-//! deterministically caches Unknown for further unseen targets.
+//! The analyzer is request-scoped and shared across every selected page. For
+//! each exact tuple `(object number, generation, reached object byte offset)`
+//! it caches ONE depth-indexed [`recurse::BoundedFormLaneEffects`] lattice:
+//! slot `d` is the two-bit/Unknown effect with `d` nested-Form edges remaining,
+//! slot 0 refuses every invoked nested Form, and the public result is the
+//! maximum-depth slot. Every computed slot is a pure function of the form's
+//! OWN subtree, so the same Form reached under multiple resource names,
+//! repeated `Do` invocations, several nesting parents, or across selected
+//! pages serves one cached lattice in any analysis order. A complete cache hit
+//! never decodes or walks again; only a horizon-cut partial entry may deepen
+//! through one bounded re-decode per shallower compute attempt. Map presence
+//! distinguishes a cached Unknown from an unseen target. A fixed first-seen
+//! target cap charges once per unique identity, while one aggregate decoded-
+//! byte budget charges every successfully read body and every budget-dependent
+//! failed attempt across the whole request. An over-limit raw body or Flate
+//! inflation exhausts the residual byte budget, so it cannot be retried;
+//! intrinsic decode failures retain their deterministic refusal behavior.
 //!
 //! Admission is intentionally conservative and two-layered. A demanded Form is
 //! summarized only after:
@@ -78,34 +89,63 @@
 //! marking (ISO 32000-1 §8.9.6.2), so it consumes the inherited lane only while
 //! that lane still equals its sentinel. `/Subtype /Form` targets
 //! pass the same exact-identity corroboration plus a canonical semantically
-//! unique `/Subtype /Form` proof before their tuple is retained for a later
-//! recursion slice, and still refuse when invoked; every uncertain name or
-//! target refuses the whole Form.
+//! unique `/Subtype /Form` proof before their tuple is retained; every
+//! uncertain name or target refuses the whole Form.
+//!
+//! Invoked, retained nested ordinary Form targets are analyzed by bounded
+//! recursion (T190), implemented over the private [`recurse`] lattice. A child
+//! enters through the complete root path above — target/byte budgets, exact
+//! identity corroboration, the semantic dictionary preflight, filter/extent
+//! classification, proven Group absence, the raw grammar, and its OWN
+//! demand-built colour and `XObject` authorities (`Ok(None)` proven-absent
+//! `/Resources` stays admissible exactly as for a root) — and is ALWAYS walked
+//! sentinel-seeded exactly like a root, so its cached lattice is a pure
+//! function of its own bytes and resources; no caller or page state ever
+//! reaches a child analysis. At the parent's `Do`, each parent slot `d >= 1`
+//! folds the child's slot `d - 1`: a child bit propagates only while the
+//! parent's matching lane still equals its inherited sentinel (a live local
+//! colour absorbs the consumption), an Unknown child slot refuses the parent
+//! slot, and parent slot 0 refuses every nested invocation. Depth is the
+//! recursion path length itself, and the TRAVERSAL is bounded to the same
+//! horizon as the lattice: an unseen frame is entered only while the path
+//! stays within [`recurse::MAX_NESTED_FORM_DEPTH`] nested edges (nine form
+//! streams, nine native compute frames), so a deeper acyclic chain never
+//! decodes, charges, or stacks past the horizon — its cut frames cache
+//! PARTIAL lattices whose computed slots are pure, and a later shallower
+//! query deepens them with a recompute that recharges only the real
+//! re-decode, never the first-seen target. An `IndirectRef`-keyed active-path
+//! set refuses every direct or mutual cycle before any charge, while
+//! legitimate DAG reuse spends one first-seen target and serves every complete
+//! entry without further byte charge.
+//! Publication stays unconditional post-compute, and recursion happens
+//! internally on the analyzer under the caller's single borrow — never back
+//! through the page policy.
 //!
 //! This makes only a colour-lane-dependency claim. `/Matrix` and `/BBox` are
 //! unmodelled: a non-identity `/Matrix` cannot change which colour lane a paint
 //! reads, and `/BBox` clipping can only suppress paint, so ignoring both
 //! may at worst over-report consumption (a conservative positive) and can never
-//! fabricate an unsafe false Neutral. No Form byte is read as mutation authority,
+//! fabricate an unsafe false Neutral; the argument extends transitively to
+//! every admitted nested child. No Form byte is read as mutation authority,
 //! no CTM/bounds/visibility is published, and every group, uncertain resource
-//! colour, text, nested Form invocation, shading, `gs`, inline image, and
-//! unknown construct refuses.
+//! colour, text, shading, `gs`, inline image, and unknown construct refuses.
 
 mod color;
+mod recurse;
 mod xobjects;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use presslint_paint::{
     ColorSpaceEnv, GraphicsColor, GraphicsStateSnapshot, PaintOpKind, PaintProgram,
 };
 use presslint_pdf::{
-    DictionaryEntrySpan, DictionaryValueKind, FlateDecodeParameters, IndirectRef, ObjectLookup,
-    ObjectLookupLocation, content_stream_data_slice, decode_flate_stream,
-    inspect_content_stream_data_extent_with_lookup, inspect_dictionary_entries,
-    inspect_form_transparency_group, inspect_indirect_object_dictionary, locate_xref_object,
-    parse_indirect_reference,
+    DictionaryEntrySpan, DictionaryValueKind, FlateDecodeParameters, FlateDecodeStreamRejection,
+    IndirectRef, ObjectLookup, ObjectLookupLocation, content_stream_data_slice,
+    decode_flate_stream, inspect_content_stream_data_extent_with_lookup,
+    inspect_dictionary_entries, inspect_form_transparency_group,
+    inspect_indirect_object_dictionary, locate_xref_object, parse_indirect_reference,
 };
 use presslint_syntax::{
     OperandRecord, OperatorRecord, Token, TokenKind, assemble_operators, tokenize,
@@ -117,6 +157,7 @@ use crate::{
     page_xobject_policy::{PageXObjectEffect, decode_pdf_name},
 };
 
+use recurse::BoundedFormLaneEffects;
 use xobjects::FormLocalXObjectAuthority;
 
 #[cfg(test)]
@@ -126,19 +167,40 @@ pub use xobjects::xobject_target_identity_corroborates_for_test;
 /// identities after this many attempts are deterministically Unknown.
 const MAX_FORM_TARGETS: usize = 256;
 
-/// Inherited stroking/nonstroking lane effect of one analyzed root Form:
+/// Inherited stroking/nonstroking lane effect of one analyzed Form:
 /// `[consumes_inherited_stroking, consumes_inherited_nonstroking]`, in the same
 /// stroking-first lane order the alias planner uses.
 pub type FormLaneEffect = [bool; 2];
 
-/// Request-scoped exact-identity cache and bounds for root Form colour-effect
-/// analysis. Conceptually owns a `(reference, reached_offset) -> Option<effect>`
-/// map (map presence = seen; `None` value = cached Unknown), a remaining
-/// first-seen target count, and one aggregate remaining decoded-byte budget.
+/// Request-scoped exact-identity cache and bounds for Form colour-effect
+/// analysis, root and nested. Conceptually owns a
+/// `(reference, reached_offset) -> BoundedFormLaneEffects` map (map presence =
+/// seen; an all-Unknown lattice = cached refusal), a remaining first-seen
+/// target count, and one aggregate remaining decoded-byte budget shared across
+/// the whole request, nested frames included.
 pub struct FormXObjectEffectAnalyzer {
-    cache: BTreeMap<(IndirectRef, usize), Option<FormLaneEffect>>,
+    cache: BTreeMap<(IndirectRef, usize), BoundedFormLaneEffects>,
     remaining_targets: usize,
     remaining_bytes: usize,
+}
+
+/// Borrowed per-`analyze` descent state threaded through the bounded nested-
+/// Form recursion: the request bytes and lookup every frame shares, plus the
+/// `IndirectRef`-keyed active-path set that refuses every direct or mutual
+/// cycle before any target or byte charge. Depth needs no second counter: the
+/// path length is the recursion itself, and the depth-indexed lattice slots
+/// bound what any path can prove.
+struct FormDescent<'request> {
+    /// The whole request input the recursion re-reaches child objects in.
+    input: &'request [u8],
+    /// The request's already-open exact object lookup.
+    lookup: ObjectLookup<'request>,
+    /// Out-of-band object identities of every frame currently on the descent
+    /// path. Keyed by `IndirectRef` only: exact corroboration admits at most
+    /// one reached offset per reference under the current lookup, so ref-only
+    /// keying is strictly conservative against offset variation fragmenting
+    /// cycle detection.
+    active: BTreeSet<IndirectRef>,
 }
 
 impl FormXObjectEffectAnalyzer {
@@ -165,14 +227,39 @@ impl FormXObjectEffectAnalyzer {
         }
     }
 
-    /// Summarize the inherited-colour lane effect of one demanded root Form
-    /// target reached at `reached_offset` under `reference`.
+    /// Remaining aggregate decoded-byte budget. Test-only evidence that a
+    /// budget-dependent failed read cannot be retried.
+    #[cfg(test)]
+    pub(crate) const fn remaining_bytes_for_test(&self) -> usize {
+        self.remaining_bytes
+    }
+
+    /// Highest computed slot retained for one cached identity. Test-only
+    /// evidence that an unaffordable deepening never overwrites a partial
+    /// lattice's already-computed pure slots.
+    #[cfg(test)]
+    pub(crate) fn cached_computed_through_for_test(
+        &self,
+        reference: IndirectRef,
+        reached_offset: usize,
+    ) -> Option<usize> {
+        self.cache
+            .get(&(reference, reached_offset))
+            .map(|entry| entry.computed_through())
+    }
+
+    /// Summarize the inherited-colour lane effect of one demanded Form target
+    /// reached at `reached_offset` under `reference`.
     ///
     /// Returns `Some([stroking, nonstroking])` for a proven effect (a neutral
     /// Form is `Some([false, false])`) or `None` for Unknown (unaddressable,
-    /// grouped, malformed, out-of-budget, or outside the raw allowlist). A cache
-    /// hit is O(log F) and recharges neither the target count nor the byte
-    /// budget.
+    /// grouped, malformed, out-of-budget, cyclic, deeper than the nested-Form
+    /// depth bound, or outside the raw allowlist). The result is the cached
+    /// lattice's maximum-depth slot. A complete cache hit is O(log F) and
+    /// recharges neither the target count nor the byte budget; only a lattice
+    /// left partial by the traversal horizon deepens with a recompute. A
+    /// successful re-decode charges bytes alone; a budget-dependent failed
+    /// attempt exhausts the residual bytes and preserves the partial entry.
     pub fn analyze(
         &mut self,
         input: &[u8],
@@ -180,80 +267,388 @@ impl FormXObjectEffectAnalyzer {
         reference: IndirectRef,
         reached_offset: usize,
     ) -> Option<FormLaneEffect> {
-        let key = (reference, reached_offset);
-        if let Some(cached) = self.cache.get(&key) {
-            return *cached;
-        }
-        let result = self.compute(input, lookup, reference, reached_offset);
-        self.cache.insert(key, result);
-        result
+        let mut descent = FormDescent {
+            input,
+            lookup,
+            active: BTreeSet::new(),
+        };
+        // A root call always sits within the horizon (the active path is
+        // empty), so the frame is never unavailable; a lattice left partial
+        // by exhaustion reads its uncomputed top slot as Unknown.
+        self.analyze_nested(&mut descent, reference, reached_offset)
+            .and_then(BoundedFormLaneEffects::max_depth_effect)
     }
 
-    /// Compute one unseen exact identity's effect, charging one target attempt
-    /// and (for a successfully sliced/decoded body) its bounded byte cost.
-    fn compute(
+    /// The single recursive entry every root analysis and nested descent uses.
+    /// `None` is an UNAVAILABLE frame: the target sits past the traversal
+    /// horizon with nothing cached, so nothing is charged, published, or
+    /// descended into and the caller's affected slots stay uncomputed.
+    ///
+    /// In this order: (1) a reference already on the active path is a cycle —
+    /// the frame is all-Unknown for THIS caller and nothing is charged or
+    /// published (the cycle still closes from every member's own compute, so
+    /// each member caches all-Unknown order-independently); (2) a cache entry
+    /// serves whenever a compute from this depth could not reach past what it
+    /// already holds — every complete entry, and a partial entry at or past
+    /// the horizon; (3) within the horizon, an unseen identity runs the full
+    /// root-identical compute and a partial entry re-entered with more
+    /// remaining edges than it has computed runs a DEEPENING recompute (bytes
+    /// recharge for the real re-decode, the first-seen target does not), each
+    /// with its reference held in the active set; (4) the computed lattice is
+    /// published unconditionally post-compute — extending, never shrinking, a
+    /// prior partial entry — so no in-progress entry is ever visible. A
+    /// deepening recompute that cannot be afforded keeps the previously
+    /// published pure entry serving, exactly like every other cached form
+    /// under exhaustion.
+    fn analyze_nested(
         &mut self,
-        input: &[u8],
-        lookup: ObjectLookup<'_>,
+        descent: &mut FormDescent<'_>,
         reference: IndirectRef,
         reached_offset: usize,
-    ) -> Option<FormLaneEffect> {
-        if self.remaining_targets == 0 {
-            return None;
+    ) -> Option<BoundedFormLaneEffects> {
+        if descent.active.contains(&reference) {
+            return Some(BoundedFormLaneEffects::all_unknown());
         }
-        self.remaining_targets -= 1;
+        let key = (reference, reached_offset);
+        // Edges already used equal the active path length; entering this
+        // frame keeps the path within the horizon only while `remaining`
+        // exists, and the frame can then compute slots up to `remaining`.
+        let remaining = recurse::MAX_NESTED_FORM_DEPTH.checked_sub(descent.active.len());
+        let cached = self.cache.get(&key).copied();
+        if let Some(entry) = cached {
+            if remaining.is_none_or(|edges| edges <= entry.computed_through()) {
+                return Some(entry);
+            }
+        }
+        remaining?;
+        descent.active.insert(reference);
+        let computed = self.compute(descent, reference, reached_offset, cached.is_none());
+        descent.active.remove(&reference);
+        let result = match computed {
+            Some(lattice) => lattice,
+            // A failed FIRST compute is the intrinsic/unaffordable refusal of
+            // every slot; a failed deepening recompute (only ever budget
+            // exhaustion — every intrinsic gate is deterministic over the
+            // same bytes) keeps the prior pure entry instead of destroying
+            // its computed slots.
+            None => match cached {
+                Some(entry) => return Some(entry),
+                None => BoundedFormLaneEffects::all_unknown(),
+            },
+        };
+        self.cache.insert(key, result);
+        Some(result)
+    }
+
+    /// Compute one exact identity's lattice, charging one first-seen target
+    /// attempt (`charge_target`, never for a deepening recompute of a cached
+    /// partial entry) and — for every successfully sliced/decoded body, first
+    /// compute or recompute alike — its bounded byte cost, identically for a
+    /// root and a nested child. A budget-dependent failed raw read or Flate
+    /// inflation exhausts the residual byte budget so later deepening stops at
+    /// the zero-budget guard; intrinsic decoder failures leave it unchanged.
+    /// `None` on a first compute is a refusal of every slot and is cached as
+    /// the all-Unknown lattice.
+    fn compute(
+        &mut self,
+        descent: &mut FormDescent<'_>,
+        reference: IndirectRef,
+        reached_offset: usize,
+        charge_target: bool,
+    ) -> Option<BoundedFormLaneEffects> {
+        if charge_target {
+            if self.remaining_targets == 0 {
+                return None;
+            }
+            self.remaining_targets -= 1;
+        }
         // Aggregate budget exhaustion makes every remaining unseen target
         // Unknown, including a zero-byte Form; cached identities remain usable.
         if self.remaining_bytes == 0 {
             return None;
         }
-        if !corroborates(lookup, reference, reached_offset) {
+        if !corroborates(descent.lookup, reference, reached_offset) {
             return None;
         }
         // The raw-key extent/filter/group helpers are safe only after every
         // top-level key has been decoded and their delegated spellings are
         // proved canonical and unique. This also refuses stream substitution,
         // reference XObjects, optional content and OPI before any body access.
-        if !semantic_dictionary_preflight(input, reached_offset) {
+        if !semantic_dictionary_preflight(descent.input, reached_offset) {
             return None;
         }
         // Accept only raw/uncompressed or a single default-predictor
         // `/FlateDecode`; every other filter/chain/predictor is Unknown.
-        let filter = classify_filter(input, reached_offset).ok()?;
-        let extent =
-            inspect_content_stream_data_extent_with_lookup(input, Some(lookup), reached_offset)
-                .ok()?;
+        let filter = classify_filter(descent.input, reached_offset).ok()?;
+        let extent = inspect_content_stream_data_extent_with_lookup(
+            descent.input,
+            Some(descent.lookup),
+            reached_offset,
+        )
+        .ok()?;
         // Prove the Form declares no transparency group before any body walk;
         // any valid, malformed, indirect-unresolved, or uncertain group is
         // Unknown.
-        let group = inspect_form_transparency_group(input, lookup, reached_offset);
+        let group = inspect_form_transparency_group(descent.input, descent.lookup, reached_offset);
         if group.group.is_some() || !group.skipped.is_empty() {
             return None;
         }
         // Borrow raw bytes directly; bound a Flate decode by the remaining
-        // aggregate budget and drop the owned buffer once the two-bit effect is
-        // read.
+        // aggregate budget and drop the owned buffer once the lattice is read.
         match filter {
             PipelineFilterKind::Raw => {
                 if extent.length() > self.remaining_bytes {
+                    // The whole residual allowance was insufficient for this
+                    // attempt. Exhaust it so a horizon-cut partial entry cannot
+                    // trigger the same over-budget body read indefinitely.
+                    self.remaining_bytes = 0;
                     return None;
                 }
-                let slice = content_stream_data_slice(input, &extent).ok()?;
+                let slice = content_stream_data_slice(descent.input, &extent).ok()?;
                 self.remaining_bytes -= slice.len();
-                analyze_bytes(input, lookup, reached_offset, slice)
+                self.analyze_bytes(descent, reached_offset, slice)
             }
             PipelineFilterKind::Flate => {
-                let slice = content_stream_data_slice(input, &extent).ok()?;
-                let decoded = decode_flate_stream(
+                let slice = content_stream_data_slice(descent.input, &extent).ok()?;
+                let decoded = match decode_flate_stream(
                     slice,
                     FlateDecodeParameters::default(),
                     self.remaining_bytes,
-                )
-                .ok()?;
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(error) => {
+                        if error.reason == FlateDecodeStreamRejection::OutputLimitExceeded {
+                            // Inflation consumed the attempt's entire output
+                            // allowance. Exhaust the shared residual budget so
+                            // an unchanged partial cache entry cannot amplify
+                            // the same bounded work on later queries.
+                            self.remaining_bytes = 0;
+                        }
+                        return None;
+                    }
+                };
                 self.remaining_bytes -= decoded.len();
-                analyze_bytes(input, lookup, reached_offset, &decoded)
+                self.analyze_bytes(descent, reached_offset, &decoded)
             }
         }
+    }
+
+    /// Tokenize/assemble the decoded Form once, run the closed raw preflight,
+    /// then the ONE seeded paint walk. Any parse, preflight, or walk failure is
+    /// an intrinsic refusal of every slot. The decoded bytes, tokens, records,
+    /// authority, and walk state are all dropped on return.
+    ///
+    /// The Form-local device colour projection is built only when a `CS`/`cs`
+    /// resource colour operator is present, and the Form-local `XObject`
+    /// authority is built only when a syntactically valid `Do` is present;
+    /// otherwise the walk runs with an empty [`ColorSpaceEnv`] and no
+    /// authority, byte-for-byte reproducing the resource-independent T187
+    /// result. The projection borrows `resources`, which must outlive the walk.
+    fn analyze_bytes(
+        &mut self,
+        descent: &mut FormDescent<'_>,
+        reached_offset: usize,
+        decoded: &[u8],
+    ) -> Option<BoundedFormLaneEffects> {
+        let tokens = tokenize(decoded).ok()?;
+        let records = assemble_operators(&tokens).ok()?.records;
+        if !raw_preflight_ok(&tokens, &records, decoded) {
+            return None;
+        }
+        let resources = if records
+            .iter()
+            .any(|record| color::is_color_space_operator(record, decoded))
+        {
+            if !has_canonical_form_resource_dictionary(
+                descent.input,
+                descent.lookup,
+                reached_offset,
+                b"ColorSpace",
+            ) {
+                return None;
+            }
+            color::build_device_projection(
+                descent.input,
+                descent.lookup,
+                reached_offset,
+                &records,
+                decoded,
+            )?
+        } else {
+            Vec::new()
+        };
+        // Demand for the XObject authority is a syntactically valid `Do`; a
+        // Form without one never inspects its own `/Resources /XObject`.
+        let xobjects = records
+            .iter()
+            .any(|record| is_xobject_invoke_operator(record, decoded))
+            .then(|| {
+                FormLocalXObjectAuthority::from_form(descent.input, descent.lookup, reached_offset)
+            });
+        self.walk_lane_effect(
+            descent,
+            decoded,
+            &records,
+            ColorSpaceEnv::new(&resources),
+            xobjects.as_ref(),
+        )
+    }
+
+    /// Run the ONE seeded paint walk and accumulate the depth-indexed lattice
+    /// the inherited lanes each operation consumes. The walker owns `q`/`Q`,
+    /// direct setter lane kills, and finiteness; this only compares the live
+    /// colour to the inherited sentinel. A walk error (the iterator fuses on
+    /// first error) is an intrinsic refusal of every slot.
+    ///
+    /// `CS`/`cs` and `SC`/`SCN`/`sc`/`scn` are admitted only when the paint walk
+    /// proves them safe over the Form-local device colour projection. `env` is
+    /// that projection: a `CS`/`cs` naming a supported Device family selects it
+    /// (ISO 32000-1 Table 74 sets the space AND its initial colour, so the
+    /// selected inherited lane is killed with concrete local provenance). A
+    /// named setter is admitted only over a lane already proven a supported
+    /// local Device lane — never the inherited sentinel — with exact 1/3/4
+    /// arity. Any other selection or setter shape refuses every slot.
+    ///
+    /// A `Do` is admitted only through `xobjects`, the Form-local `XObject`
+    /// authority, and folded into the lattice by [`Self::fold_xobject_invoke`].
+    fn walk_lane_effect(
+        &mut self,
+        descent: &mut FormDescent<'_>,
+        decoded: &[u8],
+        records: &[OperatorRecord],
+        env: ColorSpaceEnv<'_>,
+        xobjects: Option<&FormLocalXObjectAuthority>,
+    ) -> Option<BoundedFormLaneEffects> {
+        let stroking_sentinel = inherited_sentinel(&[0.5, 0.25, 0.125, 0.0625]);
+        let nonstroking_sentinel = inherited_sentinel(&[0.0625, 0.125, 0.25, 0.5]);
+        let mut seed = GraphicsStateSnapshot::page_default();
+        seed.stroking_color = stroking_sentinel.clone();
+        seed.nonstroking_color = nonstroking_sentinel.clone();
+        let seed = Rc::new(seed);
+        let program = PaintProgram::new(decoded, records, env);
+        let mut lattice = BoundedFormLaneEffects::neutral();
+        let mut previous = Rc::clone(&seed);
+        for op in program.ops_with_initial_state(seed) {
+            let op = op.ok()?;
+            let record = records.get(op.index)?;
+            let operator = decoded.get(record.operator.range.start..record.operator.range.end);
+            // `PaintOp.state` is post-operator. A `CS`/`cs` selecting a
+            // supported Device family stamps a concrete local colour, so the
+            // post-state lane becomes a supported local Device lane; an
+            // unresolved/unsupported name leaves a `Resource(name)` lane and
+            // refuses the whole Form. A named setter's PRIOR lane must already
+            // be a supported local Device lane (never the CMYK-shaped inherited
+            // sentinel), and its arity must match that family exactly. Each
+            // guard fires only on the refusal case.
+            match operator {
+                Some(b"CS")
+                    if !color::valid_color_space_selection(
+                        &op.state.stroking_color,
+                        env,
+                        record,
+                        decoded,
+                    ) =>
+                {
+                    return None;
+                }
+                Some(b"cs")
+                    if !color::valid_color_space_selection(
+                        &op.state.nonstroking_color,
+                        env,
+                        record,
+                        decoded,
+                    ) =>
+                {
+                    return None;
+                }
+                Some(b"SC" | b"SCN")
+                    if !color::valid_named_setter(
+                        &previous.stroking_color,
+                        &op.state.stroking_color,
+                        &stroking_sentinel,
+                        record,
+                    ) =>
+                {
+                    return None;
+                }
+                Some(b"sc" | b"scn")
+                    if !color::valid_named_setter(
+                        &previous.nonstroking_color,
+                        &op.state.nonstroking_color,
+                        &nonstroking_sentinel,
+                        record,
+                    ) =>
+                {
+                    return None;
+                }
+                _ => {}
+            }
+            if let PaintOpKind::XObjectInvoke { name } = &op.kind {
+                // The walker is state-neutral for `XObjectInvoke` (per ISO
+                // 32000-1 §8.10.1 an implicit save/restore brackets every
+                // `Do`), so the post-operator `op.state` equals the
+                // pre-invocation state the shipped stencil arm reads: each
+                // lane's sentinel liveness at the `Do` is exact and shared by
+                // every lattice slot.
+                let lane_live = [
+                    op.state.stroking_color == stroking_sentinel,
+                    op.state.nonstroking_color == nonstroking_sentinel,
+                ];
+                self.fold_xobject_invoke(descent, xobjects, &name.0, lane_live, &mut lattice)?;
+            }
+            if let PaintOpKind::PathPaint { paint } = op.kind {
+                if paint.uses_stroke() && op.state.stroking_color == stroking_sentinel {
+                    lattice.mark_consumed(0);
+                }
+                if paint.uses_fill() && op.state.nonstroking_color == nonstroking_sentinel {
+                    lattice.mark_consumed(1);
+                }
+            }
+            previous = Rc::clone(&op.state);
+        }
+        Some(lattice)
+    }
+
+    /// Apply one raw `Do` operand to the lattice through the Form-local
+    /// `XObject` authority: an ordinary Image consumes neither lane, a proven
+    /// stencil consumes the inherited nonstroking lane exactly while it is
+    /// still live at the invocation (a live local colour is consumed locally
+    /// and never reaches the caller), and a retained nested ordinary Form is
+    /// analyzed through the bounded recursion — sentinel-seeded like a root,
+    /// cycle-refused, horizon-bounded, and charged once per first-seen target —
+    /// then folded per slot at this site. Every other resolution is an
+    /// intrinsic refusal (`None`) of the whole Form.
+    fn fold_xobject_invoke(
+        &mut self,
+        descent: &mut FormDescent<'_>,
+        xobjects: Option<&FormLocalXObjectAuthority>,
+        raw_name: &[u8],
+        lane_live: [bool; 2],
+        lattice: &mut BoundedFormLaneEffects,
+    ) -> Option<()> {
+        let (target, effect) = xobjects?.resolve(raw_name)?;
+        match effect {
+            PageXObjectEffect::OrdinaryImage => {}
+            PageXObjectEffect::Stencil => {
+                if lane_live[1] {
+                    lattice.mark_consumed(1);
+                }
+            }
+            PageXObjectEffect::Form => {
+                let reference = target.reference;
+                let reached_offset = target.object_byte_offset;
+                match self.analyze_nested(descent, reference, reached_offset) {
+                    Some(child) => lattice.fold_nested_form(child, lane_live),
+                    // Past the horizon with nothing cached: slot 0 is still
+                    // computed (an invoked nested Form with no edge left is
+                    // Unknown) and every deeper slot stays uncomputed for a
+                    // shallower re-entry to fill in.
+                    None => lattice.refuse_nested_descent(),
+                }
+            }
+            _ => return None,
+        }
+        Some(())
     }
 }
 
@@ -326,53 +721,6 @@ fn semantic_dictionary_preflight(input: &[u8], reached_offset: usize) -> bool {
         }
     }
     true
-}
-
-/// Tokenize/assemble the decoded Form once, run the closed raw preflight, then
-/// the ONE seeded paint walk. Any parse, preflight, or walk failure is Unknown.
-/// The decoded bytes, tokens, records, authority, and walk state are all
-/// dropped on return.
-///
-/// The Form-local device colour projection is built only when a `CS`/`cs`
-/// resource colour operator is present, and the Form-local `XObject` authority
-/// is built only when a syntactically valid `Do` is present; otherwise the walk
-/// runs with an empty [`ColorSpaceEnv`] and no authority, byte-for-byte
-/// reproducing the resource-independent T187 result. The projection borrows
-/// `resources`, which must outlive the walk.
-fn analyze_bytes(
-    input: &[u8],
-    lookup: ObjectLookup<'_>,
-    reached_offset: usize,
-    decoded: &[u8],
-) -> Option<FormLaneEffect> {
-    let tokens = tokenize(decoded).ok()?;
-    let records = assemble_operators(&tokens).ok()?.records;
-    if !raw_preflight_ok(&tokens, &records, decoded) {
-        return None;
-    }
-    let resources = if records
-        .iter()
-        .any(|record| color::is_color_space_operator(record, decoded))
-    {
-        if !has_canonical_form_resource_dictionary(input, lookup, reached_offset, b"ColorSpace") {
-            return None;
-        }
-        color::build_device_projection(input, lookup, reached_offset, &records, decoded)?
-    } else {
-        Vec::new()
-    };
-    // Demand for the XObject authority is a syntactically valid `Do`; a Form
-    // without one never inspects its own `/Resources /XObject`.
-    let xobjects = records
-        .iter()
-        .any(|record| is_xobject_invoke_operator(record, decoded))
-        .then(|| FormLocalXObjectAuthority::from_form(input, lookup, reached_offset));
-    walk_lane_effect(
-        decoded,
-        &records,
-        ColorSpaceEnv::new(&resources),
-        xobjects.as_ref(),
-    )
 }
 
 /// Strict CLOSED raw-record preflight: the allowlisted operator grammar plus the
@@ -567,125 +915,6 @@ fn is_xobject_invoke_operator(record: &OperatorRecord, source: &[u8]) -> bool {
         source.get(record.operator.range.start..record.operator.range.end),
         Some(b"Do")
     )
-}
-
-/// Run the ONE seeded paint walk and read the inherited lanes each path paint
-/// consumes. The walker owns `q`/`Q`, direct setter lane kills, and finiteness;
-/// this only compares the live colour to the inherited sentinel. A walk error
-/// (the iterator fuses on first error) is Unknown.
-///
-/// `CS`/`cs` and `SC`/`SCN`/`sc`/`scn` are admitted only when the paint walk
-/// proves them safe over the Form-local device colour projection. `env` is that
-/// projection: a `CS`/`cs` naming a supported Device family selects it (ISO
-/// 32000-1 Table 74 sets the space AND its initial colour, so the selected
-/// inherited lane is killed with concrete local provenance). A named setter is
-/// admitted only over a lane already proven a supported local Device lane —
-/// never the inherited sentinel — with exact 1/3/4 arity. Any other selection
-/// or setter shape is Unknown.
-///
-/// A `Do` is admitted only through `xobjects`, the Form-local `XObject`
-/// authority: an ordinary Image consumes neither lane, and a proven stencil
-/// consumes the inherited nonstroking lane exactly when the live lane still
-/// equals its sentinel (a live local colour is consumed locally and never
-/// reaches the caller). Every other resolution refuses the whole Form.
-fn walk_lane_effect(
-    decoded: &[u8],
-    records: &[OperatorRecord],
-    env: ColorSpaceEnv<'_>,
-    xobjects: Option<&FormLocalXObjectAuthority>,
-) -> Option<FormLaneEffect> {
-    let stroking_sentinel = inherited_sentinel(&[0.5, 0.25, 0.125, 0.0625]);
-    let nonstroking_sentinel = inherited_sentinel(&[0.0625, 0.125, 0.25, 0.5]);
-    let mut seed = GraphicsStateSnapshot::page_default();
-    seed.stroking_color = stroking_sentinel.clone();
-    seed.nonstroking_color = nonstroking_sentinel.clone();
-    let seed = Rc::new(seed);
-    let program = PaintProgram::new(decoded, records, env);
-    let mut effect: FormLaneEffect = [false, false];
-    let mut previous = Rc::clone(&seed);
-    for op in program.ops_with_initial_state(seed) {
-        let op = op.ok()?;
-        let record = records.get(op.index)?;
-        let operator = decoded.get(record.operator.range.start..record.operator.range.end);
-        // `PaintOp.state` is post-operator. A `CS`/`cs` selecting a supported
-        // Device family stamps a concrete local colour, so the post-state lane
-        // becomes a supported local Device lane; an unresolved/unsupported name
-        // leaves a `Resource(name)` lane and refuses the whole Form. A named
-        // setter's PRIOR lane must already be a supported local Device lane
-        // (never the CMYK-shaped inherited sentinel), and its arity must match
-        // that family exactly. Each guard fires only on the refusal case.
-        match operator {
-            Some(b"CS")
-                if !color::valid_color_space_selection(
-                    &op.state.stroking_color,
-                    env,
-                    record,
-                    decoded,
-                ) =>
-            {
-                return None;
-            }
-            Some(b"cs")
-                if !color::valid_color_space_selection(
-                    &op.state.nonstroking_color,
-                    env,
-                    record,
-                    decoded,
-                ) =>
-            {
-                return None;
-            }
-            Some(b"SC" | b"SCN")
-                if !color::valid_named_setter(
-                    &previous.stroking_color,
-                    &op.state.stroking_color,
-                    &stroking_sentinel,
-                    record,
-                ) =>
-            {
-                return None;
-            }
-            Some(b"sc" | b"scn")
-                if !color::valid_named_setter(
-                    &previous.nonstroking_color,
-                    &op.state.nonstroking_color,
-                    &nonstroking_sentinel,
-                    record,
-                ) =>
-            {
-                return None;
-            }
-            _ => {}
-        }
-        // A `Do` reaching this point passed the raw grammar; its lane effect is
-        // decided solely by the Form-local `XObject` authority. Painting a
-        // stencil reads the CURRENT nonstroking colour (§8.9.6.2): under the
-        // still-live sentinel it consumes the inherited lane, while under a
-        // proven local colour it consumes that local colour and reaches no
-        // caller lane. Anything else — nested Form, poisoned, skipped, or
-        // unresolved name — refuses.
-        if let PaintOpKind::XObjectInvoke { name } = &op.kind {
-            match xobjects.and_then(|authority| authority.resolve(&name.0)) {
-                Some(PageXObjectEffect::OrdinaryImage) => {}
-                Some(PageXObjectEffect::Stencil) => {
-                    if op.state.nonstroking_color == nonstroking_sentinel {
-                        effect[1] = true;
-                    }
-                }
-                _ => return None,
-            }
-        }
-        if let PaintOpKind::PathPaint { paint } = op.kind {
-            if paint.uses_stroke() && op.state.stroking_color == stroking_sentinel {
-                effect[0] = true;
-            }
-            if paint.uses_fill() && op.state.nonstroking_color == nonstroking_sentinel {
-                effect[1] = true;
-            }
-        }
-        previous = Rc::clone(&op.state);
-    }
-    Some(effect)
 }
 
 /// Resolve the analyzed Form's own `/Resources` dictionary entries under exact
