@@ -220,6 +220,72 @@ fn malformed_or_unknown_safety_params_are_unclassified() {
 }
 
 #[test]
+fn all_duplicate_safety_keys_fail_closed_even_with_identical_safe_values() {
+    let cases: &[&[u8]] = &[
+        b"<< /GS << /OP false /OP false >> >>",
+        b"<< /GS << /op false /op false >> >>",
+        b"<< /GS << /OPM 0 /OPM 0 >> >>",
+        b"<< /GS << /CA 1 /CA 1 >> >>",
+        b"<< /GS << /ca 1 /ca 1 >> >>",
+        b"<< /GS << /BM /Normal /BM /Normal >> >>",
+        b"<< /GS << /SMask /None /SMask /None >> >>",
+    ];
+
+    for dict in cases {
+        let resource = classify_direct(dict);
+        assert!(
+            resource.has_unresolved_or_unclassified_safety_param(),
+            "duplicate safety key did not fail closed: {}",
+            String::from_utf8_lossy(dict)
+        );
+        assert!(
+            !resource.has_unclassified_keys,
+            "known safety duplicate escaped into the unknown-key aggregate: {}",
+            String::from_utf8_lossy(dict)
+        );
+    }
+}
+
+#[test]
+fn unsafe_and_safe_duplicate_orders_never_first_or_last_win() {
+    let cases: &[&[u8]] = &[
+        b"<< /GS << /OP true /OP false >> >>",
+        b"<< /GS << /OP false /OP true >> >>",
+        b"<< /GS << /CA 0.5 /CA 1 >> >>",
+        b"<< /GS << /CA 1 /CA 0.5 >> >>",
+        b"<< /GS << /BM /Multiply /BM /Normal >> >>",
+        b"<< /GS << /BM /Normal /BM /Multiply >> >>",
+    ];
+
+    for dict in cases {
+        let resource = classify_direct(dict);
+        assert!(
+            resource.has_unresolved_or_unclassified_safety_param(),
+            "duplicate order recovered a value: {}",
+            String::from_utf8_lossy(dict)
+        );
+        assert!(!resource.has_unclassified_keys);
+    }
+}
+
+#[test]
+fn escaped_safety_keys_dispatch_semantically_and_collide_with_raw_spelling() {
+    let safe = classify_direct(b"<< /GS << /O#50 false >> >>");
+    assert!(!safe.is_overprint_active());
+    assert!(!safe.has_unresolved_or_unclassified_safety_param());
+    assert!(!safe.has_unclassified_keys);
+
+    let unsafe_key = classify_direct(b"<< /GS << /O#50 true >> >>");
+    assert!(unsafe_key.is_overprint_active());
+    assert!(!unsafe_key.has_unresolved_or_unclassified_safety_param());
+    assert!(!unsafe_key.has_unclassified_keys);
+
+    let duplicate = classify_direct(b"<< /GS << /OP false /O#50 false >> >>");
+    assert!(duplicate.has_unresolved_or_unclassified_safety_param());
+    assert!(!duplicate.has_unclassified_keys);
+}
+
+#[test]
 fn absent_font_key_is_unset_effect_without_unclassified_flag() {
     let resource = classify_direct(b"<< /GS << /OP true >> >>");
 

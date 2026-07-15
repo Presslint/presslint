@@ -307,7 +307,7 @@ fn every_unsupported_operator_is_unknown() {
         b"1 w 0 0 m 1 1 l f",                // line-state operator
         b"0 J 0 0 m 1 1 l f",                // line cap
         b"/Ri ri 0 0 m 1 1 l f",             // rendering intent
-        b"/GS0 gs 0 0 m 1 1 l f",            // ExtGState
+        b"/GS0 gs 0 0 m 1 1 l f",            // gs: admitted grammar, absent own /ExtGState
         b"BT (x) Tj ET",                     // text
         b"/Fm Do",                           // nested Do
         b"/Sh sh",                           // shading
@@ -1074,7 +1074,7 @@ fn form_local_resource_gs_text_and_nested_constructs_refuse_without_leaking() {
     let resources = format!("{GRAY_ALIAS} /XObject << /Fm 5 0 R >>");
     for body in [
         b"/CS0 cs 0 0 m 1 1 l f".as_slice(), // form-local resource colour
-        b"/GS0 gs 0 0 m 1 1 l f",            // ExtGState
+        b"/GS0 gs 0 0 m 1 1 l f",            // gs: admitted grammar, absent own /ExtGState
         b"BT (x) Tj ET",                     // text
         b"/Other Do",                        // nested Do
     ] {

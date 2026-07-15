@@ -77,8 +77,9 @@ impl ClassifiedExtGStateResource {
             || param_soft_mask_present(&self.soft_mask)
     }
 
-    /// True when any Phase-1 safety parameter is present but malformed or
-    /// classified into an unknown/unsupported safety value.
+    /// True when any Phase-1 safety parameter is present but malformed,
+    /// repeated under a semantic PDF-name spelling, or classified into an
+    /// unknown/unsupported safety value.
     #[must_use]
     pub const fn has_unresolved_or_unclassified_safety_param(&self) -> bool {
         param_malformed(&self.op_stroking)
@@ -104,7 +105,9 @@ pub enum ExtGStateParamClass<T> {
         /// Classified parameter value.
         value: T,
     },
-    /// The parameter key is present with a wrong shallow value type.
+    /// The parameter key is present with a wrong shallow value type, or the
+    /// same semantic key occurs more than once. Duplicate safety keys never
+    /// first- or last-win; they reuse this existing fail-closed vocabulary.
     Malformed {
         /// Shallow value kind reported by dictionary entry inspection.
         value_kind: DictionaryValueKind,
@@ -678,35 +681,60 @@ fn classify_dictionary(
     let mut font_entry: Option<DictionaryEntrySpan> = None;
     for entry in entries {
         let raw_key = &input[entry.key_range.start + 1..entry.key_range.end];
-        if decode_pdf_name(raw_key).is_some_and(|name| name.as_ref() == b"Font") {
-            // `/Font` stays an unclassified key in this slice: the aggregate
-            // flag is what existing findings fail closed on.
+        let Some(key) = decode_pdf_name(raw_key) else {
             resource.has_unclassified_keys = true;
-            match font_entry {
-                None => font_entry = Some(*entry),
-                Some(first) => {
-                    if !matches!(
-                        resource.font_effect,
-                        ExtGStateFontEffect::DuplicateKey { .. }
-                    ) {
-                        resource.font_effect = ExtGStateFontEffect::DuplicateKey {
-                            first_key_range: first.key_range,
-                            duplicate_key_range: entry.key_range,
-                        };
+            continue;
+        };
+        match key.as_ref() {
+            b"Type" => {}
+            b"Font" => {
+                // `/Font` stays an unclassified key in this slice: the
+                // aggregate flag is what existing findings fail closed on.
+                resource.has_unclassified_keys = true;
+                match font_entry {
+                    None => font_entry = Some(*entry),
+                    Some(first) => {
+                        if !matches!(
+                            resource.font_effect,
+                            ExtGStateFontEffect::DuplicateKey { .. }
+                        ) {
+                            resource.font_effect = ExtGStateFontEffect::DuplicateKey {
+                                first_key_range: first.key_range,
+                                duplicate_key_range: entry.key_range,
+                            };
+                        }
                     }
                 }
             }
-            continue;
-        }
-        match &input[entry.key_range.start..entry.key_range.end] {
-            b"/Type" => {}
-            b"/OP" => resource.op_stroking = classify_bool(input, entry),
-            b"/op" => resource.op_nonstroking = classify_bool(input, entry),
-            b"/OPM" => resource.overprint_mode = classify_opm(input, entry),
-            b"/CA" => resource.stroking_alpha = classify_alpha(input, entry),
-            b"/ca" => resource.nonstroking_alpha = classify_alpha(input, entry),
-            b"/BM" => resource.blend_mode = classify_blend_mode(input, entry),
-            b"/SMask" => resource.soft_mask = classify_soft_mask(input, entry),
+            b"OP" => {
+                set_unique_safety_param(&mut resource.op_stroking, input, entry, classify_bool);
+            }
+            b"op" => {
+                set_unique_safety_param(&mut resource.op_nonstroking, input, entry, classify_bool);
+            }
+            b"OPM" => {
+                set_unique_safety_param(&mut resource.overprint_mode, input, entry, classify_opm);
+            }
+            b"CA" => {
+                set_unique_safety_param(&mut resource.stroking_alpha, input, entry, classify_alpha);
+            }
+            b"ca" => set_unique_safety_param(
+                &mut resource.nonstroking_alpha,
+                input,
+                entry,
+                classify_alpha,
+            ),
+            b"BM" => {
+                set_unique_safety_param(
+                    &mut resource.blend_mode,
+                    input,
+                    entry,
+                    classify_blend_mode,
+                );
+            }
+            b"SMask" => {
+                set_unique_safety_param(&mut resource.soft_mask, input, entry, classify_soft_mask);
+            }
             _ => resource.has_unclassified_keys = true,
         }
     }
@@ -718,6 +746,24 @@ fn classify_dictionary(
         resource.font_effect = classify_font_effect(input, lookup, entry);
     }
     resource
+}
+
+/// Classify one semantically unique safety parameter. A second decoded-equal
+/// key replaces neither value: it becomes the existing fail-closed malformed
+/// fact consumed by `has_unresolved_or_unclassified_safety_param`.
+fn set_unique_safety_param<T>(
+    target: &mut ExtGStateParamClass<T>,
+    input: &[u8],
+    entry: &DictionaryEntrySpan,
+    classify: fn(&[u8], &DictionaryEntrySpan) -> ExtGStateParamClass<T>,
+) {
+    if matches!(target, ExtGStateParamClass::Unset) {
+        *target = classify(input, entry);
+    } else {
+        *target = ExtGStateParamClass::Malformed {
+            value_kind: entry.value_kind,
+        };
+    }
 }
 
 /// Classify one unique `/Font` entry value as its Table-58 effect.

@@ -2,6 +2,111 @@
 
 Earlier entries are preserved in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T191 - Form-local proven-neutral gs/ExtGState admission
+
+### The authority contract
+
+The Form analyzer now admits `gs` operations whose decoded operand resolves,
+through ONE bounded own-scope authority, to exactly one classified `ExtGState`
+resource proven colour-lane neutral and font-inert; every other `gs` refuses
+the whole Form as the cached all-Unknown lattice, symmetric with every other
+intrinsic refusal. The ONE new private domain abstraction is
+`FormLocalExtGStateAuthority` (`form_xobject_effect/extgstate.rs`), mirroring
+the T189 `FormLocalXObjectAuthority` shape: a decoded-name `BTreeMap` of
+per-name neutrality verdicts, a literal-poison set for undecodable spellings,
+and a namespace poison flag. It is a GATE, not a state machine — it never
+tracks which `gs` is in force where. Neutrality of every activated entry makes
+activation order irrelevant, which is exactly what keeps the single
+sentinel-seeded walk on the empty `ExtGState` environment with no walker,
+`PaintProgram`, lattice, cache-key, or budget change. The authority retains
+only owned decoded names, neutrality booleans, and poison state; no source
+bytes, dictionaries, tokens, streams, or classifier reports survive the
+compute.
+
+### The exact neutrality predicate
+
+Admission delegates entirely to the shipped classifier facts
+(`presslint-pdf/src/extgstate_classify.rs`); no parameter semantics are
+re-derived. ALL of: `is_overprint_active() == false` (ANY set `/OPM`,
+including `0`, is active; explicit `false` overprint flags admit),
+`is_transparency_active() == false` (`/CA`/`/ca` absent or exactly opaque,
+`/BM` absent or Normal/Compatible, `/SMask` absent or exactly `/None`),
+`has_unresolved_or_unclassified_safety_param() == false`, `font_effect`
+exactly `Unset`, AND `has_unclassified_keys == false` — the classifier
+documents that `Unset` proves `/Font` absence only while the aggregate flag is
+false, so a benign `/LW`-style dictionary deliberately refuses in this slice;
+widening requires a distinct proved-no-Font fact later. The parameter matrix
+matches the page-level `gs` guard entry-for-entry. The shared classifier now
+decodes safety-key spellings and requires semantic uniqueness for all seven
+keys: any duplicate, including a raw-plus-escaped or identical-value pair,
+surfaces through the existing unresolved/unclassified-safety predicate rather
+than first- or last-winning. No report field, enum variant, or serde shape was
+added, and the page guard retains its deliberate `/LW` precision.
+
+### Demand, scope, poisoning and caps
+
+The gate runs in `analyze_bytes` after the raw preflight and BEFORE the walk
+(the walker's empty environment is compatibility-neutral and never stands in
+for validation), and ONLY when a syntactically valid `gs` record is present —
+the exact demand pattern of the `Do`/`CS` authorities. A Form without `gs`
+never inspects its own `/Resources /ExtGState`, even a malformed one. The
+authority resolves ONLY from the Form's own canonical, semantically unique
+`/Resources /ExtGState`, corroborated via
+`has_canonical_form_resource_dictionary(.., b"ExtGState")` before the shipped
+`inspect_form_extgstate_resources` report is trusted: escaped, duplicate,
+malformed, unresolved, indirect-`/ExtGState`, or ambiguous authority is
+Unknown, and page/caller fallback is never consulted — a `gs` naming an entry
+absent from the Form's own resources refuses even when the page defines a
+neutral entry of the same name. Matching reuses the page guard's crate-private
+`resource_name_match` seam for the malformed literal-poison case while the
+bounded decoded-name map handles semantic equality: a semantic collision
+poisons the decoded name (never first-win), an undecodable relevant spelling
+retains literal poison, a matching named skip overrides a same-name classified
+entry, and a nameless skip poisons the namespace; proven-absent `/Resources`/
+`/ExtGState` skips are exact absence, not uncertainty, and an unused unsafe
+declaration does not poison a used safe one. Classified entries plus skips are capped at 256
+(mirroring `MAX_XOBJECT_FACTS`) and distinct raw `gs` operand spellings are
+separately capped at 256; either overflow is namespace Unknown. Generation
+mismatches, unresolvable references, and compressed object-stream entry
+targets refuse through the shipped classifier's named skips.
+
+An INDIRECT `/ExtGState` entry additionally requires exact target
+header-identity corroboration before its classified facts are trusted — the
+same discipline the `XObject` authority applies to its targets. The shipped
+classifier resolves an indirect entry through the xref and classifies
+whatever dictionary sits at the resolved offset without checking that the
+object header there identifies the requested object, so a malformed xref
+binding `N G R` to a DIFFERENT object's neutral body would fabricate a
+false-neutral verdict while a repairing reader may locate — and activate —
+the real, unsafe object (wrong-offset object-key repair is a known
+interoperability pitfall). Because the classified report does not carry the
+resolved reference, the authority re-scans the canonical raw `/ExtGState`
+entries once per build: each `IndirectReferenceLike` value must re-resolve
+through the current lookup to an in-use source-addressable object with a
+matching generation whose reinspected header reference equals the requested
+reference. A failing entry poisons only its own decoded name (an unused
+mispointed declaration does not block a used corroborated one); unscannable
+authority poisons the namespace. Direct dictionary entries involve no xref
+binding and are never re-scanned.
+
+### Raw grammar and recursion composition
+
+The closed raw preflight admits `gs` by extending the existing
+single-name-operand arm (`CS`/`cs`/`Do`/`gs`): no open path, exactly one
+syntactically valid name operand; wrong arity, non-name operands, and
+open-path placement refuse in the preflight. Everything else about the
+T184-T190 boundary is byte-for-byte unchanged: cache key, unconditional
+post-compute publication, lattice/deepening contract, aggregate decoded-byte
+budget with failure-exhaustion, semantic preflights, filter rules, recursion
+depth/cycle/charging behavior, sentinel seeding, and fold semantics. Gates are
+built per-identity from each Form's OWN resources: a child never sees the
+root's entries (a child activating a name only the root defines refuses), a
+neutral-`gs` child composes its lattice normally at any depth, an unsafe-`gs`
+child makes the root Unknown, and repeated invocation keeps T190 charge-once
+behavior. Only existing eligible page setter bytes change end-to-end; every
+Form/resource/ExtGState object byte and every public report/schema/digest/
+selector/CLI surface is unchanged.
+
 ## T190 - Bounded recursive nested ordinary Form colour-effect analysis
 
 ### The depth-slot lattice and why it is intrinsically cacheable

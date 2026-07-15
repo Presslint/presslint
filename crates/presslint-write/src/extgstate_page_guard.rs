@@ -195,7 +195,9 @@ enum ResourceMatch<'a> {
 }
 
 /// Relationship between one raw report name and a strictly decoded operand.
-enum ResourceNameMatch {
+// This module is private at the crate root, so `pub` here is an effective
+// crate-private sibling-module seam rather than a public API.
+pub enum ResourceNameMatch {
     None,
     Semantic,
     LiteralPoison,
@@ -205,7 +207,7 @@ enum ResourceNameMatch {
 /// names retain their literal spelling as a bounded poison key: a permissive
 /// reader may treat the malformed `#` literally, so exact raw equality cannot
 /// be discarded or accepted as a safe classified match.
-fn resource_name_match(raw_name: &[u8], operand: &[u8]) -> ResourceNameMatch {
+pub fn resource_name_match(raw_name: &[u8], operand: &[u8]) -> ResourceNameMatch {
     match decode_pdf_name(raw_name) {
         Some(decoded) if decoded.as_ref() == operand => ResourceNameMatch::Semantic,
         None if raw_name == operand => ResourceNameMatch::LiteralPoison,

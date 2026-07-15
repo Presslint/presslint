@@ -151,6 +151,29 @@ fn duplicate_resource_name_used_by_gs_skips_as_unclassified() {
 }
 
 #[test]
+fn duplicate_safety_keys_skip_as_unclassified_instead_of_recovering_a_value() {
+    for dictionary in [
+        "<< /OP true /OP false >>",
+        "<< /CA 0.5 /CA 1 >>",
+        "<< /BM /Multiply /BM /Normal >>",
+        "<< /OP false /O#50 false >>",
+    ] {
+        let resources = format!("<< /ExtGState << /GS1 {dictionary} >> >>");
+        let input = classic_extgstate_pdf(&resources, b"/GS1 gs\n0 0 0 1 k\n");
+        assert_extgstate_skip(
+            &convert_cmyk(&input),
+            ConvertPageSkipReason::ExtGStateUnsafe {
+                overprint: false,
+                transparency: false,
+                unresolved: false,
+                unclassified: true,
+                gs_count: 1,
+            },
+        );
+    }
+}
+
+#[test]
 fn unresolved_resource_name_skips_with_unresolved() {
     let input = classic_extgstate_pdf(
         "<< /ExtGState << /Other << /LW 2 >> >> >>",

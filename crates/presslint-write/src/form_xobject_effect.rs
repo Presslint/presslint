@@ -92,6 +92,22 @@
 //! unique `/Subtype /Form` proof before their tuple is retained; every
 //! uncertain name or target refuses the whole Form.
 //!
+//! Proven-neutral `gs` activations are admitted next (T191), implemented in
+//! the private [`extgstate`] submodule. When a syntactically valid `gs` is
+//! present, ONE bounded decoded-name authority is built from the Form's OWN
+//! `/Resources /ExtGState` (never page fallback) with the same canonical-key,
+//! collision, named-skip, literal-poison, nameless-skip and 256-fact/spelling
+//! cap semantics as the other authorities. Every executed `gs` must resolve to
+//! exactly one classified entry proven colour-lane neutral and font-inert
+//! through the shipped classifier facts: no active overprint (ANY set `/OPM`,
+//! including `0`), no active transparency (alpha, blend mode, soft mask), no
+//! unresolved or unclassified safety parameter, `font_effect` exactly `Unset`,
+//! and no unclassified keys at all. The gate runs BEFORE the walk and is not a
+//! state machine — neutrality of every activated entry makes activation order
+//! irrelevant, so the single walk keeps its empty `ExtGState` environment and
+//! a proven-neutral `gs` is a no-op for the two-bit lane question. Every other
+//! `gs` refuses the whole Form.
+//!
 //! Invoked, retained nested ordinary Form targets are analyzed by bounded
 //! recursion (T190), implemented over the private [`recurse`] lattice. A child
 //! enters through the complete root path above — target/byte budgets, exact
@@ -128,9 +144,11 @@
 //! fabricate an unsafe false Neutral; the argument extends transitively to
 //! every admitted nested child. No Form byte is read as mutation authority,
 //! no CTM/bounds/visibility is published, and every group, uncertain resource
-//! colour, text, shading, `gs`, inline image, and unknown construct refuses.
+//! colour, unproven `gs`, text, shading, inline image, and unknown construct
+//! refuses.
 
 mod color;
+mod extgstate;
 mod recurse;
 mod xobjects;
 
@@ -439,11 +457,13 @@ impl FormXObjectEffectAnalyzer {
     /// authority, and walk state are all dropped on return.
     ///
     /// The Form-local device colour projection is built only when a `CS`/`cs`
-    /// resource colour operator is present, and the Form-local `XObject`
-    /// authority is built only when a syntactically valid `Do` is present;
-    /// otherwise the walk runs with an empty [`ColorSpaceEnv`] and no
-    /// authority, byte-for-byte reproducing the resource-independent T187
-    /// result. The projection borrows `resources`, which must outlive the walk.
+    /// resource colour operator is present, the Form-local `ExtGState` gate
+    /// runs only when a syntactically valid `gs` is present, and the
+    /// Form-local `XObject` authority is built only when a syntactically valid
+    /// `Do` is present; otherwise the walk runs with an empty [`ColorSpaceEnv`]
+    /// and no authority, byte-for-byte reproducing the resource-independent
+    /// T187 result. The projection borrows `resources`, which must outlive the
+    /// walk.
     fn analyze_bytes(
         &mut self,
         descent: &mut FormDescent<'_>,
@@ -453,6 +473,20 @@ impl FormXObjectEffectAnalyzer {
         let tokens = tokenize(decoded).ok()?;
         let records = assemble_operators(&tokens).ok()?.records;
         if !raw_preflight_ok(&tokens, &records, decoded) {
+            return None;
+        }
+        // Demand for the ExtGState gate is a syntactically valid `gs`; a Form
+        // without one never inspects its own `/Resources /ExtGState`, even a
+        // malformed one. Every activated entry is proven colour-lane neutral
+        // and font-inert BEFORE the walk, whose empty `ExtGState` environment
+        // keeps a proven-neutral `gs` inert for the two-bit lane question.
+        if !extgstate::proven_neutral_gs_activations(
+            descent.input,
+            descent.lookup,
+            reached_offset,
+            &records,
+            decoded,
+        ) {
             return None;
         }
         let resources = if records
@@ -818,14 +852,15 @@ fn raw_preflight_ok(tokens: &[Token], records: &[OperatorRecord], source: &[u8])
                 }
                 path_open = false;
             }
-            // Form-local resource colour-space selection (`CS`/`cs`) and
-            // external-object invocation (`Do`): no open path, exactly one
-            // syntactically valid name operand. Whether the name resolves to a
-            // supported Device family (selection) or an admissible Form-local
-            // ordinary Image/stencil (invocation) is proven later by the
-            // decoded-name projection/authority at the seeded walk; the raw
-            // pass validates syntax only.
-            b"CS" | b"cs" | b"Do" => {
+            // Form-local resource colour-space selection (`CS`/`cs`),
+            // external-object invocation (`Do`), and extended-graphics-state
+            // activation (`gs`): no open path, exactly one syntactically valid
+            // name operand. Whether the name resolves to a supported Device
+            // family (selection), an admissible Form-local ordinary
+            // Image/stencil/Form (invocation), or a proven-neutral `ExtGState`
+            // entry (activation) is proven later by the decoded-name
+            // projection/authority/gate; the raw pass validates syntax only.
+            b"CS" | b"cs" | b"Do" | b"gs" => {
                 if path_open || !single_name_operand(tokens, record) {
                     return false;
                 }
@@ -838,8 +873,8 @@ fn raw_preflight_ok(tokens: &[Token], records: &[OperatorRecord], source: &[u8])
                     return false;
                 }
             }
-            // Every other operator — line/text state, `gs`, `sh`, inline
-            // images, `BX/EX`, marked content, `d0/d1`, and unknown extensions —
+            // Every other operator — line/text state, `sh`, inline images,
+            // `BX/EX`, marked content, `d0/d1`, and unknown extensions —
             // refuses. A positive prefix never survives.
             _ => return false,
         }
@@ -884,8 +919,9 @@ fn is_finite_number_operand(tokens: &[Token], operand: &OperandRecord, source: &
     text.parse::<f64>().is_ok_and(f64::is_finite)
 }
 
-/// Whether a `CS`/`cs`/`Do` record carries exactly one operand that is a single
-/// PDF name lexeme. Semantic resolution of that name happens later, never here.
+/// Whether a `CS`/`cs`/`Do`/`gs` record carries exactly one operand that is a
+/// single PDF name lexeme. Semantic resolution of that name happens later,
+/// never here.
 fn single_name_operand(tokens: &[Token], record: &OperatorRecord) -> bool {
     let [operand] = record.operands.as_slice() else {
         return false;

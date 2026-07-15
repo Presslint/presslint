@@ -4,6 +4,23 @@ Older accumulated journal history lives in [JOURNAL-archive-4.md](JOURNAL-archiv
 
 ## Current State
 
+### Semantic uniqueness for ExtGState safety keys
+
+- ExtGState dictionary classification now decodes each dictionary key before
+  dispatch. The seven safety keys (`OP`, `op`, `OPM`, `CA`, `ca`, `BM`, and
+  `SMask`) therefore have the same meaning under valid `#xx` spellings as under
+  their canonical spelling; malformed name encodings remain unclassified.
+- Each safety key must be semantically unique. A repeated decoded key never
+  first- or last-wins, even when both values are identical: its existing
+  `ExtGStateParamClass` becomes `Malformed`, so
+  `has_unresolved_or_unclassified_safety_param()` fails closed in every
+  consumer. `/Font` keeps its exact duplicate-key descriptor, while harmless
+  unknown keys such as `/LW` retain the existing separate
+  `has_unclassified_keys` precision contract.
+- No public field, enum variant, serde shape, report, or predicate was added.
+  The hardening is one bounded pass over the already-inspected dictionary
+  entries and retains no additional source bytes or dictionary state.
+
 ### Semantic font names and duplicate poisoning
 
 - `/Font` namespace keys, ExtGState `/Font` effect keys, and names inside a
