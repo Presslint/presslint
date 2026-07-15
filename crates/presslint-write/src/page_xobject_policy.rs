@@ -327,7 +327,12 @@ const fn hex_digit(byte: u8) -> Option<u8> {
 /// metadata keeps them distinct, the colour effect does not. A `True` mask is
 /// a stencil only when the whole §8.9.6.2 shape holds; any other mask fact or
 /// an absent metadata record is `Unknown`, fail-closed.
-fn classify_image(metadata: Option<&ImageXObjectMetadata>) -> PageXObjectEffect {
+///
+/// This classifier is shared crate-wide rather than forked: the root Form
+/// effect analyzer reuses it for invoked Form-local Image targets after
+/// separately corroborating the semantic key authority its raw-key metadata
+/// facts rely on. The page-policy behaviour is unchanged.
+pub fn classify_image(metadata: Option<&ImageXObjectMetadata>) -> PageXObjectEffect {
     let Some(metadata) = metadata else {
         return PageXObjectEffect::Unknown;
     };

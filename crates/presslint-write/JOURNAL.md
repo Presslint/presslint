@@ -2,6 +2,103 @@
 
 Earlier entries are preserved in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T189 - Root Form local Image and stencil colour-effect admission
+
+### Mechanical split before growth
+
+The 1,144-line `form_xobject_effect.rs` was split BEFORE the new behaviour
+landed, zero-behavior-change: the cohesive T188 Device-colour implementation
+(the decoded-name `ColorAuthority`, `/Default*` and literal poisoning, the
+ephemeral `ColorSpaceResource` projection, `CS`/`cs` selection and named-setter
+validation, and the `/ColorSpace` half of the canonical-authority proof) moved
+into private submodule `form_xobject_effect/color.rs` behind small `pub(super)`
+seams. The parent retains the analyzer orchestration, the exact-identity
+cache/budgets, the semantic dictionary preflight, the closed raw grammar, the
+single seeded paint walk, and the GENERIC semantic-name/dictionary helpers
+(`canonical_unique_authority_entry`, `malformed_name_may_hide`, and the
+generalized `canonical_form_resources_entries` both authorities now share). All
+existing T187/T188 assertions pass unchanged; no public module or re-export was
+added.
+
+### One new private authority family
+
+`form_xobject_effect/xobjects.rs` adds the slice's ONE new domain abstraction:
+private `FormLocalXObjectAuthority`, a deterministic
+`BTreeMap<decoded name, Option<(PageXObjectResourceTarget, PageXObjectEffect)>>`
+plus a literal-poison set and a namespace poison flag. It is built lazily, at
+most once per analyzed Form, and ONLY when a syntactically valid `Do` is
+present (the raw grammar now admits `Do` outside an open path with exactly one
+name operand; everything else still refuses). `Some((target, effect))` is one
+unambiguous exact typed binding; per-name `None` is collision/named-skip/
+uncertain-target poison; a nameless uncertain skip, an ambiguous
+`/Resources`/`/XObject` authority, or more than 256 classified-plus-skipped
+facts poisons the whole namespace before the writer map is trusted.
+`/Subtype /Form` targets are RETAINED with their full target tuple for the
+later bounded-recursion slice — but only after the SAME exact-identity
+corroboration the Image path applies (reference/generation/reached-offset
+re-resolution, an exact reinspected object header, canonical semantically
+unique `/Subtype /Form`); an uncorroborated Form target degrades to per-name
+poison, and every invoked nested Form refuses in this slice either way. The
+authority keeps no source bytes, dictionaries, streams, tokens, or image data
+and is dropped once the fixed two-bit/Unknown result is cached.
+
+### Intrinsic Image/stencil dependency rule
+
+Per ISO 32000-1 §8.9.5, an ordinary `/Subtype /Image` (`/ImageMask` absent or
+direct `false`) interprets its OWN samples and never reads the current
+graphics-state colour: it is neutral to both lanes. Per §8.9.6.2, an
+`/ImageMask true` stencil uses the CURRENT nonstroking colour for marking. At a
+proven stencil `Do`, the walk reads the live pre-invocation nonstroking lane,
+consuming the inherited root only while that lane still equals the source-less
+sentinel — a prior direct setter, Form-local `cs`/`sc`
+selection, or unrestored local frame kills the consumption, and `q`/`Q`
+restoration re-exposes it exactly. Stroking is never consumed by a stencil.
+`/Mask`, `/SMask`, `/Decode`, `/Interpolate`, `/Intent`, and a JPX-style
+missing `/ColorSpace` affect coverage/sample interpretation only and are
+neither decoded nor promoted to a colour-lane read.
+
+### Authority boundary and bounds
+
+Structural facts come from the existing `inspect_form_xobject_resources`
+inspector (no new or changed public PDF API); its raw-key result is never
+writer authority by itself. Before any name resolves, the Form's own
+`/Resources` and `/XObject` keys must be canonical and semantically unique in
+source-addressable dictionaries (direct or one exact in-use indirect
+`/Resources` target; never page/caller fallback, never merged scopes). Every
+Image target is re-corroborated before trust: reference/generation/reached
+offset through the same exact-identity check the root uses, an exact
+reinspected target dictionary, canonical semantically unique `/Subtype /Image`
+and `/ImageMask` (including exact absence), and proven semantic absence of
+`/Alternates`, `/OPI`, `/OC`, `/F`, and `/Ref`. Retained Form targets share
+the identity corroboration and the canonical-unique-subtype proof (the
+inspector compares neither the parsed object header with the resource
+reference nor escaped subtype aliases); their deeper dictionary preflight
+stays with the recursion slice's analysis entry point. The shipped
+`page_xobject_policy::classify_image` ordinary/stencil classifier is reused
+through crate-private visibility widening rather than forked; because its
+metadata is raw-key structural, a `Stencil` verdict additionally corroborates
+canonical semantic uniqueness of `/Width`, `/Height`, `/BitsPerComponent`, and
+`/ColorSpace`. Decoded-name equality uses the shared bounded writer-local PDF
+name decoder; malformed relevant spellings keep literal poison and unrelated
+malformed names stay isolated. Declared-but-uninvoked targets never force
+analysis or poison unrelated names; demand stays at valid `Do` operations.
+
+### Recursion deferral and unchanged boundary
+
+No recursion, active/in-progress set, cycle detection, depth budget,
+child-effect composition, or cache-publication change landed: an invoked
+nested Form is Unknown for the entire root Form, and a positive prefix never
+survives an unsupported suffix. The `(IndirectRef, reached_offset)` cache key,
+post-`compute` publication, cached Unknown, 256 first-seen target cap,
+aggregate decoded-byte budget, root proxy/safety-key preflight, raw/single-
+Flate decode, Group absence, q/Q/path truth, and the T188 colour rules are all
+unchanged. Only existing eligible page setter bytes may change; Form, resource,
+and image objects remain read-only, byte-identical, and appear exactly once in
+output. Focused coverage lives in `tests/alias_epoch_form_xobjects.rs`
+(intrinsic lane effects, authority/poisoning/cap matrices, cache/parity, and
+end-to-end page-only mutation); the shared classifier's page-level behaviour is
+locked by the existing xobject policy tests.
+
 ## T188 - Root Form local-device colour effect admission
 
 ### Scope and one abstraction

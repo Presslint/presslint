@@ -10,6 +10,7 @@ mod alias_epoch_convert;
 mod alias_epoch_font;
 mod alias_epoch_form;
 mod alias_epoch_form_color_resources;
+mod alias_epoch_form_xobjects;
 mod alias_epoch_plan;
 mod alias_epoch_xobject;
 mod append;
