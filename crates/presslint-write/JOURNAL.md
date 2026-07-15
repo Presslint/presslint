@@ -2,6 +2,98 @@
 
 Earlier entries are preserved in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T188 - Root Form local-device colour effect admission
+
+### Scope and one abstraction
+
+This slice extends the EXISTING request-scoped `FormXObjectEffectAnalyzer`
+(`form_xobject_effect.rs`) across a narrow set of explicit Form-LOCAL device
+colour operations; it adds NO new domain abstraction and changes NO public
+surface. The analyzer's `analyze(input, lookup, reference, reached_offset)`
+shape, its `(IndirectRef, reached_offset)` cache identity, cached Unknown, the
+256 first-seen target cap and the aggregate decoded-byte budget are all
+preserved, and cache entries remain the fixed two-lane effect only. A Form
+without any `CS`/`cs` resource-colour operator is byte-for-byte the T187 result:
+the empty `ColorSpaceEnv` walk is unchanged and no resource inspection, decode,
+or projection runs. `PageXObjectPolicy` remains the sole page XObject-name
+authority; the outer `Do` still folds the two-bit effect through its existing
+collision/skip poisoning and the already-live `AnalyzedForm` consumer, so the
+only possible public-byte difference is an already-eligible page setter newly
+authorized by a proven effect.
+
+### ISO initial-colour and the two-layer machine
+
+Per ISO 32000-1 Table 74, `CS`/`cs` selects the colour space AND sets that
+space's initial current colour (DeviceGray `[0]`, DeviceRGB `[0 0 0]`,
+DeviceCMYK `[0 0 0 1]`). A proven local selection therefore kills ONLY its
+selected inherited lane even without a following setter, and the resulting local
+colour carries concrete operator provenance so it can never equal T187's
+source-less inherited sentinel. `q`/`Q` still saves and restores both lanes
+exactly, so `q; cs; fill; Q; fill` consumes the RESTORED inherited lane.
+
+The raw preflight stays grammar/refusal only: it now ADMITS `CS`/`cs` (outside an
+open path, exactly one syntactic name operand) and `SC`/`SCN`/`sc`/`scn` (outside
+an open path, at least one finite numeric operand, no trailing Pattern name), but
+proves neither semantic authority nor arity. The single
+`PaintProgram::ops_with_initial_state` walk remains the sole colour-state
+interpreter. Because `PaintOp.state` is post-operator, the walk compares each
+setter's PRIOR snapshot lane against its post lane: a named setter is admitted
+only over a proven local supported Device lane (a `Device*` space carrying a
+resource name — never the resource-name-less inherited sentinel or a direct
+device setter) with exact arity Gray 1 / RGB 3 / CMYK 4. Selection corroboration
+requires the projected Device family, exact raw operand spelling, ISO initial
+components, and the selecting record's concrete source. Setter corroboration
+rejects the source-less inherited sentinel first, then requires the prior local
+lane's family/name to survive unchanged and the setter to stamp its own record
+source. The CMYK-shaped inherited sentinel therefore never makes a
+four-component `SC` admissible. A `CS`/`cs` whose resolved post lane is not a
+supported local Device lane (an unresolved `Resource(name)`), any
+inherited/unsupported/wrong-arity/Pattern setter, and every unsupported suffix
+all return Unknown.
+
+### Decoded-name resource authority
+
+When a `CS`/`cs` operator is present, a bounded analyzer-private decoded-name
+projection is built ONCE from the Form's OWN `inspect_form_color_space_resources`
+(never page fallback). Before a missing `/Resources` or `/ColorSpace` fact may
+prove `/Default*` absence, a raw authority gate requires any present authority
+key to be canonical and semantically unique; direct resources and exact
+source-addressable indirect resource dictionaries are covered, while escaped,
+duplicate, malformed, unresolved or otherwise ambiguous authority is Unknown.
+The existing inspector continues to own colour-space value classification.
+
+Two separate 256 limits apply: total reported colour-space-plus-skip facts are
+capped before any writer authority map is allocated, and distinct raw `CS`/`cs`
+operand spellings are capped before the ephemeral environment can grow beyond
+256 entries. Exceeding either is Unknown. `ColorSpaceEnv` uses raw-name equality
+and is never the semantic authority: each distinct raw operand spelling actually
+used is decoded and resolved through the projection, and only a proven supported
+Device family yields an ephemeral `ColorSpaceResource` whose name matches that
+raw spelling for the one walk. Supported selections are the
+canonical direct `/DeviceGray`/`/DeviceRGB`/`/DeviceCMYK` (reserved selectors
+that cannot be shadowed by same-named resource keys) and unique Form-local
+aliases whose value classifies DIRECTLY as one of those families (no
+alias-to-alias chains). The matching `/DefaultGray`/`/DefaultRGB`/`/DefaultCMYK`
+binding must be proven absent; presence, an unclassifiable skip, or uncertainty
+makes that family Unknown, while canonically absent `/ColorSpace` proves
+absence. Decoded semantic duplicates poison the invoked name. Undecodable
+classified/skipped resource names retain their literal spelling as poison for a
+decoded operand that collides with it; unrelated malformed names remain
+isolated, and a malformed prefix that could hide a `/Default*` poisons only the
+possible matching families. A named skip poisons its decoded name; a nameless
+uncertain skip (or the fact cap) poisons every selection. Cal/ICC/Lab/Indexed/
+Separation/DeviceN and Pattern all refuse.
+
+### Retained boundary and deferral
+
+The entire T187 boundary is load-bearing and unchanged: exact identity, the
+`/F` `/Ref` `/OC` `/OPI` and canonical safety-key dictionary preflight, proven
+Group absence, raw/single-Flate decode and byte budget, and `/Matrix`/`/BBox`
+non-modelling (this makes only a colour-lane claim). Nested `Do`, ordinary
+images, stencil/image masks, inline images, shading, Pattern execution, `gs`,
+text/Type3, and every other resource operation still refuse. Recursion, image and
+stencil composition remain a deliberate later medium slice.
+
 ## T187 - Root Form inherited-colour effect admission
 
 ### Colour-dependency authority boundary
