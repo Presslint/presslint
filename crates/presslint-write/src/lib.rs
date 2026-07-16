@@ -47,6 +47,18 @@
 //! cross-reference `/Prev` chain, `/Root`, and object currency) are read through
 //! [`presslint_pdf`] rather than reparsed here, so the writer stays a thin byte
 //! assembler over already-validated structural metadata.
+//!
+//! [`reserve_fresh_object_references`] and
+//! [`write_incremental_revision_with_fresh_objects`] add one low-level,
+//! collision-safe currency for *new* objects: a caller reserves exact
+//! generation-zero identities proved never to collide with any existing
+//! effective identity or indirect-reference target (including dangling
+//! references in trailers, unreferenced bodies, and compressed members), then
+//! supplies bodies for those identities as [`FreshObjectBytes`] alongside
+//! ordinary dirty rewrites. This is a lower-level identity/serialization
+//! prerequisite only: it does not build a Form clone, choose a consumer edge,
+//! or authorize paint mutation, and `fresh_objects=[]` is byte-for-byte
+//! identical to [`write_incremental_revision`].
 
 #![forbid(unsafe_code)]
 
@@ -60,6 +72,7 @@ mod content_sequence_pipeline;
 mod content_stream_plan;
 mod extgstate_page_guard;
 mod form_xobject_effect;
+mod fresh_objects;
 mod link_routing;
 mod page_box_serialize;
 mod page_boxes;
@@ -101,7 +114,11 @@ pub use reencode_content::{
     reencode_page_content_incremental,
 };
 pub use selector_match::UnsupportedTargetLeaf;
-pub use writer::{ActiveTrailerError, DirtyObjectBytes, WriteError, write_incremental_revision};
+pub use writer::{
+    ActiveTrailerError, DirtyObjectBytes, FreshObjectBytes, WriteError,
+    reserve_fresh_object_references, write_incremental_revision,
+    write_incremental_revision_with_fresh_objects,
+};
 
 #[cfg(test)]
 mod tests;

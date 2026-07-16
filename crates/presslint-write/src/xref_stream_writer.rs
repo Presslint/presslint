@@ -1,11 +1,14 @@
 use presslint_pdf::{
     IndirectRef, MAX_XREF_STREAM_SECTION_DECODED_BYTES, ObjectLookup, XrefStreamChain,
-    XrefStreamTrailerInspection, build_xref_stream_chain, inspect_xref_stream_trailer,
-    resolve_xref_object_offset,
+    XrefStreamTrailerInspection, build_xref_stream_chain, inspect_object_body_references,
+    inspect_xref_stream_trailer, resolve_xref_object_offset,
 };
 
+use crate::fresh_objects::compute_xref_stream_fresh_floor;
 use crate::writer::{
-    ActiveTrailerScan, DirtyObjectBytes, WriteError, classify_resolution_error, order_dirty_objects,
+    ActiveTrailerScan, DirtyObjectBytes, FreshObjectBytes, WriteError, check_fresh_dirty_collision,
+    classify_resolution_error, combine_dirty_and_fresh, order_dirty_objects, order_fresh_objects,
+    validate_fresh_reservation,
 };
 
 const ENCRYPT_KEY: &[u8] = b"/Encrypt";
@@ -75,7 +78,127 @@ pub fn write_xref_stream_incremental_revision(
     Ok(writer.finish())
 }
 
-fn scan_active_xref_stream(
+/// Xref-stream backend for [`crate::write_incremental_revision_with_fresh_objects`].
+///
+/// Recomputes the collision-free floor for `input`, validates dirty objects
+/// through the unchanged existing-object path, validates the fresh
+/// reservation against the recomputed floor, emits dirty and fresh objects
+/// merged in deterministic ascending-reference order, then places the private
+/// self-object number above every fresh reservation AND every
+/// indirect-reference target parsed from the newly appended dirty/fresh
+/// bodies (scanned bounded and per-object on the already-assembled output, so
+/// an intentional caller edge to a fresh object is allowed while an
+/// unrelated dangling reference is never accidentally satisfied).
+pub fn write_xref_stream_incremental_revision_with_fresh(
+    input: &[u8],
+    dirty_objects: &[DirtyObjectBytes],
+    fresh_objects: &[FreshObjectBytes],
+    startxref_byte_offset: usize,
+) -> Result<Vec<u8>, WriteError> {
+    let active = inspect_xref_stream_trailer(input, startxref_byte_offset)
+        .map_err(|error| WriteError::ActiveXrefStream { error })?;
+    let active_scan = scan_active_xref_stream(input, &active)?;
+    let chain = build_xref_stream_chain(
+        input,
+        startxref_byte_offset,
+        MAX_XREF_STREAM_SECTION_DECODED_BYTES,
+    )
+    .map_err(|error| WriteError::XrefStreamChain {
+        error: Box::new(error),
+    })?;
+
+    let floor = compute_xref_stream_fresh_floor(input, &chain, &active)?;
+
+    let ordered_dirty = order_dirty_objects(dirty_objects)?;
+    validate_dirty_objects(input, &chain, &ordered_dirty)?;
+
+    let ordered_fresh = order_fresh_objects(fresh_objects)?;
+    check_fresh_dirty_collision(&ordered_dirty, &ordered_fresh)?;
+    validate_fresh_reservation(floor, &ordered_fresh)?;
+
+    let combined = combine_dirty_and_fresh(&ordered_dirty, &ordered_fresh);
+    let body_len_total: usize = combined.iter().map(|(_, body)| body.len()).sum();
+    let mut writer =
+        XrefStreamRevisionWriter::with_capacity_estimate(input, body_len_total, combined.len() + 1);
+    writer.ensure_leading_eol();
+
+    let mut entries = Vec::with_capacity(combined.len() + 1);
+    for (reference, body) in &combined {
+        let byte_offset = writer.append_object(*reference, body);
+        entries.push(XrefStreamEntry {
+            object_number: reference.object_number,
+            generation: reference.generation,
+            byte_offset,
+        });
+    }
+
+    let reservation_last = ordered_fresh.last().map_or_else(
+        || floor.saturating_sub(1),
+        |fresh| u64::from(fresh.reference.object_number),
+    );
+    let xref_object_number =
+        next_xref_object_number_with_fresh(&writer.out, &entries, reservation_last)?;
+
+    let xref_byte_offset = writer.len();
+    entries.push(XrefStreamEntry {
+        object_number: xref_object_number,
+        generation: 0,
+        byte_offset: xref_byte_offset,
+    });
+    let size = xref_effective_size(&chain, xref_object_number)?;
+    writer.push_xref_stream(&XrefStreamAppend {
+        xref_object_number,
+        size,
+        root: chain.root_reference,
+        prev_byte_offset: startxref_byte_offset,
+        id_bytes: active_scan.id_bytes(input),
+        info_bytes: active_scan.info_bytes(input),
+        entries: &entries,
+    });
+    writer.push_startxref(xref_byte_offset);
+
+    Ok(writer.finish())
+}
+
+/// The xref-stream self-object number: one past the highest of the last
+/// reserved fresh object number and every
+/// indirect-reference target discovered in the newly appended dirty/fresh
+/// bodies (scanned on the already-assembled output at each recorded byte
+/// offset, so stream payload bytes are never mistaken for object syntax). The
+/// proved fresh reservation is already above every identity in the existing
+/// chain, so the chain does not need to be scanned again here.
+fn next_xref_object_number_with_fresh(
+    assembled_output: &[u8],
+    entries: &[XrefStreamEntry],
+    reservation_last: u64,
+) -> Result<u32, WriteError> {
+    let mut highest = reservation_last;
+
+    for entry in entries {
+        let reference = IndirectRef {
+            object_number: entry.object_number,
+            generation: entry.generation,
+        };
+        let inspection = inspect_object_body_references(assembled_output, entry.byte_offset)
+            .map_err(|error| WriteError::FreshFloorBodyReferences {
+                reference,
+                error: Box::new(error),
+            })?;
+        if inspection.truncation.is_some() || !inspection.skipped_references.is_empty() {
+            return Err(WriteError::FreshFloorObjectReferencesIncomplete { reference });
+        }
+        for found in &inspection.references {
+            highest = highest.max(u64::from(found.object_number));
+        }
+    }
+
+    let next = highest
+        .checked_add(1)
+        .ok_or(WriteError::FreshXrefSelfObjectOverflow)?;
+    u32::try_from(next).map_err(|_| WriteError::FreshXrefSelfObjectOverflow)
+}
+
+pub fn scan_active_xref_stream(
     input: &[u8],
     active: &XrefStreamTrailerInspection,
 ) -> Result<ActiveTrailerScan, WriteError> {
@@ -171,7 +294,13 @@ impl XrefStreamRevisionWriter {
             .iter()
             .map(|dirty| dirty.body_bytes.len())
             .sum();
-        let headroom = body_bytes + 96 * dirty_objects.len() + 384;
+        Self::with_capacity_estimate(input, body_bytes, dirty_objects.len())
+    }
+
+    /// Seed the output with the verbatim input plus a headroom estimate sized
+    /// from the total appended body byte length and item count.
+    fn with_capacity_estimate(input: &[u8], body_bytes: usize, item_count: usize) -> Self {
+        let headroom = body_bytes + 96 * item_count + 384;
         let mut out = Vec::with_capacity(input.len() + headroom);
         out.extend_from_slice(input);
         Self { out }

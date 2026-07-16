@@ -24,6 +24,8 @@ mod content_color_convert_resource_space;
 mod content_color_rewrite;
 mod content_object_ownership;
 mod extgstate_page_guard;
+mod fresh_objects;
+mod fresh_objects_floor;
 mod link_routing;
 mod page_boxes;
 mod page_boxes_xref_stream;

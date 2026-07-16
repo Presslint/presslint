@@ -2,6 +2,186 @@
 
 Earlier entries are preserved in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T193 - Deterministic fresh-object reservation and incremental append
+
+### The one new public shape
+
+`FreshObjectBytes { reference: IndirectRef, body_bytes: Vec<u8> }` mirrors
+`DirtyObjectBytes` structurally but carries the opposite identity contract: it
+names a NEW, uncompressed, generation-zero object that must never rewrite an
+existing identity. It derives no serde (matching `DirtyObjectBytes`). Two free
+functions round out the public surface:
+
+- `reserve_fresh_object_references(input, count) -> Result<Vec<IndirectRef>, WriteError>`
+  proves a complete, bounded, collision-free floor over the effective
+  newest-wins object set and returns exactly `count` contiguous ascending
+  generation-zero references starting there. `count == 0` returns an empty
+  vector without any whole-document scan.
+- `write_incremental_revision_with_fresh_objects(input, dirty_objects, fresh_objects) -> Result<Vec<u8>, WriteError>`
+  recomputes and re-validates that same floor for the supplied live bytes,
+  requires the caller's sorted fresh references to match it exactly (a
+  reservation is not a capability token — the same input must still be
+  supplied unchanged), validates dirty objects through the pre-existing path,
+  and emits dirty and fresh objects merged in deterministic ascending-
+  reference order on both backends. `fresh_objects=[]` delegates straight to
+  the pre-existing `write_incremental_revision`, so it is byte-for-byte
+  identical and performs no new allocation/reference discovery.
+
+`crates/presslint-write/src/fresh_objects.rs` is the private mechanic behind
+both: no second public domain abstraction, only the floor proof and its
+bounded accounting helpers.
+
+### The floor proof
+
+The floor is one past every identity that could collide. Both backends prove:
+the whole-`/Prev`-chain effective `/Size`; every effective xref entry object
+number, including high free entries (classic) and, for xref streams, each
+type-2 entry's object-stream container number and every observed section's
+own indirect-object header number (so a defective section whose entry map
+omits itself still raises the floor above its physical identity); every
+indirect-reference target in the active trailer/xref-stream dictionary
+(scanned over the dictionary's own balanced extent, never the trailing stream
+bytes for the xref-stream case); and every indirect-reference target in every
+effective live (in-use/uncompressed/compressed) object body, resolved through
+the existing `resolve_object` + `inspect_object_body_references_resolved`
+pair — including xref-defined objects with no other referrer and compressed
+object-stream members. A classic table can never carry a type-2 entry, so the
+classic proof never touches compressed-member decode work.
+
+Any incomplete proof fails CLOSED rather than returning a partial ceiling:
+an unresolvable object, a body/trailer reference scan that found an
+out-of-range reference shape or hit the per-body truncation cap, a
+reserved/future xref-stream entry type (its semantics cannot be proven
+complete, so it stops the whole computation rather than being skipped), a
+numeric conversion overflow, or either of the two writer-local cumulative
+caps below.
+
+`reserve_fresh_object_references` re-runs the same `scan_active_trailer`
+(classic) / `scan_active_xref_stream` (xref-stream) `/Encrypt`/`/XRefStm`
+check the write path already ran before it starts the floor proof, so a
+nonzero reservation over an encrypted or classic-hybrid input refuses with
+the same `EncryptedInput`/`HybridXrefStmInput` tags `write_incremental_revision`
+already used — a fixed gap in this slice's initial cut, where the reservation
+entry point bypassed that check and could otherwise "prove" a floor over an
+unsupported source it should never have scanned at all.
+
+### Bounds
+
+Two writer-local cumulative caps, both in `fresh_objects.rs` and both
+exercised by a dedicated exhaustion test:
+
+- `MAX_FRESH_FLOOR_REFERENCES = 4096` is the accepted accumulation budget
+  across the whole proof (trailer/dictionary scan plus every live body), not
+  a hard cap on scanner work. Each delegated scan may first materialize up to
+  `MAX_OBJECT_BODY_REFERENCES = 65,536`; after 4,096 discoveries accepted by
+  earlier scans, the rejecting scan can therefore bring worst-case cumulative
+  valid-reference discovery to 69,632 before the proof refuses. The two-tier
+  bound is deliberate because the existing `presslint-pdf` scanner API has a
+  per-scan cap and this slice does not add a budget-aware parser API.
+- `MAX_FRESH_FLOOR_DECODE_WORK_BYTES = 1_048_576` (1 MiB) bounds the total
+  decoded bytes from compressed-member container resolution. `resolve_for_floor`
+  passes the *remaining* budget (`FloorAccumulator::decode_work_budget`), not
+  the whole-cap constant, as each call's `max_decoded_object_stream_bytes`
+  bound, so a second or later container decode is itself cut off the instant
+  it would exceed the cumulative cap rather than paying its full decode cost
+  and only being rejected afterward by `record_decode_work`. A rejection
+  caused by that reduced bound (`DecodedObjectStreamTooLarge` or a Flate
+  `OutputLimitExceeded`) is reported as `FreshFloorDecodeWorkCapExceeded`, the
+  same tag a completed-but-over-budget decode would have produced.
+  `resolve_object` does not cache decoded containers, so two compressed
+  members sharing one container each pay decode cost again; this cap makes
+  that repeated-decode amplification bounded and counted rather than assumed
+  away, with worst-case actual decoded work never exceeding the documented
+  cap (a fixed prior version bounded every call by the whole constant instead
+  of the remaining budget, letting worst-case work exceed the cap before the
+  cumulative check fired — fixed for this slice's public release).
+
+### Xref-stream self-object avoidance
+
+The internal xref-stream self-object number is placed above the whole fresh
+reservation AND above every indirect-reference target parsed from the newly
+appended dirty/fresh bodies. That second part is not part of the floor proof
+(which only sees the EXISTING document): after appending dirty+fresh objects
+to the output buffer, `next_xref_object_number_with_fresh` re-scans each
+appended object's own bounded extent on the ALREADY-ASSEMBLED output with the
+same `inspect_object_body_references` used elsewhere, so stream payload bytes
+are never mistaken for object syntax. This lets a caller intentionally
+reference a fresh object from a dirty/fresh body while guaranteeing the
+self-object can never accidentally satisfy an otherwise-dangling reference —
+proven by a dedicated test that references the naive "chain max + 1" self-slot
+from a fresh body and asserts the self-object skips above it while that
+number stays absent from the reopened chain.
+
+### Additive `WriteError` tags
+
+Sixteen new flat `WriteError` variants (their `stage` names extend the public
+serde-tag vocabulary): fresh-object shape validation
+(`NonZeroFreshGeneration`, `DuplicateFreshObject`, `FreshDirtyObjectCollision`,
+`FreshReservationNotContiguous`, `FreshReservationFloorMismatch`,
+`FreshReservationNumberOverflow`) and floor-proof/self-avoidance failures
+(`FreshFloorNumericOverflow`, `FreshFloorResolution`,
+`FreshFloorBodyReferences`, `FreshFloorTrailerReferencesIncomplete`,
+`FreshFloorObjectReferencesIncomplete`, `FreshFloorReservedEntry`,
+`FreshFloorReferenceCapExceeded`, `FreshFloorDecodeWorkCapExceeded`,
+`FreshFloorSectionHeader`, `FreshXrefSelfObjectOverflow`).
+`FreshFloorBodyReferences`/`FreshFloorObjectReferencesIncomplete` are shared
+between the floor proof (existing bodies) and the self-avoidance scan (newly
+appended bodies); the carried `reference` disambiguates which.
+
+### Legacy compatibility, provably
+
+`write_incremental_revision` and the classic/xref-stream backend functions it
+calls are byte-for-byte UNCHANGED. The new fresh-aware backend functions
+(`write_classic_incremental_revision_with_fresh`,
+`write_xref_stream_incremental_revision_with_fresh`) are separate functions
+that reuse the same private helpers (`order_dirty_objects`,
+`validate_dirty_objects`, `AppendRevisionWriter`/`XrefStreamRevisionWriter`);
+`AppendRevisionWriter::new` and `XrefStreamRevisionWriter::new` were refactored
+to delegate to a new `with_capacity_estimate` constructor with the identical
+headroom formula, a zero-behavior-change internal reuse. A dedicated test
+matrix asserts `write_incremental_revision_with_fresh_objects(..., &[])`
+byte-matches `write_incremental_revision` across the existing
+encrypted/hybrid/duplicate/generation-mismatch/not-in-use/non-PDF rejection
+fixtures, plus zero/multiple/reversed-order dirty objects on both backends.
+
+### Test matrix additions (fail-closed and legacy-parity gaps)
+
+Beyond the vertical/floor/fail-closed cases above, the matrix also proves:
+nonempty reservation refusal for encrypted and classic-hybrid inputs, and for
+an xref-stream input whose own dictionary declares `/Encrypt`; xref-stream
+fresh-only append and full classic-style legacy parity (zero/reversed dirty
+objects) on the xref-stream backend; a floor raised by a high in-use (not
+just free) entry despite an understated `/Size`; a floor raised by a dangling
+reference inside an object genuinely reachable via the page `/Parent` edge,
+not just an orphaned unreferenced body; two compressed members resolved in
+either physical container packing order producing an identical floor; a
+broken classic/xref-stream `/Prev` chain, a malformed (unclosed) trailer
+dictionary, a compressed member whose `/ObjStm` header declares the wrong
+object number, a single body over the per-body reference-scan truncation cap,
+and an xref-stream self-object overflow after an otherwise-valid fresh
+reservation, all refusing before output assembly; and the vertical round-trip
+tests resolving and byte-comparing every appended fresh/dirty body through
+the real header-inspection API, not just locating its header. The
+floor-proof's `FreshFloorSectionHeader` branch (an xref-stream section whose
+own indirect-object header cannot be parsed) is intentionally left untested
+by a black-box fixture: `build_xref_stream_chain` already re-parses that
+exact header at that exact offset through the identical
+`inspect_indirect_object_header` call while building the chain the floor
+proof consumes, so a chain that built successfully cannot reach this branch
+from any externally-constructed input; it stays as defense in depth.
+
+### Deferred clone wiring
+
+No production planner calls the new API in this slice. `IncrementalRevisionPlan`,
+`PlannedObjectAllocation`, `MutationBoundary::IndirectObjectClone`, and the
+`write_incremental_revision_plan` bridge stay frozen — this is the lower-level
+identity/serialization prerequisite only, not a Form clone, consumer-edge
+choice, or paint-mutation authorization. `presslint-pdf`'s existing exported
+resolver/reference-inspection seams (`resolve_object`,
+`inspect_object_body_references_resolved`, `ClassicXrefChain`/`XrefStreamChain`,
+`inspect_indirect_object_header`) proved sufficient; no new `presslint-pdf`
+public API was needed.
+
 ## T192 - Form refusal-class instrumentation, serialized per-page counts
 
 ### The taxonomy
@@ -91,8 +271,17 @@ operator on the SAME page as an actually-invoked, refused Form `Do` — the
 refusal tally is observed alongside that operator's own conversion, not
 substituted for a fixture with no Form at all. The no-analysis-context refusal
 at `page_xobject_policy.rs:195` (the structural-policy path with no attached
-analyzer) stays uninstrumented by design — visible to a future sweep as
-`resource_alias_candidates_refused − Σclasses`, not coded around.
+analyzer) stays uninstrumented by design — left for a future sweep to add its
+own class, not coded around.
+
+**Correction (T193):** `resource_alias_candidates_refused` and
+`form_xobject_refusal_counts` are independent event domains — the former
+counts alias-conversion refusals, the latter counts Form-effect-analysis
+refusals, over different (overlapping but not nested) event sets. No
+subtraction between them has semantic meaning; a prior draft of this entry
+suggested `resource_alias_candidates_refused − Σclasses` as a way to infer the
+uninstrumented `page_xobject_policy.rs:195` count. That arithmetic is wrong
+and has been removed. Report the two tallies separately.
 
 ### Performance
 

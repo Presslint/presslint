@@ -1,15 +1,24 @@
+use std::ops::Range;
+
 use serde::{Deserialize, Serialize};
 
 use presslint_pdf::{
     ClassicXrefChain, ClassicXrefChainError, ClassicXrefTableInspectionError,
-    ClassicXrefTrailerDictionaryInspectionError, DictionaryEntryInspectionError, IndirectRef,
-    ObjectLookup, ObjectResolutionError, ObjectResolutionRejection, PdfSourceInspectionError,
-    XrefSection, XrefStreamChainError, XrefStreamTrailerInspectionError, build_classic_xref_chain,
+    ClassicXrefTrailerDictionaryInspectionError, DictionaryEntryInspectionError,
+    IndirectObjectHeaderInspectionError, IndirectRef, MAX_XREF_STREAM_SECTION_DECODED_BYTES,
+    ObjectBodyReferencesInspectionError, ObjectLookup, ObjectResolutionError,
+    ObjectResolutionRejection, PdfSourceInspectionError, XrefSection, XrefStreamChainError,
+    XrefStreamTrailerInspectionError, build_classic_xref_chain, build_xref_stream_chain,
     inspect_classic_xref_table, inspect_classic_xref_trailer_dictionary,
-    inspect_dictionary_entries, inspect_pdf_source, resolve_xref_object_offset,
+    inspect_dictionary_entries, inspect_pdf_source, inspect_xref_stream_trailer,
+    resolve_xref_object_offset,
 };
 
-use crate::xref_stream_writer::write_xref_stream_incremental_revision;
+use crate::fresh_objects::{compute_classic_fresh_floor, compute_xref_stream_fresh_floor};
+use crate::xref_stream_writer::{
+    scan_active_xref_stream, write_xref_stream_incremental_revision,
+    write_xref_stream_incremental_revision_with_fresh,
+};
 
 const ENCRYPT_KEY: &[u8] = b"/Encrypt";
 const ID_KEY: &[u8] = b"/ID";
@@ -38,6 +47,26 @@ pub struct DirtyObjectBytes {
     /// Indirect reference of the existing uncompressed object to rewrite.
     pub reference: IndirectRef,
     /// Replacement object body bytes (no header, no `endobj`).
+    pub body_bytes: Vec<u8>,
+}
+
+/// One new, uncompressed, generation-zero object to append at a proved fresh
+/// identity.
+///
+/// `FreshObjectBytes` mirrors [`DirtyObjectBytes`] structurally but carries
+/// the opposite identity contract: `reference` must be one of the exact
+/// contiguous identities [`reserve_fresh_object_references`] proves for the
+/// current input, never an existing object number. `body_bytes` is the new
+/// object *body* only, wrapped in a header and `endobj` exactly like a dirty
+/// rewrite; it is never inspected, decoded, or edited beyond the bounded
+/// reference scan [`write_incremental_revision_with_fresh_objects`] performs
+/// to keep the xref-stream backend's own self-object number out of every
+/// reference the caller writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreshObjectBytes {
+    /// Reserved fresh generation-zero indirect reference.
+    pub reference: IndirectRef,
+    /// New object body bytes (no header, no `endobj`).
     pub body_bytes: Vec<u8>,
 }
 
@@ -150,6 +179,108 @@ pub enum WriteError {
         /// Highest existing or newly requested object number that overflowed.
         object_number: usize,
     },
+    /// A fresh object declares a nonzero generation. Fresh objects are always
+    /// newly allocated generation-zero identities.
+    NonZeroFreshGeneration {
+        /// The offending fresh reference.
+        reference: IndirectRef,
+    },
+    /// Two fresh objects share the same object number.
+    DuplicateFreshObject {
+        /// The repeated object number.
+        object_number: u32,
+    },
+    /// A dirty object and a fresh object share the same object number.
+    FreshDirtyObjectCollision {
+        /// The colliding object number.
+        object_number: u32,
+    },
+    /// The supplied fresh references are not exactly ascending, contiguous,
+    /// generation-zero identities.
+    FreshReservationNotContiguous {
+        /// The earlier reference in sorted order.
+        previous: IndirectRef,
+        /// The following reference that did not continue the sequence.
+        next: IndirectRef,
+    },
+    /// The supplied fresh references do not begin exactly at the freshly
+    /// recomputed collision-free floor for the current input bytes. A
+    /// reservation computed for different input bytes, or any hand-picked
+    /// first number, is rejected rather than trusted as a capability token.
+    FreshReservationFloorMismatch {
+        /// The floor recomputed for the current input.
+        expected_floor: u32,
+        /// The first object number the caller actually supplied.
+        found_first: u32,
+    },
+    /// Reservation count/object-number arithmetic does not fit the public
+    /// `u32` object-number field.
+    FreshReservationNumberOverflow,
+    /// A numeric conversion inside the allocation-floor proof (a decoded
+    /// object or generation number, or a checked-add) did not fit its target
+    /// type.
+    FreshFloorNumericOverflow,
+    /// The allocation-floor proof could not resolve an effective live object
+    /// body.
+    FreshFloorResolution {
+        /// The unresolved reference.
+        reference: IndirectRef,
+        /// Delegated object-resolution failure.
+        error: Box<ObjectResolutionError>,
+    },
+    /// The allocation-floor proof could not scan an effective live object
+    /// body for indirect references. Also raised when scanning a newly
+    /// appended dirty/fresh body while placing the xref-stream self-object.
+    FreshFloorBodyReferences {
+        /// The object whose body could not be scanned.
+        reference: IndirectRef,
+        /// Delegated object-body-reference inspection failure.
+        error: Box<ObjectBodyReferencesInspectionError>,
+    },
+    /// The active trailer/xref-stream dictionary reference scan could not
+    /// prove completeness (an out-of-range reference shape or a truncation).
+    FreshFloorTrailerReferencesIncomplete,
+    /// An object body's reference scan could not prove completeness (an
+    /// out-of-range reference shape or a truncation). Also raised when
+    /// scanning a newly appended dirty/fresh body while placing the
+    /// xref-stream self-object.
+    FreshFloorObjectReferencesIncomplete {
+        /// The object whose body scan was incomplete.
+        reference: IndirectRef,
+    },
+    /// The allocation-floor proof reached a reserved/future xref-stream
+    /// entry type whose semantics cannot be proven complete.
+    FreshFloorReservedEntry {
+        /// The reserved entry's object number.
+        object_number: usize,
+        /// Raw type field value.
+        entry_type: u64,
+    },
+    /// The allocation-floor proof's cumulative accepted-reference budget was
+    /// exceeded. A rejecting delegated scan may already have discovered up to
+    /// its separate 65,536-reference per-scan cap.
+    FreshFloorReferenceCapExceeded {
+        /// Configured cumulative accepted-reference budget.
+        max_references: usize,
+    },
+    /// The allocation-floor proof's cumulative compressed-container
+    /// decode-work cap was exceeded.
+    FreshFloorDecodeWorkCapExceeded {
+        /// Configured cumulative decode-work byte cap.
+        max_decoded_bytes: usize,
+    },
+    /// The allocation-floor proof could not parse an xref-stream section's
+    /// own object header while proving self-object identity.
+    FreshFloorSectionHeader {
+        /// The section byte offset whose header failed to parse.
+        byte_offset: usize,
+        /// Delegated object-header inspection failure.
+        error: Box<IndirectObjectHeaderInspectionError>,
+    },
+    /// The xref-stream self-object number could not be allocated above every
+    /// fresh reservation and every reference target discovered in newly
+    /// supplied bodies.
+    FreshXrefSelfObjectOverflow,
 }
 
 /// Append an incremental revision that no-op rewrites existing uncompressed
@@ -193,6 +324,129 @@ pub fn write_incremental_revision(
     }
 }
 
+/// Reserve `count` exact contiguous ascending generation-zero fresh
+/// [`IndirectRef`]s for `input`.
+///
+/// The reservation is a complete, bounded proof over the effective
+/// newest-wins object set (see the [`crate::fresh_objects`] module doc): a
+/// floor at least one greater than every identity that could collide,
+/// including dangling references in trailers, unreferenced bodies, and
+/// compressed members. It is not a capability token — the same input bytes
+/// must still be supplied unchanged to
+/// [`write_incremental_revision_with_fresh_objects`], which independently
+/// recomputes and re-validates the floor before assembling output.
+///
+/// `count == 0` returns an empty vector without any whole-document
+/// allocation scan.
+///
+/// Reference discovery uses a two-tier bound: at most 4,096 references are
+/// accepted cumulatively, while each delegated scan may first discover up to
+/// 65,536. Thus a rejecting scan can bring worst-case cumulative valid-
+/// reference discovery to 69,632 before the proof refuses.
+///
+/// # Errors
+///
+/// Returns [`WriteError`] when the input is not a supported append source,
+/// the active trailer/xref-stream dictionary declares `/Encrypt` or a classic
+/// `/XRefStm` hybrid reference (the same retained safety boundary as
+/// [`write_incremental_revision`]), the allocation-floor proof cannot
+/// complete (see [`compute_classic_fresh_floor`] and
+/// [`compute_xref_stream_fresh_floor`]), or when `count` does not fit
+/// alongside the proved floor inside the public `u32` object-number field.
+pub fn reserve_fresh_object_references(
+    input: &[u8],
+    count: usize,
+) -> Result<Vec<IndirectRef>, WriteError> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let source = inspect_pdf_source(input).map_err(|error| WriteError::Source { error })?;
+    let startxref = source.startxref.ok_or(WriteError::StartXrefUnavailable)?;
+
+    let floor = match source.xref_section {
+        Some(XrefSection::Table) => {
+            let newest_table = inspect_classic_xref_table(input, startxref.byte_offset)
+                .map_err(|error| WriteError::XrefTable { error })?;
+            let (_, trailer_dictionary_range) =
+                scan_active_trailer(input, newest_table.trailer_byte_offset)?;
+            let chain =
+                build_classic_xref_chain(input, startxref.byte_offset).map_err(|error| {
+                    WriteError::ClassicXrefChain {
+                        error: Box::new(error),
+                    }
+                })?;
+            compute_classic_fresh_floor(input, &chain, trailer_dictionary_range)?
+        }
+        Some(XrefSection::Stream { .. }) => {
+            let active = inspect_xref_stream_trailer(input, startxref.byte_offset)
+                .map_err(|error| WriteError::ActiveXrefStream { error })?;
+            scan_active_xref_stream(input, &active)?;
+            let chain = build_xref_stream_chain(
+                input,
+                startxref.byte_offset,
+                MAX_XREF_STREAM_SECTION_DECODED_BYTES,
+            )
+            .map_err(|error| WriteError::XrefStreamChain {
+                error: Box::new(error),
+            })?;
+            compute_xref_stream_fresh_floor(input, &chain, &active)?
+        }
+        None => return Err(WriteError::XrefSectionUnclassified),
+    };
+
+    build_reservation(floor, count)
+}
+
+/// Append an incremental revision that no-op rewrites existing uncompressed
+/// objects and appends caller-supplied fresh generation-zero objects at
+/// exactly reserved identities.
+///
+/// `fresh_objects=[]` enters the pre-existing [`write_incremental_revision`]
+/// backend paths directly: no allocation scan, no new error, and byte-for-byte
+/// identical output. A nonempty `fresh_objects` recomputes the collision-free
+/// floor for `input` (see [`reserve_fresh_object_references`]), requires the
+/// caller's sorted fresh references to match that floor exactly, validates
+/// dirty objects through the unchanged existing-object path, and rejects any
+/// dirty/fresh object-number collision. Dirty and fresh objects are merged and
+/// emitted in deterministic ascending-reference order regardless of caller
+/// order.
+///
+/// # Errors
+///
+/// Returns [`WriteError`] for every [`write_incremental_revision`] failure,
+/// plus a nonzero fresh generation, a duplicate fresh object number, a
+/// gapped/noncontiguous fresh reservation, a floor mismatch, a dirty/fresh
+/// collision, or any allocation-floor proof failure.
+pub fn write_incremental_revision_with_fresh_objects(
+    input: &[u8],
+    dirty_objects: &[DirtyObjectBytes],
+    fresh_objects: &[FreshObjectBytes],
+) -> Result<Vec<u8>, WriteError> {
+    if fresh_objects.is_empty() {
+        return write_incremental_revision(input, dirty_objects);
+    }
+
+    let source = inspect_pdf_source(input).map_err(|error| WriteError::Source { error })?;
+    let startxref = source.startxref.ok_or(WriteError::StartXrefUnavailable)?;
+
+    match source.xref_section {
+        Some(XrefSection::Table) => write_classic_incremental_revision_with_fresh(
+            input,
+            dirty_objects,
+            fresh_objects,
+            startxref.byte_offset,
+        ),
+        Some(XrefSection::Stream { .. }) => write_xref_stream_incremental_revision_with_fresh(
+            input,
+            dirty_objects,
+            fresh_objects,
+            startxref.byte_offset,
+        ),
+        None => Err(WriteError::XrefSectionUnclassified),
+    }
+}
+
 pub fn write_classic_incremental_revision(
     input: &[u8],
     dirty_objects: &[DirtyObjectBytes],
@@ -200,7 +454,7 @@ pub fn write_classic_incremental_revision(
 ) -> Result<Vec<u8>, WriteError> {
     let newest_table = inspect_classic_xref_table(input, startxref_byte_offset)
         .map_err(|error| WriteError::XrefTable { error })?;
-    let active_trailer = scan_active_trailer(input, newest_table.trailer_byte_offset)?;
+    let (active_trailer, _) = scan_active_trailer(input, newest_table.trailer_byte_offset)?;
 
     let chain = build_classic_xref_chain(input, startxref_byte_offset).map_err(|error| {
         WriteError::ClassicXrefChain {
@@ -236,6 +490,217 @@ pub fn write_classic_incremental_revision(
     writer.push_startxref(xref_byte_offset);
 
     Ok(writer.finish())
+}
+
+/// Classic backend for [`write_incremental_revision_with_fresh_objects`].
+///
+/// Recomputes the collision-free floor for `input`, validates dirty objects
+/// through the unchanged existing-object path, validates the fresh
+/// reservation against the recomputed floor, and emits dirty and fresh
+/// objects merged in deterministic ascending-reference order. Classic tables
+/// have no self-object concept, so there is nothing analogous to the
+/// xref-stream backend's self-object avoidance scan.
+fn write_classic_incremental_revision_with_fresh(
+    input: &[u8],
+    dirty_objects: &[DirtyObjectBytes],
+    fresh_objects: &[FreshObjectBytes],
+    startxref_byte_offset: usize,
+) -> Result<Vec<u8>, WriteError> {
+    let newest_table = inspect_classic_xref_table(input, startxref_byte_offset)
+        .map_err(|error| WriteError::XrefTable { error })?;
+    let (active_trailer, trailer_dictionary_range) =
+        scan_active_trailer(input, newest_table.trailer_byte_offset)?;
+
+    let chain = build_classic_xref_chain(input, startxref_byte_offset).map_err(|error| {
+        WriteError::ClassicXrefChain {
+            error: Box::new(error),
+        }
+    })?;
+
+    let floor = compute_classic_fresh_floor(input, &chain, trailer_dictionary_range)?;
+
+    let ordered_dirty = order_dirty_objects(dirty_objects)?;
+    validate_dirty_objects(input, &chain, &ordered_dirty)?;
+
+    let ordered_fresh = order_fresh_objects(fresh_objects)?;
+    check_fresh_dirty_collision(&ordered_dirty, &ordered_fresh)?;
+    validate_fresh_reservation(floor, &ordered_fresh)?;
+
+    let combined = combine_dirty_and_fresh(&ordered_dirty, &ordered_fresh);
+    let body_len_total: usize = combined.iter().map(|(_, body)| body.len()).sum();
+    let mut writer =
+        AppendRevisionWriter::with_capacity_estimate(input, body_len_total, combined.len());
+    writer.ensure_leading_eol();
+
+    let mut records = Vec::with_capacity(combined.len());
+    for (reference, body) in &combined {
+        let byte_offset = writer.append_object(*reference, body);
+        records.push(AppendedEntry {
+            object_number: reference.object_number,
+            generation: reference.generation,
+            byte_offset,
+        });
+    }
+
+    let xref_byte_offset = writer.len();
+    writer.push_xref_table(&records)?;
+    let size = fresh_augmented_size(floor, ordered_fresh.len())?;
+    writer.push_trailer(
+        size,
+        chain.root_reference,
+        startxref_byte_offset,
+        active_trailer.id_bytes(input),
+        active_trailer.info_bytes(input),
+    );
+    writer.push_startxref(xref_byte_offset);
+
+    Ok(writer.finish())
+}
+
+/// Sort fresh objects by reference, rejecting a nonzero generation, a
+/// duplicate object number, or a gap in the ascending sequence.
+pub fn order_fresh_objects(
+    fresh_objects: &[FreshObjectBytes],
+) -> Result<Vec<&FreshObjectBytes>, WriteError> {
+    let mut ordered: Vec<&FreshObjectBytes> = fresh_objects.iter().collect();
+    ordered.sort_by_key(|fresh| fresh.reference);
+
+    for fresh in &ordered {
+        if fresh.reference.generation != 0 {
+            return Err(WriteError::NonZeroFreshGeneration {
+                reference: fresh.reference,
+            });
+        }
+    }
+
+    for pair in ordered.windows(2) {
+        if pair[0].reference.object_number == pair[1].reference.object_number {
+            return Err(WriteError::DuplicateFreshObject {
+                object_number: pair[0].reference.object_number,
+            });
+        }
+        let expected_next = pair[0]
+            .reference
+            .object_number
+            .checked_add(1)
+            .ok_or(WriteError::FreshReservationNumberOverflow)?;
+        if pair[1].reference.object_number != expected_next {
+            return Err(WriteError::FreshReservationNotContiguous {
+                previous: pair[0].reference,
+                next: pair[1].reference,
+            });
+        }
+    }
+
+    Ok(ordered)
+}
+
+/// Reject any object number shared between the ordered dirty and fresh sets.
+pub fn check_fresh_dirty_collision(
+    ordered_dirty: &[&DirtyObjectBytes],
+    ordered_fresh: &[&FreshObjectBytes],
+) -> Result<(), WriteError> {
+    for fresh in ordered_fresh {
+        if ordered_dirty
+            .binary_search_by_key(&fresh.reference.object_number, |dirty| {
+                dirty.reference.object_number
+            })
+            .is_ok()
+        {
+            return Err(WriteError::FreshDirtyObjectCollision {
+                object_number: fresh.reference.object_number,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Require the already-contiguous, already-deduplicated, already-generation-
+/// zero `ordered_fresh` to begin exactly at `floor`.
+///
+/// Because `ordered_fresh` is already proven internally contiguous, matching
+/// only the first object number is sufficient to prove the whole sequence
+/// equals the exact reservation a caller must have requested for this input.
+pub fn validate_fresh_reservation(
+    floor: u64,
+    ordered_fresh: &[&FreshObjectBytes],
+) -> Result<(), WriteError> {
+    let expected_first =
+        u32::try_from(floor).map_err(|_| WriteError::FreshReservationNumberOverflow)?;
+    let count = u32::try_from(ordered_fresh.len())
+        .map_err(|_| WriteError::FreshReservationNumberOverflow)?;
+    let last_offset = count
+        .checked_sub(1)
+        .ok_or(WriteError::FreshReservationNumberOverflow)?;
+    expected_first
+        .checked_add(last_offset)
+        .ok_or(WriteError::FreshReservationNumberOverflow)?;
+
+    let found_first = ordered_fresh[0].reference.object_number;
+    if found_first != expected_first {
+        return Err(WriteError::FreshReservationFloorMismatch {
+            expected_floor: expected_first,
+            found_first,
+        });
+    }
+    Ok(())
+}
+
+/// Build exactly `count` contiguous ascending generation-zero references
+/// starting at `floor`.
+fn build_reservation(floor: u64, count: usize) -> Result<Vec<IndirectRef>, WriteError> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let first = u32::try_from(floor).map_err(|_| WriteError::FreshReservationNumberOverflow)?;
+    let count_u32 = u32::try_from(count).map_err(|_| WriteError::FreshReservationNumberOverflow)?;
+    let last_offset = count_u32
+        .checked_sub(1)
+        .ok_or(WriteError::FreshReservationNumberOverflow)?;
+    first
+        .checked_add(last_offset)
+        .ok_or(WriteError::FreshReservationNumberOverflow)?;
+
+    Ok((0..count_u32)
+        .map(|offset| IndirectRef {
+            object_number: first + offset,
+            generation: 0,
+        })
+        .collect())
+}
+
+/// Concatenate validated dirty and fresh objects into ascending reference
+/// order. The dirty objects resolve to existing identities, while the fresh
+/// reservation starts above the entire existing object set, so every dirty
+/// reference necessarily precedes every fresh reference.
+pub fn combine_dirty_and_fresh<'a>(
+    ordered_dirty: &[&'a DirtyObjectBytes],
+    ordered_fresh: &[&'a FreshObjectBytes],
+) -> Vec<(IndirectRef, &'a [u8])> {
+    let mut combined: Vec<(IndirectRef, &[u8])> =
+        Vec::with_capacity(ordered_dirty.len() + ordered_fresh.len());
+    combined.extend(
+        ordered_dirty
+            .iter()
+            .map(|dirty| (dirty.reference, dirty.body_bytes.as_slice())),
+    );
+    combined.extend(
+        ordered_fresh
+            .iter()
+            .map(|fresh| (fresh.reference, fresh.body_bytes.as_slice())),
+    );
+    combined
+}
+
+/// The classic `/Size` augmented with a nonempty fresh reservation: at least
+/// one past the last reserved fresh object number.
+fn fresh_augmented_size(floor: u64, fresh_count: usize) -> Result<usize, WriteError> {
+    let augmented = floor
+        .checked_add(fresh_count as u64)
+        .ok_or(WriteError::FreshReservationNumberOverflow)?;
+    let augmented =
+        usize::try_from(augmented).map_err(|_| WriteError::FreshReservationNumberOverflow)?;
+    Ok(augmented)
 }
 
 /// Whole-`/Prev`-chain `/Size`: at least one greater than the highest object
@@ -389,7 +854,7 @@ impl ActiveTrailerScan {
 fn scan_active_trailer(
     input: &[u8],
     trailer_byte_offset: usize,
-) -> Result<ActiveTrailerScan, WriteError> {
+) -> Result<(ActiveTrailerScan, Range<usize>), WriteError> {
     let trailer_dictionary = inspect_classic_xref_trailer_dictionary(input, trailer_byte_offset)
         .map_err(|error| WriteError::ActiveTrailer {
             error: ActiveTrailerError::TrailerDictionary { error },
@@ -424,7 +889,9 @@ fn scan_active_trailer(
     if has_xref_stm {
         return Err(WriteError::HybridXrefStmInput);
     }
-    Ok(scan)
+    let dictionary_range = trailer_dictionary.dictionary_open_byte_offset
+        ..trailer_dictionary.after_dictionary_close_byte_offset;
+    Ok((scan, dictionary_range))
 }
 
 /// Format one fixed-width classic cross-reference entry
@@ -469,7 +936,13 @@ impl AppendRevisionWriter {
             .iter()
             .map(|dirty| dirty.body_bytes.len())
             .sum();
-        let headroom = body_bytes + 64 * dirty_objects.len() + 256;
+        Self::with_capacity_estimate(input, body_bytes, dirty_objects.len())
+    }
+
+    /// Seed the output with the verbatim input plus a headroom estimate sized
+    /// from the total appended body byte length and item count.
+    fn with_capacity_estimate(input: &[u8], body_bytes: usize, item_count: usize) -> Self {
+        let headroom = body_bytes + 64 * item_count + 256;
         let mut out = Vec::with_capacity(input.len() + headroom);
         out.extend_from_slice(input);
         Self { out }
