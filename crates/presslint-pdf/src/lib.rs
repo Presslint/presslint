@@ -67,6 +67,7 @@ mod page_tree_leaves;
 mod page_tree_node;
 mod page_tree_node_type;
 mod page_tree_reference;
+mod page_xobject_binding;
 mod page_xobject_resource_targets;
 mod page_xobject_resources;
 mod source;
@@ -314,6 +315,14 @@ pub use page_tree_reference::{
     PageTreeReferenceTargetInspection, PageTreeReferenceTargetInspectionError,
     PageTreeReferenceTargetInspectionRejection, inspect_page_tree_reference_target,
     inspect_page_tree_reference_target_resolved, inspect_page_tree_reference_target_with_lookup,
+};
+pub use page_xobject_binding::{
+    BindingContainer, BindingContainerLocality, BindingResourcesSource,
+    DocumentPageXObjectBindingsInspection, DocumentPageXObjectBindingsInspectionError,
+    PageXObjectBindingRefusal, PageXObjectBindingUnprovenReason, PageXObjectBindingVerdict,
+    PageXObjectBindingWitness, PageXObjectBindingsInspection, RefusedPageXObjectBinding,
+    XObjectBindingPath, XObjectBindingSubtype, inspect_document_page_xobject_bindings,
+    inspect_document_page_xobject_bindings_with_lookup,
 };
 pub use page_xobject_resource_targets::PageXObjectResourceTarget;
 pub use page_xobject_resources::{

@@ -4,6 +4,104 @@ Older accumulated journal history lives in [JOURNAL-archive-4.md](JOURNAL-archiv
 
 ## Current State
 
+### T194 - Page-anchored Form XObject binding/locality witness (read-only)
+
+- New `page_xobject_binding.rs` + private `page_xobject_binding/walk.rs` add
+  ONE witness family:
+  `inspect_document_page_xobject_bindings[_with_lookup](input, xref|lookup,
+  root_node_object_offset, consumers)` →
+  `DocumentPageXObjectBindingsInspection`. For every enumerated leaf page and
+  every entry of the page's EFFECTIVE `/Resources /XObject` subdictionary, a
+  `PageXObjectBindingWitness` proves exactly WHICH indirect object the name
+  binds: the defining page-tree node (`BindingResourcesSource::Direct` vs
+  `Inherited`, the `PageBoxSource` pattern), per-node direct/indirect
+  classification for `/Resources` and the `/XObject` subdictionary
+  (`BindingContainerLocality`, exact indirect identities when resolved), the
+  exact target `IndirectRef` with generation, the reached offset corroborated
+  against the object header at that offset, entry key/value byte ranges, and
+  an exact `/Subtype` class (`Form`/`Image`/`OtherName`/`Missing`/
+  `Duplicate`/`NonName` — wrong-subtype is a witness classification,
+  deliberately distinct from the unresolved refusal vocabulary).
+- BINDING CONTAINERS RESOLVE OR REFUSE, never the legacy skip semantics: an
+  indirect `/Resources` value and an uncompressed indirect `/XObject`
+  subdictionary resolve with identities recorded and header-corroborated.
+  The header identity is checked BEFORE body validation for containers AND
+  entry targets, so a mismatched xref offset classifies as
+  `ContainerIdentityMismatch`/`EntryTargetIdentityMismatch` even when the
+  reached body is non-dictionary or malformed, never masked as a
+  dictionary failure. Containers require dictionary OBJECTS (§7.8.3): a
+  reached stream object refuses via `StreamContainer` (the dictionary
+  portion of a stream is never admitted; entry TARGETS are legitimately
+  streams and stay witnesses). A `null` container value is equivalent to an
+  absent entry (§7.3.9): a `null` `/Resources` never replaces the inherited
+  ancestor value and a `null` `/XObject` classifies as `MissingXObject`.
+  Compressed containers/targets refuse with their own `CompressedContainer`
+  / `CompressedEntryTarget` classes — offsets are never fabricated for
+  compressed objects. When `/Resources` is indirect, XObject-container
+  refusals carry the RESOLVED resources object as their `defining_node`
+  (the dictionary that owns the `/XObject` entry), preserving exact
+  container provenance. The existing `page_xobject_resources.rs` walk,
+  `page_resource_inheritance.rs`, and `ResourceContext` consumers are
+  untouched and byte-identical; container resolution is re-implemented
+  locally in the new walk because `InheritedPageResources` retains entry
+  spans only and resolves inheritance silently.
+- NAME DISCIPLINE: decoded-PDF-name matching throughout (container keys via a
+  local semantic-unique helper; duplicate decoded container keys refuse).
+  Entry-name collisions poison EVERY colliding entry
+  (`EntryNameCollision` carries the full colliding key-range set) — no
+  first/last-wins recovery, stricter than the font namespace's
+  first-plus-diagnostic. Malformed names refuse fail-closed
+  (`MalformedEntryName`); raw spellings are retained for reporting. A missing
+  effective container is classified (`MissingResources` after Table 30
+  inheritance is exhausted, `MissingXObject` with the defining node) and is
+  NEVER resolved through the obsolete content-stream resource fallback; the
+  witness binds the OUTER page `Do` namespace only, so names living only in a
+  form's own `/Resources` are never resolved here (the pdf.js
+  form-fallback-divergence class refuses by construction).
+- VETO SEMANTICS: `consumers` is the borrowed, already-computed
+  `ObjectConsumerIndexInspection`, used ONLY as a conservative exclusivity
+  veto. Completeness is read from its own fact vectors (any truncation,
+  unresolved edge, or non-benign scan skip ⇒ every verdict
+  `ConsumerIndexIncomplete`, fail-closed); exclusivity is a binary search
+  requiring referrers exactly `[Page { this ordinal, this leaf }]`.
+  `target_ownership` composes the public `decide_indirect_object_edit`
+  contract over the single proven binding edge, then the veto forces
+  `Unproven` — mirroring the write-side exact-edge-plus-global-veto pattern.
+  The composed `PageXObjectBindingVerdict::ProvenPageLocal` additionally
+  requires every path node leaf-direct (leaf-defined `/Resources`, direct
+  dictionaries for both containers); the first blocking check is reported in
+  a fixed deterministic order. Inherited resources are reached by the
+  `RootKey(/Pages)` user rather than the page user, so inheritance both blocks
+  the path check and naturally defeats exclusivity. A witness proves
+  resolution and locality, never mutation authority: no closure, clone
+  planning, retargeting, or byte mutation exists in this slice.
+- BOUNDS/COMPLEXITY (honest worst case): exactly ONE page-tree walk per
+  inspection, bounded by the shared `MAX_VISITED_PAGE_TREE_NODES` = 65,536
+  ceiling, `MAX_PAGE_TREE_DEPTH`, and the `BTreeSet` cycle guard — no
+  per-name re-walk and no whole-input token scan. Per node: one decoded-key
+  scan of its entries for `/Resources` (allocation only for `#`-escaped
+  names); resolved entry spans are shared immutably across descendants, so
+  an absent or `null` value clones only an `Rc` handle. The leaf dictionary
+  already produced by page-tree target classification is reused rather than
+  scanned again. Per page: one `/XObject` scan,
+  one `BTreeMap` decoded-name grouping pass (`O(X log X)` for `X` entries),
+  then per unique entry one locate (binary search or table scan) and one
+  target dictionary inspection. Header-first corroboration adds one bounded
+  (≤128-byte) header parse per indirect container/entry target before the
+  full dictionary inspection re-parses it, and the stream check per
+  resolved container is one whitespace/comment skip plus one keyword
+  comparison after the dictionary close. Collision poisoning clones the group's
+  key-range vector per colliding member (`O(g²)` small ranges for a group of
+  `g`, bounded by the dictionary's entry count). The veto adds `O(log E)`
+  per witness over the index's `E` entries. No stream payload is decoded;
+  reports retain identities, classifications, byte ranges, and raw name
+  bytes only.
+- DEFERRED CONSUMERS: the clone-first ownership arc consumes this witness at
+  its final retarget point; writer policies join lazily by demanded name
+  over the enumerated per-page reports (house pattern). Reached-Form
+  closure, clone-set planning, fresh-object use, consumer retargeting, and
+  nested Form-local name resolution remain out of scope.
+
 ### Semantic uniqueness for ExtGState safety keys
 
 - ExtGState dictionary classification now decodes each dictionary key before
