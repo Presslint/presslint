@@ -12,7 +12,7 @@
 
 use crate::{
     BlackPreservationPolicy, ConvertContentColorsOutput, ConvertContentColorsRequest,
-    DeviceLinkInput, PageSelection, convert_content_colors_incremental,
+    DeviceLinkInput, FormXObjectRefusalClass, PageSelection, convert_content_colors_incremental,
     form_xobject_effect::FormXObjectEffectAnalyzer,
 };
 use presslint_pdf::{
@@ -20,6 +20,7 @@ use presslint_pdf::{
     inspect_document_access, locate_xref_object,
 };
 
+use super::alias_epoch_form::assert_only_class;
 use super::content_color_convert::{
     GRAY_TO_GRAY_LINK, RGB_TO_CMYK_LINK, assemble_classic, contains, link_bytes, occurrence_count,
     page_decoded_stream, stream_body,
@@ -100,6 +101,47 @@ fn analyze_objects(objects: &[Vec<u8>], object_number: u32) -> Option<[bool; 2]>
         },
         offset,
     )
+}
+
+/// Analyze object 5 once in a fresh request-scoped analyzer and return its
+/// tallied per-page refusal-class counts.
+fn refusal_counts_for(form_object: Vec<u8>) -> crate::FormXObjectRefusalCounts {
+    let input = form_pdf(&[form_object]);
+    let access = inspect_document_access(&input).expect("open");
+    let lookup = backend_lookup(&access.backend);
+    let offset = object_offset(lookup, 5);
+    let mut analyzer = FormXObjectEffectAnalyzer::new();
+    analyzer.analyze(
+        &input,
+        lookup,
+        IndirectRef {
+            object_number: 5,
+            generation: 0,
+        },
+        offset,
+    );
+    analyzer.take_page_refusal_counts()
+}
+
+// --- Refusal-class taxonomy lock (T192) --------------------------------------
+
+#[test]
+fn an_unresolved_color_space_operator_classifies_color_authority() {
+    // A `cs` naming an alias absent from the Form's own resources.
+    assert_only_class(
+        &refusal_counts_for(form("", b"/GrayAlias cs 0.5 sc 0 0 m 1 1 l f")),
+        FormXObjectRefusalClass::ColorAuthority,
+    );
+    // A named setter over the inherited (never local) sentinel.
+    assert_only_class(
+        &refusal_counts_for(form("", b"0.5 sc 0 0 m 1 1 l f")),
+        FormXObjectRefusalClass::ColorAuthority,
+    );
+    // An alias-to-alias resolution (not a direct Device classification).
+    assert_only_class(
+        &refusal_counts_for(cs_form("/A /R", b"/A cs 0.5 sc 0 0 m 1 1 l f")),
+        FormXObjectRefusalClass::ColorAuthority,
+    );
 }
 
 // --- Semantic resource authority ---------------------------------------------

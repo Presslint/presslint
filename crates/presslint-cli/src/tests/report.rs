@@ -5,7 +5,7 @@ use presslint::{
 use presslint_types::PageIndex;
 use presslint_write::{
     ConvertContentColorsOutput, ConvertPageSkip, ConvertPageSkipReason, ConvertedPage,
-    LinkConversionCounts, OperatorSkipCounts,
+    FormXObjectRefusalCounts, LinkConversionCounts, OperatorSkipCounts,
 };
 use serde_json::Value;
 
@@ -32,6 +32,7 @@ fn convert_report_warns_on_zero_conversion_and_skips() {
                 selector_excluded: 1,
                 ..OperatorSkipCounts::default()
             },
+            form_xobject_refusal_counts: FormXObjectRefusalCounts::default(),
             links: Vec::<LinkConversionCounts>::new(),
         }],
         skipped: vec![ConvertPageSkip {
@@ -76,6 +77,7 @@ fn human_convert_report_surfaces_page_coverage_counts() {
                 default_color_space_unsafe: 3,
                 ..OperatorSkipCounts::default()
             },
+            form_xobject_refusal_counts: FormXObjectRefusalCounts::default(),
             links: Vec::<LinkConversionCounts>::new(),
         }],
         skipped: Vec::new(),
@@ -230,6 +232,59 @@ fn json_convert_report_serializes_nonzero_alias_and_default_counts() {
 }
 
 #[test]
+fn json_convert_report_omits_form_xobject_refusal_counts_when_empty() {
+    let report = RunReport::convert(ConvertContentColorsOutput {
+        bytes: Vec::new(),
+        converted: vec![converted_page_with_counts(0, 0, 0)],
+        skipped: Vec::new(),
+    });
+
+    let rendered: Value = serde_json::from_str(&report.to_json_string().unwrap()).unwrap();
+    let converted = &rendered["result"]["library_output"]["converted"][0];
+
+    assert!(converted.get("form_xobject_refusal_counts").is_none());
+}
+
+#[test]
+fn json_convert_report_serializes_nonzero_form_xobject_refusal_counts() {
+    let mut page = converted_page_with_counts(0, 0, 0);
+    page.form_xobject_refusal_counts.raw_grammar = 2;
+    page.form_xobject_refusal_counts.recursion_cycle = 1;
+    let report = RunReport::convert(ConvertContentColorsOutput {
+        bytes: Vec::new(),
+        converted: vec![page],
+        skipped: Vec::new(),
+    });
+
+    let rendered: Value = serde_json::from_str(&report.to_json_string().unwrap()).unwrap();
+    let converted = &rendered["result"]["library_output"]["converted"][0];
+
+    assert_eq!(converted["form_xobject_refusal_counts"]["raw_grammar"], 2);
+    assert_eq!(
+        converted["form_xobject_refusal_counts"]["recursion_cycle"],
+        1
+    );
+    assert!(
+        converted["form_xobject_refusal_counts"]
+            .get("structural_preflight")
+            .is_none()
+    );
+}
+
+#[test]
+fn older_converted_page_json_defaults_form_xobject_refusal_counts_to_empty() {
+    let page = converted_page_with_counts(0, 0, 0);
+    let value = serde_json::to_value(page).unwrap();
+    assert!(value.get("form_xobject_refusal_counts").is_none());
+
+    let restored: ConvertedPage = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        restored.form_xobject_refusal_counts,
+        FormXObjectRefusalCounts::default()
+    );
+}
+
+#[test]
 fn older_converted_page_json_defaults_alias_candidate_counts_to_zero() {
     let page = converted_page_with_counts(0, 0, 0);
     let mut value = serde_json::to_value(page).unwrap();
@@ -291,6 +346,7 @@ fn converted_page_with_counts(
             default_color_space_unsafe: default_unsafe,
             ..OperatorSkipCounts::default()
         },
+        form_xobject_refusal_counts: FormXObjectRefusalCounts::default(),
         links: Vec::<LinkConversionCounts>::new(),
     }
 }

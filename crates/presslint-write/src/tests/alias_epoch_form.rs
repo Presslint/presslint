@@ -14,7 +14,8 @@ use std::cell::RefCell;
 
 use crate::{
     BlackPreservationPolicy, ConvertContentColorsOutput, ConvertContentColorsRequest,
-    DeviceLinkInput, PageSelection, convert_content_colors_incremental,
+    DeviceLinkInput, FormXObjectRefusalClass, FormXObjectRefusalCounts, PageSelection,
+    convert_content_colors_incremental,
     form_xobject_effect::FormXObjectEffectAnalyzer,
     page_xobject_policy::{PageXObjectEffect, PageXObjectPolicy},
 };
@@ -144,6 +145,62 @@ fn raw_form_dict(dict_extra: &str, content: &[u8]) -> Vec<u8> {
 fn flate_form(content: &[u8]) -> Vec<u8> {
     let compressed = encode_flate_stream(content, FLATE_LIMIT).expect("encode");
     stream_body(&format!("{FORM_DICT} /Filter /FlateDecode"), &compressed)
+}
+
+// --- Refusal-class taxonomy (T192) -------------------------------------------
+
+/// Assert that `counts` records exactly one refusal, under `expected`, and
+/// every other class's count is zero. Exhaustive over
+/// [`FormXObjectRefusalClass`] so a new variant forces a matching arm here.
+pub(super) fn assert_only_class(
+    counts: &FormXObjectRefusalCounts,
+    expected: FormXObjectRefusalClass,
+) {
+    let mut want = FormXObjectRefusalCounts::default();
+    match expected {
+        FormXObjectRefusalClass::StructuralPreflight => want.structural_preflight = 1,
+        FormXObjectRefusalClass::StreamFilterOrExtent => want.stream_filter_or_extent = 1,
+        FormXObjectRefusalClass::TransparencyGroup => want.transparency_group = 1,
+        FormXObjectRefusalClass::RawGrammar => want.raw_grammar = 1,
+        FormXObjectRefusalClass::ColorAuthority => want.color_authority = 1,
+        FormXObjectRefusalClass::XObjectAuthority => want.xobject_authority = 1,
+        FormXObjectRefusalClass::ExtGStateAuthority => want.extgstate_authority = 1,
+        FormXObjectRefusalClass::RecursionCycle => want.recursion_cycle = 1,
+        FormXObjectRefusalClass::RecursionDepth => want.recursion_depth = 1,
+        FormXObjectRefusalClass::TargetBudget => want.target_budget = 1,
+        FormXObjectRefusalClass::DecodedByteBudget => want.decoded_byte_budget = 1,
+    }
+    assert_eq!(*counts, want, "expected exactly one {expected:?} refusal");
+}
+
+/// Analyze object 5 once in a fresh bounded analyzer and return its tallied
+/// per-page refusal-class counts.
+pub(super) fn refusal_counts_with_bounds(
+    form: Vec<u8>,
+    remaining_targets: usize,
+    remaining_bytes: usize,
+) -> FormXObjectRefusalCounts {
+    let input = form_pdf(&[form]);
+    let access = inspect_document_access(&input).expect("open");
+    let lookup = backend_lookup(&access.backend);
+    let offset = object_offset(lookup, 5);
+    let mut analyzer = FormXObjectEffectAnalyzer::with_bounds(remaining_targets, remaining_bytes);
+    analyzer.analyze(
+        &input,
+        lookup,
+        IndirectRef {
+            object_number: 5,
+            generation: 0,
+        },
+        offset,
+    );
+    analyzer.take_page_refusal_counts()
+}
+
+/// Analyze object 5 once in a fresh production-bounded analyzer and return its
+/// tallied per-page refusal-class counts.
+fn refusal_counts_for(form: Vec<u8>) -> FormXObjectRefusalCounts {
+    refusal_counts_with_bounds(form, 256, FLATE_LIMIT)
 }
 
 // --- Raw/Flate equivalence and filter admission ------------------------------
@@ -836,6 +893,125 @@ fn a_compressed_or_non_addressable_target_is_unknown() {
         ),
         None
     );
+}
+
+// --- Refusal-class taxonomy locks (T192) -------------------------------------
+
+#[test]
+fn semantic_dictionary_and_corroboration_gates_classify_structural_preflight() {
+    // The decoded-name Form-dictionary preflight (an execution-alias key).
+    assert_only_class(
+        &refusal_counts_for(raw_form_dict(" /F (external.pdf)", b"0 0 m 1 1 l f")),
+        FormXObjectRefusalClass::StructuralPreflight,
+    );
+    // Exact identity corroboration (a generation mismatch).
+    let input = form_pdf(&[raw_form(b"0 0 m 1 1 l f")]);
+    let access = inspect_document_access(&input).expect("open");
+    let lookup = backend_lookup(&access.backend);
+    let offset = object_offset(lookup, 5);
+    let mut analyzer = FormXObjectEffectAnalyzer::new();
+    analyzer.analyze(
+        &input,
+        lookup,
+        IndirectRef {
+            object_number: 5,
+            generation: 1,
+        },
+        offset,
+    );
+    assert_only_class(
+        &analyzer.take_page_refusal_counts(),
+        FormXObjectRefusalClass::StructuralPreflight,
+    );
+}
+
+#[test]
+fn unsupported_filter_classifies_stream_filter_or_extent() {
+    assert_only_class(
+        &refusal_counts_for(raw_form_dict(" /Filter /ASCIIHexDecode", b"30 30 6d")),
+        FormXObjectRefusalClass::StreamFilterOrExtent,
+    );
+    // Declared FlateDecode over bytes that are not valid zlib is an intrinsic
+    // decode failure, not a budget effect.
+    assert_only_class(
+        &refusal_counts_for(raw_form_dict(" /Filter /FlateDecode", b"not zlib")),
+        FormXObjectRefusalClass::StreamFilterOrExtent,
+    );
+}
+
+#[test]
+fn a_declared_transparency_group_classifies_transparency_group() {
+    assert_only_class(
+        &refusal_counts_for(raw_form_dict(
+            " /Group << /S /Transparency >>",
+            b"0 0 m 1 1 l f",
+        )),
+        FormXObjectRefusalClass::TransparencyGroup,
+    );
+}
+
+#[test]
+fn an_unsupported_raw_operator_classifies_raw_grammar() {
+    assert_only_class(
+        &refusal_counts_for(raw_form(b"BT (x) Tj ET")),
+        FormXObjectRefusalClass::RawGrammar,
+    );
+    // A raw-preflight arity violation is the same class.
+    assert_only_class(
+        &refusal_counts_for(raw_form(b"0 0 0 m 1 1 l f")),
+        FormXObjectRefusalClass::RawGrammar,
+    );
+}
+
+#[test]
+fn the_spent_first_seen_target_cap_classifies_target_budget() {
+    assert_only_class(
+        &refusal_counts_with_bounds(raw_form(b"0 0 m 1 1 l f"), 0, FLATE_LIMIT),
+        FormXObjectRefusalClass::TargetBudget,
+    );
+}
+
+#[test]
+fn zero_entry_and_over_budget_bytes_classify_decoded_byte_budget() {
+    // Zero-entry aggregate budget.
+    assert_only_class(
+        &refusal_counts_with_bounds(raw_form(b"0 0 m 1 1 l f"), 256, 0),
+        FormXObjectRefusalClass::DecodedByteBudget,
+    );
+    // A positive but insufficient budget for this raw body's extent.
+    assert_only_class(
+        &refusal_counts_with_bounds(raw_form(b"0 0 m 1 1 l 2 2 3 3 4 4 c f"), 256, 4),
+        FormXObjectRefusalClass::DecodedByteBudget,
+    );
+    // A Flate inflation that hits the output-limit budget.
+    let content = b"0 0 m 1 1 l 2 2 3 3 4 4 c f".repeat(4);
+    let compressed = encode_flate_stream(&content, FLATE_LIMIT).expect("encode");
+    assert_only_class(
+        &refusal_counts_with_bounds(
+            stream_body(&format!("{FORM_DICT} /Filter /FlateDecode"), &compressed),
+            256,
+            4,
+        ),
+        FormXObjectRefusalClass::DecodedByteBudget,
+    );
+}
+
+#[test]
+fn a_cache_hit_re_counts_on_a_new_page_with_zero_charge() {
+    // Two pages of the same request-scoped analyzer both `Do` the SAME refused
+    // identity through two distinct aliases: the second page's cache hit still
+    // counts once there, with no further decode/target/byte charge.
+    let form = raw_form_dict(" /Group << /S /Transparency >>", b"0 0 m 1 1 l f");
+    let input = two_page_shared_form_pdf(form);
+    let output = convert(&input);
+
+    assert_eq!(output.converted.len(), 2);
+    for page in &output.converted {
+        assert_only_class(
+            &page.form_xobject_refusal_counts,
+            FormXObjectRefusalClass::TransparencyGroup,
+        );
+    }
 }
 
 // --- End-to-end helpers ------------------------------------------------------

@@ -68,7 +68,7 @@ use crate::{
     },
     content_sequence_pipeline::{PageSequenceEdit, edit_page_content_incremental_sequence},
     extgstate_page_guard::{extgstate_page_skip_reason, transparency_group_page_skip_reason},
-    form_xobject_effect::FormXObjectEffectAnalyzer,
+    form_xobject_effect::{FormXObjectEffectAnalyzer, FormXObjectRefusalCounts},
     link_routing::{
         DeviceLinkInput, LinkConversionCounts, LinkRouting, RoutedLink, build_link_routing,
     },
@@ -181,6 +181,11 @@ pub struct ConvertedPage {
     pub resource_alias_candidates_refused: usize,
     /// Aggregate per-page operator-skip counts.
     pub operator_skips: OperatorSkipCounts,
+    /// Per-page refusal-class counts for refused demanded Form identities
+    /// (root `Do` targets only; the taxonomy is observe-only and never
+    /// influences admission).
+    #[serde(default, skip_serializing_if = "FormXObjectRefusalCounts::is_empty")]
+    pub form_xobject_refusal_counts: FormXObjectRefusalCounts,
     /// Per-link conversion counts, one entry per supplied link in request order.
     pub links: Vec<LinkConversionCounts>,
 }
@@ -622,6 +627,10 @@ fn convert_sequence(
     lookup: ObjectLookup<'_>,
     analyzer: &RefCell<FormXObjectEffectAnalyzer>,
 ) -> Option<PageSequenceEdit<ConvertedPage>> {
+    // Reset the analyzer's per-page refusal tally before this page's Form
+    // demands begin, discarding any partial tally an earlier aborted page may
+    // have left (this call never decodes, walks, or charges a budget).
+    analyzer.borrow_mut().begin_page_refusal_tally();
     let decoded = sequence.bytes();
     // The page device-space policy replaces the earlier always-empty
     // environment: exact page device aliases resolve in graphics state, and
@@ -814,6 +823,7 @@ fn convert_sequence(
     {
         *slot += count;
     }
+    let form_xobject_refusal_counts = analyzer.borrow_mut().take_page_refusal_counts();
     Some(PageSequenceEdit {
         plans,
         metadata: ConvertedPage {
@@ -826,6 +836,7 @@ fn convert_sequence(
             resource_alias_candidates_converted: alias_tally.converted,
             resource_alias_candidates_refused: alias_tally.refused,
             operator_skips: total.skips,
+            form_xobject_refusal_counts,
             links: link_counts(routing, &total.link_converted),
         },
     })

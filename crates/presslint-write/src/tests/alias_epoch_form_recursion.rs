@@ -17,14 +17,15 @@
 
 use crate::{
     BlackPreservationPolicy, ConvertContentColorsOutput, ConvertContentColorsRequest,
-    DeviceLinkInput, PageSelection, convert_content_colors_incremental,
-    form_xobject_effect::FormXObjectEffectAnalyzer,
+    DeviceLinkInput, FormXObjectRefusalClass, FormXObjectRefusalCounts, PageSelection,
+    convert_content_colors_incremental, form_xobject_effect::FormXObjectEffectAnalyzer,
 };
 use presslint_pdf::{
     DocumentAccessBackend, IndirectRef, ObjectLookup, ObjectLookupLocation, encode_flate_stream,
     inspect_document_access, locate_xref_object,
 };
 
+use super::alias_epoch_form::assert_only_class;
 use super::content_color_convert::{
     GRAY_TO_GRAY_LINK, assemble_classic, contains, link_bytes, occurrence_count,
     page_decoded_stream, stream_body,
@@ -397,6 +398,212 @@ fn aliases_and_repeated_do_spend_one_child_target_and_decode() {
 fn the_depth_boundary_admits_eight_nested_edges_and_refuses_nine() {
     assert_eq!(analyze(&chain(8)), Some([false, true]));
     assert_eq!(analyze(&chain(9)), None);
+}
+
+// --- Refusal-class taxonomy locks (T192) -------------------------------------
+
+/// Analyze object 5 (the first supplied body) once in a fresh request
+/// analyzer and return its tallied per-page refusal-class counts.
+fn refusal_counts_for(objects: &[Vec<u8>]) -> crate::FormXObjectRefusalCounts {
+    let input = form_pdf(objects);
+    let access = inspect_document_access(&input).expect("open");
+    let lookup = backend_lookup(&access.backend);
+    let mut analyzer = FormXObjectEffectAnalyzer::new();
+    analyze_object(&mut analyzer, &input, lookup, 5);
+    analyzer.take_page_refusal_counts()
+}
+
+#[test]
+fn a_self_referential_form_classifies_recursion_cycle() {
+    assert_only_class(
+        &refusal_counts_for(&[xform("/Me 5 0 R", b"/Me Do"), form("", b"0 0 m 1 1 l f")]),
+        FormXObjectRefusalClass::RecursionCycle,
+    );
+}
+
+#[test]
+fn a_two_form_mutual_cycle_classifies_recursion_cycle() {
+    assert_only_class(
+        &refusal_counts_for(&[
+            xform("/B 6 0 R", b"/B Do"),
+            xform("/A 5 0 R", b"/A Do"),
+            form("", b"0 0 m 1 1 l f"),
+        ]),
+        FormXObjectRefusalClass::RecursionCycle,
+    );
+}
+
+#[test]
+fn a_chain_deeper_than_the_horizon_classifies_recursion_depth() {
+    assert_only_class(
+        &refusal_counts_for(&chain(9)),
+        FormXObjectRefusalClass::RecursionDepth,
+    );
+}
+
+#[test]
+fn a_nested_intrinsic_failure_bubbles_up_as_its_own_actionable_cause() {
+    // The grandchild's own gate fails on an unsupported raw operator, not on
+    // recursion: the root's classified refusal is the grandchild's actionable
+    // cause, bubbled through two folds.
+    assert_only_class(
+        &refusal_counts_for(&[
+            xform("/C 6 0 R", b"/C Do"),
+            xform("/G 7 0 R", b"/G Do"),
+            form("", b"BT (x) Tj ET"),
+        ]),
+        FormXObjectRefusalClass::RawGrammar,
+    );
+}
+
+#[test]
+fn a_nested_transparency_group_bubbles_up_as_transparency_group_not_recursion() {
+    // The grandchild's own gate fails on a declared `/Group`, not on
+    // recursion: the root's classified refusal is the grandchild's actionable
+    // cause, bubbled through two folds.
+    assert_only_class(
+        &refusal_counts_for(&[
+            xform("/C 6 0 R", b"/C Do"),
+            xform("/G 7 0 R", b"/G Do"),
+            form(" /Group << /S /Transparency >>", b"0 0 m 1 1 l f"),
+        ]),
+        FormXObjectRefusalClass::TransparencyGroup,
+    );
+}
+
+#[test]
+fn a_nested_xobject_authority_failure_bubbles_up_as_xobject_authority_not_recursion() {
+    // The grandchild's own `/Resources /XObject` authority fails to resolve an
+    // invoked name (it declares no `/XObject` authority at all): the root's
+    // classified refusal is the grandchild's actionable cause, bubbled through
+    // two folds, not a recursion class.
+    assert_only_class(
+        &refusal_counts_for(&[
+            xform("/C 6 0 R", b"/C Do"),
+            xform("/G 7 0 R", b"/G Do"),
+            form("", b"/Missing Do"),
+        ]),
+        FormXObjectRefusalClass::XObjectAuthority,
+    );
+}
+
+#[test]
+fn raw_and_flate_encodings_of_the_same_refusal_classify_identically() {
+    // A RawGrammar refusal fires deep inside the decoded body, so raw and
+    // Flate encodings of the identical content must classify identically:
+    // classification is a property of the decoded bytes, never the filter.
+    let content = b"BT (x) Tj ET";
+    assert_only_class(
+        &refusal_counts_for(&[form("", content)]),
+        FormXObjectRefusalClass::RawGrammar,
+    );
+    let compressed = encode_flate_stream(content, FLATE_LIMIT).expect("encode");
+    assert_only_class(
+        &refusal_counts_for(&[stream_body(
+            &format!("{FORM_BASE} /Filter /FlateDecode"),
+            &compressed,
+        )]),
+        FormXObjectRefusalClass::RawGrammar,
+    );
+}
+
+#[test]
+fn byte_exhaustion_cascade_classifies_a_later_unseen_target_decoded_byte_budget() {
+    // The first form's raw extent exceeds the tiny aggregate budget, which
+    // exhausts the residual allowance to zero (`DecodedByteBudget`). The
+    // second, otherwise well-formed and never-before-seen form then hits the
+    // zero-budget guard before any of its OWN gates run, so it is also
+    // classified `DecodedByteBudget` — the documented cascade caveat, not a
+    // reflection of its own intrinsic shape.
+    let exhausting = form("", b"0 0 m 1 1 l 2 2 3 3 4 4 c f");
+    let unseen = form("", b"0 0 m 1 1 l f");
+    let input = form_pdf(&[exhausting, unseen]);
+    let access = inspect_document_access(&input).expect("open");
+    let lookup = backend_lookup(&access.backend);
+    let mut analyzer = FormXObjectEffectAnalyzer::with_bounds(256, 4);
+
+    analyze_object(&mut analyzer, &input, lookup, 5);
+    analyze_object(&mut analyzer, &input, lookup, 6);
+    let want = FormXObjectRefusalCounts {
+        decoded_byte_budget: 2,
+        ..FormXObjectRefusalCounts::default()
+    };
+    assert_eq!(analyzer.take_page_refusal_counts(), want);
+}
+
+#[test]
+fn a_cache_hit_recounts_on_a_new_page_with_exactly_zero_further_charge() {
+    // The Group check runs before any byte is sliced or decoded, so a
+    // one-target, one-byte budget affords the FIRST compute with room to
+    // spare; a second `analyze` call — simulating a second page's demand —
+    // must serve straight from the cache with no further target or byte
+    // charge, proven by the exact residual budget staying untouched.
+    let input = form_pdf(&[form(" /Group << /S /Transparency >>", b"0 0 m 1 1 l f")]);
+    let access = inspect_document_access(&input).expect("open");
+    let lookup = backend_lookup(&access.backend);
+    let mut analyzer = FormXObjectEffectAnalyzer::with_bounds(1, 1);
+
+    analyzer.begin_page_refusal_tally();
+    assert_eq!(analyze_object(&mut analyzer, &input, lookup, 5), None);
+    assert_only_class(
+        &analyzer.take_page_refusal_counts(),
+        FormXObjectRefusalClass::TransparencyGroup,
+    );
+    assert_eq!(analyzer.remaining_bytes_for_test(), 1);
+
+    // A fresh per-page tally, same analyzer: the identity is already cached,
+    // so this second "page" recounts the same refusal at exactly zero further
+    // decode/target/byte charge.
+    analyzer.begin_page_refusal_tally();
+    assert_eq!(analyze_object(&mut analyzer, &input, lookup, 5), None);
+    assert_only_class(
+        &analyzer.take_page_refusal_counts(),
+        FormXObjectRefusalClass::TransparencyGroup,
+    );
+    assert_eq!(analyzer.remaining_bytes_for_test(), 1);
+}
+
+#[test]
+fn a_failed_deepening_recompute_overwrites_a_stale_cached_class() {
+    // The nine-edge root's descent caches object 6 PARTIAL at slot 7 with a
+    // recorded `RecursionDepth` class (established by
+    // `deepening_a_horizon_cut_lattice_recharges_bytes_but_never_targets`),
+    // and charges EXACTLY the nine visited frames, leaving zero residual
+    // budget. A later direct re-query of object 6 (fresh root, `remaining`
+    // relaxes to 8 > its cached `computed_through` of 7) must attempt a
+    // DEEPENING recompute — but with zero bytes left, object 6's OWN
+    // re-decode fails at the zero-budget guard before any nested descent even
+    // starts. The tallied class for THIS query must be the fresh
+    // `DecodedByteBudget` cause, never the stale `RecursionDepth` left behind
+    // by the original partial compute.
+    let input = form_pdf(&chain(9));
+    let access = inspect_document_access(&input).expect("open");
+    let lookup = backend_lookup(&access.backend);
+    let frame = b"/N Do".len();
+    let mut analyzer = FormXObjectEffectAnalyzer::with_bounds(9, 9 * frame);
+
+    analyzer.begin_page_refusal_tally();
+    assert_eq!(analyze_object(&mut analyzer, &input, lookup, 5), None);
+    assert_only_class(
+        &analyzer.take_page_refusal_counts(),
+        FormXObjectRefusalClass::RecursionDepth,
+    );
+    assert_eq!(analyzer.remaining_bytes_for_test(), 0);
+    let object_6 = IndirectRef {
+        object_number: 6,
+        generation: 0,
+    };
+    assert_eq!(
+        analyzer.cached_computed_through_for_test(object_6, object_offset(lookup, 6)),
+        Some(7)
+    );
+
+    analyzer.begin_page_refusal_tally();
+    assert_eq!(analyze_object(&mut analyzer, &input, lookup, 6), None);
+    assert_only_class(
+        &analyzer.take_page_refusal_counts(),
+        FormXObjectRefusalClass::DecodedByteBudget,
+    );
 }
 
 #[test]

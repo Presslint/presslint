@@ -87,6 +87,7 @@ pub use content_color_rewrite::{
     rewrite_rgb_black_to_cmyk_incremental,
 };
 pub use content_edit_pipeline::PageSelection;
+pub use form_xobject_effect::{FormXObjectRefusalClass, FormXObjectRefusalCounts};
 pub use link_routing::{DeviceLinkInput, LinkConversionCounts};
 pub use page_boxes::{
     AppliedBox, DictionaryEntryWrite, EditedPage, PageBoxEdit, SetPageBoxSkipReason,

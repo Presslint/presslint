@@ -150,6 +150,7 @@
 mod color;
 mod extgstate;
 mod recurse;
+mod refusal;
 mod xobjects;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -176,6 +177,7 @@ use crate::{
 };
 
 use recurse::BoundedFormLaneEffects;
+pub use refusal::{FormXObjectRefusalClass, FormXObjectRefusalCounts};
 use xobjects::FormLocalXObjectAuthority;
 
 #[cfg(test)]
@@ -190,16 +192,31 @@ const MAX_FORM_TARGETS: usize = 256;
 /// stroking-first lane order the alias planner uses.
 pub type FormLaneEffect = [bool; 2];
 
+/// One exact identity's cached pure lattice and observe-only refusal
+/// attribution. Keeping both in one value avoids a second keyed allocation;
+/// the lattice remains the sole input to every analysis decision.
+#[derive(Clone, Copy)]
+struct CachedFormAnalysis {
+    lattice: BoundedFormLaneEffects,
+    refusal_class: Option<FormXObjectRefusalClass>,
+}
+
 /// Request-scoped exact-identity cache and bounds for Form colour-effect
 /// analysis, root and nested. Conceptually owns a
-/// `(reference, reached_offset) -> BoundedFormLaneEffects` map (map presence =
+/// `(reference, reached_offset) -> CachedFormAnalysis` map (map presence =
 /// seen; an all-Unknown lattice = cached refusal), a remaining first-seen
-/// target count, and one aggregate remaining decoded-byte budget shared across
-/// the whole request, nested frames included.
+/// computation-charge count, and one aggregate remaining decoded-byte budget
+/// shared across the whole request, nested frames included.
 pub struct FormXObjectEffectAnalyzer {
-    cache: BTreeMap<(IndirectRef, usize), BoundedFormLaneEffects>,
+    cache: BTreeMap<(IndirectRef, usize), CachedFormAnalysis>,
     remaining_targets: usize,
     remaining_bytes: usize,
+    /// Exact demanded `(reference, reached_offset)` identities already counted
+    /// for the CURRENT page's tally. Reset at each page boundary so a
+    /// cache-hit re-count on a new page still counts once there.
+    page_seen: BTreeSet<(IndirectRef, usize)>,
+    /// The current page's tallied refusal-class counts.
+    page_counts: FormXObjectRefusalCounts,
 }
 
 /// Borrowed per-`analyze` descent state threaded through the bounded nested-
@@ -230,6 +247,8 @@ impl FormXObjectEffectAnalyzer {
             cache: BTreeMap::new(),
             remaining_targets: MAX_FORM_TARGETS,
             remaining_bytes: MAX_CONTENT_STREAM_BYTES,
+            page_seen: BTreeSet::new(),
+            page_counts: FormXObjectRefusalCounts::new(),
         }
     }
 
@@ -242,7 +261,23 @@ impl FormXObjectEffectAnalyzer {
             cache: BTreeMap::new(),
             remaining_targets,
             remaining_bytes,
+            page_seen: BTreeSet::new(),
+            page_counts: FormXObjectRefusalCounts::new(),
         }
+    }
+
+    /// Reset per-page refusal tallying before a fresh page's Form demands
+    /// begin: clears the per-page identity-seen dedup set and per-page counts
+    /// so a prior (possibly aborted) page's partial tally never bleeds into
+    /// the next page.
+    pub(crate) fn begin_page_refusal_tally(&mut self) {
+        self.page_seen.clear();
+        self.page_counts = FormXObjectRefusalCounts::new();
+    }
+
+    /// Take this page's tallied refusal-class counts, ending the tally.
+    pub(crate) fn take_page_refusal_counts(&mut self) -> FormXObjectRefusalCounts {
+        std::mem::take(&mut self.page_counts)
     }
 
     /// Remaining aggregate decoded-byte budget. Test-only evidence that a
@@ -263,7 +298,7 @@ impl FormXObjectEffectAnalyzer {
     ) -> Option<usize> {
         self.cache
             .get(&(reference, reached_offset))
-            .map(|entry| entry.computed_through())
+            .map(|entry| entry.lattice.computed_through())
     }
 
     /// Summarize the inherited-colour lane effect of one demanded Form target
@@ -293,8 +328,18 @@ impl FormXObjectEffectAnalyzer {
         // A root call always sits within the horizon (the active path is
         // empty), so the frame is never unavailable; a lattice left partial
         // by exhaustion reads its uncomputed top slot as Unknown.
-        self.analyze_nested(&mut descent, reference, reached_offset)
-            .and_then(BoundedFormLaneEffects::max_depth_effect)
+        let analyzed = self.analyze_nested(&mut descent, reference, reached_offset);
+        let effect = analyzed.and_then(|entry| entry.lattice.max_depth_effect());
+        // Observe-only per-page refusal tally: this never influences `effect`.
+        // Count once per exact demanded identity per page; a cache hit still
+        // counts here (zero decode/walk/budget charge) since the class comes
+        // from the same already-cached entry as the lattice.
+        if effect.is_none() && self.page_seen.insert((reference, reached_offset)) {
+            if let Some(class) = analyzed.and_then(|entry| entry.refusal_class) {
+                self.page_counts.add(class);
+            }
+        }
+        effect
     }
 
     /// The single recursive entry every root analysis and nested descent uses.
@@ -323,9 +368,12 @@ impl FormXObjectEffectAnalyzer {
         descent: &mut FormDescent<'_>,
         reference: IndirectRef,
         reached_offset: usize,
-    ) -> Option<BoundedFormLaneEffects> {
+    ) -> Option<CachedFormAnalysis> {
         if descent.active.contains(&reference) {
-            return Some(BoundedFormLaneEffects::all_unknown());
+            return Some(CachedFormAnalysis {
+                lattice: BoundedFormLaneEffects::all_unknown(),
+                refusal_class: Some(FormXObjectRefusalClass::RecursionCycle),
+            });
         }
         let key = (reference, reached_offset);
         // Edges already used equal the active path length; entering this
@@ -334,7 +382,7 @@ impl FormXObjectEffectAnalyzer {
         let remaining = recurse::MAX_NESTED_FORM_DEPTH.checked_sub(descent.active.len());
         let cached = self.cache.get(&key).copied();
         if let Some(entry) = cached {
-            if remaining.is_none_or(|edges| edges <= entry.computed_through()) {
+            if remaining.is_none_or(|edges| edges <= entry.lattice.computed_through()) {
                 return Some(entry);
             }
         }
@@ -342,20 +390,31 @@ impl FormXObjectEffectAnalyzer {
         descent.active.insert(reference);
         let computed = self.compute(descent, reference, reached_offset, cached.is_none());
         descent.active.remove(&reference);
-        let result = match computed {
-            Some(lattice) => lattice,
+        let entry = match computed {
+            Ok(mut entry) => {
+                if entry.lattice.max_depth_effect().is_some() {
+                    entry.refusal_class = None;
+                }
+                entry
+            }
             // A failed FIRST compute is the intrinsic/unaffordable refusal of
             // every slot; a failed deepening recompute (only ever budget
             // exhaustion — every intrinsic gate is deterministic over the
             // same bytes) keeps the prior pure entry instead of destroying
             // its computed slots.
-            None => match cached {
-                Some(entry) => return Some(entry),
-                None => BoundedFormLaneEffects::all_unknown(),
-            },
+            Err(class) => {
+                // A deepening failure keeps the lattice unchanged, but THIS
+                // query's fresh class must replace the cached attribution.
+                let mut entry = cached.unwrap_or_else(|| CachedFormAnalysis {
+                    lattice: BoundedFormLaneEffects::all_unknown(),
+                    refusal_class: None,
+                });
+                entry.refusal_class = Some(class);
+                entry
+            }
         };
-        self.cache.insert(key, result);
-        Some(result)
+        self.cache.insert(key, entry);
+        Some(entry)
     }
 
     /// Compute one exact identity's lattice, charging one first-seen target
@@ -365,51 +424,52 @@ impl FormXObjectEffectAnalyzer {
     /// root and a nested child. A budget-dependent failed raw read or Flate
     /// inflation exhausts the residual byte budget so later deepening stops at
     /// the zero-budget guard; intrinsic decoder failures leave it unchanged.
-    /// `None` on a first compute is a refusal of every slot and is cached as
-    /// the all-Unknown lattice.
+    /// `Err` on a first compute is a refusal of every slot and is cached as the
+    /// all-Unknown lattice.
     fn compute(
         &mut self,
         descent: &mut FormDescent<'_>,
         reference: IndirectRef,
         reached_offset: usize,
         charge_target: bool,
-    ) -> Option<BoundedFormLaneEffects> {
+    ) -> Result<CachedFormAnalysis, FormXObjectRefusalClass> {
         if charge_target {
             if self.remaining_targets == 0 {
-                return None;
+                return Err(FormXObjectRefusalClass::TargetBudget);
             }
             self.remaining_targets -= 1;
         }
         // Aggregate budget exhaustion makes every remaining unseen target
         // Unknown, including a zero-byte Form; cached identities remain usable.
         if self.remaining_bytes == 0 {
-            return None;
+            return Err(FormXObjectRefusalClass::DecodedByteBudget);
         }
         if !corroborates(descent.lookup, reference, reached_offset) {
-            return None;
+            return Err(FormXObjectRefusalClass::StructuralPreflight);
         }
         // The raw-key extent/filter/group helpers are safe only after every
         // top-level key has been decoded and their delegated spellings are
         // proved canonical and unique. This also refuses stream substitution,
         // reference XObjects, optional content and OPI before any body access.
         if !semantic_dictionary_preflight(descent.input, reached_offset) {
-            return None;
+            return Err(FormXObjectRefusalClass::StructuralPreflight);
         }
         // Accept only raw/uncompressed or a single default-predictor
         // `/FlateDecode`; every other filter/chain/predictor is Unknown.
-        let filter = classify_filter(descent.input, reached_offset).ok()?;
+        let filter = classify_filter(descent.input, reached_offset)
+            .map_err(|_| FormXObjectRefusalClass::StreamFilterOrExtent)?;
         let extent = inspect_content_stream_data_extent_with_lookup(
             descent.input,
             Some(descent.lookup),
             reached_offset,
         )
-        .ok()?;
+        .map_err(|_| FormXObjectRefusalClass::StreamFilterOrExtent)?;
         // Prove the Form declares no transparency group before any body walk;
         // any valid, malformed, indirect-unresolved, or uncertain group is
         // Unknown.
         let group = inspect_form_transparency_group(descent.input, descent.lookup, reached_offset);
         if group.group.is_some() || !group.skipped.is_empty() {
-            return None;
+            return Err(FormXObjectRefusalClass::TransparencyGroup);
         }
         // Borrow raw bytes directly; bound a Flate decode by the remaining
         // aggregate budget and drop the owned buffer once the lattice is read.
@@ -420,14 +480,16 @@ impl FormXObjectEffectAnalyzer {
                     // attempt. Exhaust it so a horizon-cut partial entry cannot
                     // trigger the same over-budget body read indefinitely.
                     self.remaining_bytes = 0;
-                    return None;
+                    return Err(FormXObjectRefusalClass::DecodedByteBudget);
                 }
-                let slice = content_stream_data_slice(descent.input, &extent).ok()?;
+                let slice = content_stream_data_slice(descent.input, &extent)
+                    .map_err(|_| FormXObjectRefusalClass::StreamFilterOrExtent)?;
                 self.remaining_bytes -= slice.len();
                 self.analyze_bytes(descent, reached_offset, slice)
             }
             PipelineFilterKind::Flate => {
-                let slice = content_stream_data_slice(descent.input, &extent).ok()?;
+                let slice = content_stream_data_slice(descent.input, &extent)
+                    .map_err(|_| FormXObjectRefusalClass::StreamFilterOrExtent)?;
                 let decoded = match decode_flate_stream(
                     slice,
                     FlateDecodeParameters::default(),
@@ -441,8 +503,11 @@ impl FormXObjectEffectAnalyzer {
                             // an unchanged partial cache entry cannot amplify
                             // the same bounded work on later queries.
                             self.remaining_bytes = 0;
+                            return Err(FormXObjectRefusalClass::DecodedByteBudget);
                         }
-                        return None;
+                        // Every other decode failure is intrinsic to these
+                        // bytes (invalid zlib), not a budget effect.
+                        return Err(FormXObjectRefusalClass::StreamFilterOrExtent);
                     }
                 };
                 self.remaining_bytes -= decoded.len();
@@ -469,11 +534,13 @@ impl FormXObjectEffectAnalyzer {
         descent: &mut FormDescent<'_>,
         reached_offset: usize,
         decoded: &[u8],
-    ) -> Option<BoundedFormLaneEffects> {
-        let tokens = tokenize(decoded).ok()?;
-        let records = assemble_operators(&tokens).ok()?.records;
+    ) -> Result<CachedFormAnalysis, FormXObjectRefusalClass> {
+        let tokens = tokenize(decoded).map_err(|_| FormXObjectRefusalClass::RawGrammar)?;
+        let assembled =
+            assemble_operators(&tokens).map_err(|_| FormXObjectRefusalClass::RawGrammar)?;
+        let records = assembled.records;
         if !raw_preflight_ok(&tokens, &records, decoded) {
-            return None;
+            return Err(FormXObjectRefusalClass::RawGrammar);
         }
         // Demand for the ExtGState gate is a syntactically valid `gs`; a Form
         // without one never inspects its own `/Resources /ExtGState`, even a
@@ -487,7 +554,7 @@ impl FormXObjectEffectAnalyzer {
             &records,
             decoded,
         ) {
-            return None;
+            return Err(FormXObjectRefusalClass::ExtGStateAuthority);
         }
         let resources = if records
             .iter()
@@ -499,7 +566,7 @@ impl FormXObjectEffectAnalyzer {
                 reached_offset,
                 b"ColorSpace",
             ) {
-                return None;
+                return Err(FormXObjectRefusalClass::ColorAuthority);
             }
             color::build_device_projection(
                 descent.input,
@@ -507,7 +574,8 @@ impl FormXObjectEffectAnalyzer {
                 reached_offset,
                 &records,
                 decoded,
-            )?
+            )
+            .ok_or(FormXObjectRefusalClass::ColorAuthority)?
         } else {
             Vec::new()
         };
@@ -552,7 +620,7 @@ impl FormXObjectEffectAnalyzer {
         records: &[OperatorRecord],
         env: ColorSpaceEnv<'_>,
         xobjects: Option<&FormLocalXObjectAuthority>,
-    ) -> Option<BoundedFormLaneEffects> {
+    ) -> Result<CachedFormAnalysis, FormXObjectRefusalClass> {
         let stroking_sentinel = inherited_sentinel(&[0.5, 0.25, 0.125, 0.0625]);
         let nonstroking_sentinel = inherited_sentinel(&[0.0625, 0.125, 0.25, 0.5]);
         let mut seed = GraphicsStateSnapshot::page_default();
@@ -561,10 +629,19 @@ impl FormXObjectEffectAnalyzer {
         let seed = Rc::new(seed);
         let program = PaintProgram::new(decoded, records, env);
         let mut lattice = BoundedFormLaneEffects::neutral();
+        // First-wins: the actionable cause of the FIRST nested-Form fold that
+        // damages this walk's lattice (a genuine cycle, a horizon cutoff, or a
+        // bubbled child class), in walk order. `None` while every fold so far
+        // left the lattice fully proven.
+        let mut fold_refusal: Option<FormXObjectRefusalClass> = None;
         let mut previous = Rc::clone(&seed);
         for op in program.ops_with_initial_state(seed) {
-            let op = op.ok()?;
-            let record = records.get(op.index)?;
+            let Ok(op) = op else {
+                return Err(FormXObjectRefusalClass::RawGrammar);
+            };
+            let Some(record) = records.get(op.index) else {
+                return Err(FormXObjectRefusalClass::RawGrammar);
+            };
             let operator = decoded.get(record.operator.range.start..record.operator.range.end);
             // `PaintOp.state` is post-operator. A `CS`/`cs` selecting a
             // supported Device family stamps a concrete local colour, so the
@@ -583,7 +660,7 @@ impl FormXObjectEffectAnalyzer {
                         decoded,
                     ) =>
                 {
-                    return None;
+                    return Err(FormXObjectRefusalClass::ColorAuthority);
                 }
                 Some(b"cs")
                     if !color::valid_color_space_selection(
@@ -593,7 +670,7 @@ impl FormXObjectEffectAnalyzer {
                         decoded,
                     ) =>
                 {
-                    return None;
+                    return Err(FormXObjectRefusalClass::ColorAuthority);
                 }
                 Some(b"SC" | b"SCN")
                     if !color::valid_named_setter(
@@ -603,7 +680,7 @@ impl FormXObjectEffectAnalyzer {
                         record,
                     ) =>
                 {
-                    return None;
+                    return Err(FormXObjectRefusalClass::ColorAuthority);
                 }
                 Some(b"sc" | b"scn")
                     if !color::valid_named_setter(
@@ -613,7 +690,7 @@ impl FormXObjectEffectAnalyzer {
                         record,
                     ) =>
                 {
-                    return None;
+                    return Err(FormXObjectRefusalClass::ColorAuthority);
                 }
                 _ => {}
             }
@@ -628,7 +705,9 @@ impl FormXObjectEffectAnalyzer {
                     op.state.stroking_color == stroking_sentinel,
                     op.state.nonstroking_color == nonstroking_sentinel,
                 ];
-                self.fold_xobject_invoke(descent, xobjects, &name.0, lane_live, &mut lattice)?;
+                let damage =
+                    self.fold_xobject_invoke(descent, xobjects, &name.0, lane_live, &mut lattice)?;
+                fold_refusal = fold_refusal.or(damage);
             }
             if let PaintOpKind::PathPaint { paint } = op.kind {
                 if paint.uses_stroke() && op.state.stroking_color == stroking_sentinel {
@@ -640,7 +719,10 @@ impl FormXObjectEffectAnalyzer {
             }
             previous = Rc::clone(&op.state);
         }
-        Some(lattice)
+        Ok(CachedFormAnalysis {
+            lattice,
+            refusal_class: fold_refusal,
+        })
     }
 
     /// Apply one raw `Do` operand to the lattice through the Form-local
@@ -651,7 +733,14 @@ impl FormXObjectEffectAnalyzer {
     /// analyzed through the bounded recursion — sentinel-seeded like a root,
     /// cycle-refused, horizon-bounded, and charged once per first-seen target —
     /// then folded per slot at this site. Every other resolution is an
-    /// intrinsic refusal (`None`) of the whole Form.
+    /// intrinsic refusal (`Err`) of the whole Form.
+    ///
+    /// `Ok(None)` is a fold that left this walk's lattice fully proven so far
+    /// (an ordinary Image, a stencil, or a clean nested-Form fold). `Ok(Some(_))`
+    /// is a fold that damaged the lattice's maximum-depth slot: a genuine
+    /// active-path cycle re-encounter, a traversal-horizon depth cutoff, or —
+    /// bubbled from the child's own cached class — the child's actionable
+    /// cause. The caller keeps only the FIRST such class in walk order.
     fn fold_xobject_invoke(
         &mut self,
         descent: &mut FormDescent<'_>,
@@ -659,30 +748,41 @@ impl FormXObjectEffectAnalyzer {
         raw_name: &[u8],
         lane_live: [bool; 2],
         lattice: &mut BoundedFormLaneEffects,
-    ) -> Option<()> {
-        let (target, effect) = xobjects?.resolve(raw_name)?;
+    ) -> Result<Option<FormXObjectRefusalClass>, FormXObjectRefusalClass> {
+        let Some((target, effect)) = xobjects.and_then(|authority| authority.resolve(raw_name))
+        else {
+            return Err(FormXObjectRefusalClass::XObjectAuthority);
+        };
         match effect {
-            PageXObjectEffect::OrdinaryImage => {}
+            PageXObjectEffect::OrdinaryImage => Ok(None),
             PageXObjectEffect::Stencil => {
                 if lane_live[1] {
                     lattice.mark_consumed(1);
                 }
+                Ok(None)
             }
             PageXObjectEffect::Form => {
                 let reference = target.reference;
                 let reached_offset = target.object_byte_offset;
-                match self.analyze_nested(descent, reference, reached_offset) {
-                    Some(child) => lattice.fold_nested_form(child, lane_live),
+                if let Some(child) = self.analyze_nested(descent, reference, reached_offset) {
+                    lattice.fold_nested_form(child.lattice, lane_live);
+                    let damage = if lattice.max_depth_effect().is_some() {
+                        None
+                    } else {
+                        child.refusal_class
+                    };
+                    Ok(damage)
+                } else {
                     // Past the horizon with nothing cached: slot 0 is still
                     // computed (an invoked nested Form with no edge left is
                     // Unknown) and every deeper slot stays uncomputed for a
                     // shallower re-entry to fill in.
-                    None => lattice.refuse_nested_descent(),
+                    lattice.refuse_nested_descent();
+                    Ok(Some(FormXObjectRefusalClass::RecursionDepth))
                 }
             }
-            _ => return None,
+            _ => Err(FormXObjectRefusalClass::RawGrammar),
         }
-        Some(())
     }
 }
 

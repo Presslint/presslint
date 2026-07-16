@@ -25,8 +25,8 @@ use presslint_types::PageIndex;
 
 use crate::{
     BlackPreservationPolicy, ConvertContentColorsError, ConvertContentColorsOutput,
-    ConvertContentColorsRequest, DeviceLinkInput, OperatorSkipCounts, PageSelection,
-    convert_content_colors_incremental,
+    ConvertContentColorsRequest, DeviceLinkInput, FormXObjectRefusalCounts, OperatorSkipCounts,
+    PageSelection, convert_content_colors_incremental,
 };
 
 use super::{reopen, xref_record};
@@ -716,6 +716,137 @@ fn rerunning_rgb_link_does_not_reconvert_the_now_cmyk_operator() {
     // The operator is now `k` (CMYK), a source-space mismatch under the RGB link.
     assert_eq!(second.converted[0].operators_converted, 0);
     assert_eq!(second.converted[0].operator_skips.no_matching_link, 1);
+}
+
+// --- Form refusal-class per-page counting (T192) -----------------------------
+
+/// Two-page classic PDF whose page 0 declares two distinct refused Form
+/// identities (object 5 twice-aliased plus repeated `Do`, object 6 once) and
+/// whose page 1 re-`Do`s object 5 under a fresh name, exercising the analyzer
+/// cache-hit path on a new page.
+fn two_page_refusal_pdf() -> Vec<u8> {
+    // Object layout: 1 catalog, 2 pages, 3 page-0, 4 content-0, 5 page-1,
+    // 6 content-1, 7 raw-grammar form, 8 transparency-group form.
+    let page_one_resources = "/XObject << /A 7 0 R /B 7 0 R /C 8 0 R >>";
+    let page_two_resources = "/XObject << /D 7 0 R >>";
+    let page = |contents: &str, resources: &str| {
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents {contents} /Resources << {resources} >> >>"
+        )
+        .into_bytes()
+    };
+    let form_dict = " /Type /XObject /Subtype /Form /BBox [0 0 100 100]";
+    // Object 5: an unsupported raw operator (RawGrammar).
+    let raw_grammar_form = stream_body(form_dict, b"BT (x) Tj ET");
+    // Object 6: a declared transparency group (TransparencyGroup).
+    let group_form = stream_body(
+        &format!("{form_dict} /Group << /S /Transparency >>"),
+        b"0 0 m 1 1 l f",
+    );
+    assemble_classic(&[
+        CATALOG.to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".to_vec(),
+        page("4 0 R", page_one_resources),
+        stream_body("", b"/A Do /B Do /A Do /C Do\n"),
+        page("6 0 R", page_two_resources),
+        stream_body("", b"/D Do\n"),
+        raw_grammar_form,
+        group_form,
+    ])
+}
+
+#[test]
+fn per_page_refusal_counts_dedup_aliases_and_recount_on_cache_hit() {
+    let input = two_page_refusal_pdf();
+    let output = convert(&input, RGB_TO_CMYK_LINK);
+
+    assert_eq!(output.converted.len(), 2);
+    // Page 0: two aliases (`A`/`B`) and a repeated `Do` of the SAME identity
+    // (object 5) count once; the distinct object-6 identity counts once too.
+    let want_page_0 = FormXObjectRefusalCounts {
+        raw_grammar: 1,
+        transparency_group: 1,
+        ..FormXObjectRefusalCounts::default()
+    };
+    assert_eq!(output.converted[0].form_xobject_refusal_counts, want_page_0);
+    // Page 1: a cache hit on object 5 under a fresh name still counts once on
+    // this page (zero decode/walk/budget charge), independent of page 0.
+    let want_page_1 = FormXObjectRefusalCounts {
+        raw_grammar: 1,
+        ..FormXObjectRefusalCounts::default()
+    };
+    assert_eq!(output.converted[1].form_xobject_refusal_counts, want_page_1);
+
+    // The per-page counts fold to the exact cross-page total of distinct
+    // (page, identity) impacts: two `raw_grammar` impacts (one per page) and
+    // one `transparency_group` impact.
+    let mut total = output.converted[0].form_xobject_refusal_counts;
+    total.fold(&output.converted[1].form_xobject_refusal_counts);
+    assert_eq!(total.raw_grammar, 2);
+    assert_eq!(total.transparency_group, 1);
+}
+
+/// One-page classic PDF whose page invokes two distinct RawGrammar-refused
+/// Form identities (objects 5 and 6) through two aliases of the SAME
+/// resource dictionary.
+fn two_distinct_same_class_targets_pdf() -> Vec<u8> {
+    let resources = "/XObject << /A 5 0 R /B 6 0 R >>";
+    let form_dict = " /Type /XObject /Subtype /Form /BBox [0 0 100 100]";
+    assemble_classic(&[
+        CATALOG.to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << {resources} >> >>"
+        )
+        .into_bytes(),
+        stream_body("", b"/A Do /B Do\n"),
+        stream_body(form_dict, b"BT (x) Tj ET"),
+        stream_body(form_dict, b"zz"),
+    ])
+}
+
+#[test]
+fn two_distinct_same_class_targets_each_count_once() {
+    let input = two_distinct_same_class_targets_pdf();
+    let output = convert(&input, RGB_TO_CMYK_LINK);
+
+    let want = FormXObjectRefusalCounts {
+        raw_grammar: 2,
+        ..FormXObjectRefusalCounts::default()
+    };
+    assert_eq!(output.converted[0].form_xobject_refusal_counts, want);
+}
+
+#[test]
+fn a_refused_form_do_is_observe_only_and_never_changes_an_unrelated_operators_admission() {
+    // A refused `Do` (RawGrammar) sits on the SAME page as an unrelated `rg`
+    // device-colour operator: the refusal tally must never influence that
+    // operator's own admission, converted bytes, or existing tallies.
+    let form = stream_body(
+        " /Type /XObject /Subtype /Form /BBox [0 0 100 100]",
+        b"BT (x) Tj ET",
+    );
+    let input = assemble_classic(&[
+        CATALOG.to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /XObject << /Fm 5 0 R >> >> >>".to_vec(),
+        stream_body("", b"1 0 0 rg /Fm Do\n"),
+        form.clone(),
+    ]);
+    let output = convert(&input, RGB_TO_CMYK_LINK);
+
+    assert_eq!(&output.bytes[..input.len()], input.as_slice());
+    assert_eq!(output.converted[0].operators_converted, 1);
+    assert_eq!(
+        output.converted[0].operator_skips,
+        OperatorSkipCounts::default()
+    );
+    assert!(contains(&output.bytes, &form));
+    let want = FormXObjectRefusalCounts {
+        raw_grammar: 1,
+        ..FormXObjectRefusalCounts::default()
+    };
+    assert_eq!(output.converted[0].form_xobject_refusal_counts, want);
 }
 
 #[test]

@@ -15,7 +15,7 @@
 
 use crate::{
     BlackPreservationPolicy, ConvertContentColorsOutput, ConvertContentColorsRequest,
-    DeviceLinkInput, PageSelection, convert_content_colors_incremental,
+    DeviceLinkInput, FormXObjectRefusalClass, PageSelection, convert_content_colors_incremental,
     form_xobject_effect::{
         FormXObjectEffectAnalyzer, xobject_target_identity_corroborates_for_test,
     },
@@ -26,6 +26,7 @@ use presslint_pdf::{
     inspect_indirect_object_dictionary, locate_xref_object,
 };
 
+use super::alias_epoch_form::assert_only_class;
 use super::content_color_convert::{
     GRAY_TO_GRAY_LINK, assemble_classic, contains, link_bytes, occurrence_count,
     page_decoded_stream, stream_body,
@@ -126,6 +127,68 @@ fn analyze(objects: &[Vec<u8>]) -> Option<[bool; 2]> {
 /// Analyze a form whose sole `XObject` resource `/St` is a valid stencil.
 fn analyze_stencil_form(content: &[u8]) -> Option<[bool; 2]> {
     analyze(&[xform("/St 6 0 R", content), stencil_object("")])
+}
+
+/// Analyze object 5 (the first supplied body) once in a fresh request
+/// analyzer and return its tallied per-page refusal-class counts.
+fn refusal_counts_for(objects: &[Vec<u8>]) -> crate::FormXObjectRefusalCounts {
+    let input = form_pdf(objects);
+    let access = inspect_document_access(&input).expect("open");
+    let lookup = backend_lookup(&access.backend);
+    let offset = object_offset(lookup, 5);
+    let mut analyzer = FormXObjectEffectAnalyzer::new();
+    analyzer.analyze(
+        &input,
+        lookup,
+        IndirectRef {
+            object_number: 5,
+            generation: 0,
+        },
+        offset,
+    );
+    analyzer.take_page_refusal_counts()
+}
+
+// --- Refusal-class taxonomy locks (T192) -------------------------------------
+
+#[test]
+fn an_unresolved_do_name_classifies_xobject_authority() {
+    // No `/Resources /XObject` at all.
+    assert_only_class(
+        &refusal_counts_for(&[form("", b"/Missing Do")]),
+        FormXObjectRefusalClass::XObjectAuthority,
+    );
+    // A generation-mismatched Form target: poisoned at authority-build time,
+    // not at the root's own exact-identity corroboration.
+    assert_only_class(
+        &refusal_counts_for(&[xform("/Fm 6 1 R", b"/Fm Do"), form("", b"0 0 m 1 1 l f")]),
+        FormXObjectRefusalClass::XObjectAuthority,
+    );
+}
+
+#[test]
+fn a_root_exact_identity_mismatch_classifies_structural_preflight() {
+    // The generation the caller reached does not corroborate: this is the
+    // ROOT's own exact-identity gate, not the XObject authority the rest of
+    // this module exercises.
+    let input = form_pdf(&[form("", b"0 0 m 1 1 l f")]);
+    let access = inspect_document_access(&input).expect("open");
+    let lookup = backend_lookup(&access.backend);
+    let offset = object_offset(lookup, 5);
+    let mut analyzer = FormXObjectEffectAnalyzer::new();
+    analyzer.analyze(
+        &input,
+        lookup,
+        IndirectRef {
+            object_number: 5,
+            generation: 1,
+        },
+        offset,
+    );
+    assert_only_class(
+        &analyzer.take_page_refusal_counts(),
+        FormXObjectRefusalClass::StructuralPreflight,
+    );
 }
 
 #[test]

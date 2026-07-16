@@ -2,6 +2,146 @@
 
 Earlier entries are preserved in [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T192 - Form refusal-class instrumentation, serialized per-page counts
+
+### The taxonomy
+
+Every `FormXObjectEffectAnalyzer` refusal is now classified into exactly one
+of eleven stable `FormXObjectRefusalClass` variants
+(`form_xobject_effect/refusal.rs`, the ONE new public taxonomy this slice
+adds): `StructuralPreflight` (exact-identity corroboration or the decoded-name
+Form-dictionary preflight), `StreamFilterOrExtent` (unsupported filter/chain/
+predictor, extent inspection failure, or an intrinsic — non-budget — Flate
+decode failure), `TransparencyGroup`, `RawGrammar` (tokenize/assemble/raw-
+preflight failure or an intrinsic seeded-walk fallthrough), `ColorAuthority`
+(the Form-local `/Resources /ColorSpace` authority or a `CS`/`cs`/`SC`/`SCN`/
+`sc`/`scn` validation over it), `XObjectAuthority` (the Form-local
+`/Resources /XObject` authority failing to resolve an invoked `Do`),
+`ExtGStateAuthority`, `RecursionCycle` (an active-path re-encounter),
+`RecursionDepth` (a nested descent past the bounded traversal horizon with
+nothing cached), `TargetBudget`, and `DecodedByteBudget` (zero-entry budget,
+raw over-budget, or a Flate output-limit hit). The taxonomy authorizes
+nothing, retains no PDF identity/byte/resource-name fact, and is exposed only
+as counts.
+
+### Counting semantics
+
+`ConvertedPage` gains one additive `form_xobject_refusal_counts` field
+(`FormXObjectRefusalCounts`, named `usize` fields, `is_empty`, `add`/`fold`
+helpers, `#[serde(default, skip_serializing_if = "..")]` so existing JSON
+without refusals stays byte-identical). It counts a refused DEMANDED Form
+identity once per exact `(reference, reached_offset)` identity per page:
+repeated `Do` and aliases of one identity count once; the same identity
+demanded on another page counts once there too, including on an analyzer
+cache hit (zero decode/walk/budget charge). Counting attaches only to the
+public `analyze()` entry point — the one page demand actually calls — so
+nested descents never count independently; a nested child's intrinsic
+failure bubbles up to the root demand classified as the CHILD's own
+actionable cause, and only a genuine cycle re-encounter or a depth cutoff
+classify as `RecursionCycle`/`RecursionDepth`.
+
+### Mechanics: a per-compute first-wins class, a per-identity cache, a
+### per-page tally
+
+`compute`/`analyze_bytes`/`walk_lane_effect` return
+`Result<CachedFormAnalysis, FormXObjectRefusalClass>`: `Err` names every
+whole-Form refusal at the gate that fired, while `Ok` carries the computed
+lattice and the optional first nested-fold class. This makes the impossible
+"refused without a class" state unrepresentable. `fold_xobject_invoke` returns
+`Result<Option<FormXObjectRefusalClass>, FormXObjectRefusalClass>` — `Err` is a
+whole-Form intrinsic refusal (an unresolved `Do` name); `Ok(Some(_))` is a
+nested-Form fold that damaged this walk's lattice (a cycle, a depth cutoff, or
+the invoked child's own bubbled class, read from the child's inline cache
+attribution); `Ok(None)` is a clean fold. The walk keeps only the FIRST such
+class in walk order.
+`analyze_nested` stores one private `CachedFormAnalysis` value — the existing
+`BoundedFormLaneEffects` lattice plus an optional refusal class — per existing
+cache key. There is no second keyed map, duplicated key, allocation, or lookup
+for attribution: cache hits return the lattice and class from that one value.
+The class is present exactly while the lattice's maximum-depth slot is Unknown;
+a lattice that later proves an effect there clears any
+stale class. The analyzer additionally holds a per-page identity-seen
+`BTreeSet` and a `FormXObjectRefusalCounts` accumulator, reset by
+`begin_page_refusal_tally` (called once per analysed page, before its Form
+demands begin) and read by `take_page_refusal_counts` (called once per page,
+after its content sequence is edited) — both `pub(crate)`, called only from
+`content_color_convert.rs`; `page_xobject_policy.rs` needed no change.
+
+A failed DEEPENING recompute (a cached partial entry re-entered with more
+remaining edges than it has computed, whose fresh recompute attempt still
+fails) keeps the prior lattice unchanged — its computed slots must never be
+destroyed — but now replaces the cached value's inline attribution with the
+fresh attempt's class. The lattice is a pure function of the form's own subtree
+and stays untouched either way (observe-only for the actual admission result);
+only the tallied CLASS is corrected, since it must reflect why THIS query's
+deepening just failed (e.g. the aggregate byte budget running out elsewhere in
+the interim), not whatever a much earlier, shallower compute happened to record.
+Review caught this as a stale-class bug (a `RecursionDepth`-classified partial
+entry could keep reporting `RecursionDepth` even after a later deepening
+attempt failed on `DecodedByteBudget` instead); the fix updates the class on
+every failed recompute, first or deepening alike.
+
+### Observe-only, provably
+
+No admission decision, byte output, cache/lattice/budget behavior, public
+enum, or epoch tally changed: the full pre-existing `presslint-write` suite
+passes unmodified, and a dedicated fixture locks identical bytes,
+`operators_converted`, and operator-skip counts for an unrelated device-colour
+operator on the SAME page as an actually-invoked, refused Form `Do` — the
+refusal tally is observed alongside that operator's own conversion, not
+substituted for a fixture with no Form at all. The no-analysis-context refusal
+at `page_xobject_policy.rs:195` (the structural-policy path with no attached
+analyzer) stays uninstrumented by design — visible to a future sweep as
+`resource_alias_candidates_refused − Σclasses`, not coded around.
+
+### Performance
+
+Classification at an already-executing refusal gate is constant work and no
+new tokenization/decode/walk pass runs. The fixed-size
+`FormXObjectRefusalCounts` itself allocates nothing. Per-page identity
+deduplication uses an allocating `BTreeSet<(IndirectRef, usize)>`: each refused
+root demand performs an `O(log n)` lookup/insert in the number of distinct
+identities already seen on that page, and `begin_page_refusal_tally` resets the
+set at page boundaries so it does not accumulate across pages.
+
+Attribution adds one small `Option<FormXObjectRefusalClass>` to the existing
+cache value. It therefore adds no second tree node, duplicated key, keyed
+allocation, or separate attribution lookup. `MAX_FORM_TARGETS` bounds charged
+first-seen COMPUTATIONS, not cache cardinality: after the charge budget reaches
+zero, each later unseen demanded identity still publishes its all-Unknown
+`TargetBudget` cache entry, preserving the pre-existing cache behavior. Inline
+attribution shares that existing cardinality instead of doubling it or
+claiming a 256-entry bound. No hot-path byte/profile/stream copy was added.
+
+### Tests
+
+One fixture per class asserts exactly that counter is 1 and all others 0
+via a shared exhaustive-match helper (`assert_only_class`, `tests/
+alias_epoch_form.rs`, reused by every sibling test module) so a twelfth
+variant fails to compile until a new lock is written. Per-file locks: general
+gates plus `TargetBudget`/`DecodedByteBudget` (including the raw-vs-Flate
+`StreamFilterOrExtent`-not-`DecodedByteBudget` distinction) in
+`alias_epoch_form.rs`; `ColorAuthority` in `alias_epoch_form_color_resources.rs`;
+`ExtGStateAuthority` in `alias_epoch_form_extgstate.rs`; `XObjectAuthority` and
+a root-corroboration `StructuralPreflight` in `alias_epoch_form_xobjects.rs`;
+`RecursionCycle` (self and mutual cycles), `RecursionDepth` (the nine-edge
+horizon), explicit bubbled-actionable-cause locks — `RawGrammar`,
+`TransparencyGroup`, and `XObjectAuthority` each bubbling from a grandchild
+through two folds without ever classifying as a recursion class — a
+raw-vs-Flate `RawGrammar` parity lock, an exact-budget cross-page cache-hit-
+recounts-at-zero-further-charge lock, and a byte-exhaustion-cascade lock
+pinning `DecodedByteBudget` for a second, otherwise-unrelated unseen target,
+in `alias_epoch_form_recursion.rs` (chosen for file-size headroom under the
+1400-line gate; these locks exercise the ROOT analyzer/cache mechanics, not
+nested recursion specifically). `tests/content_color_convert.rs` adds a
+two-page fixture proving alias/repeated-`Do` dedup and cross-page cache-hit
+recount, a same-page two-distinct-identities-of-the-SAME-class lock, and an
+observe-only lock pairing an actually-invoked, refused Form `Do` with an
+unrelated device-colour operator on the same page (never a fixture with no
+Form at all). CLI JSON-shape ripple (`crates/presslint-cli/src/tests/
+report.rs`): omit-when-empty, nonzero serialization, and old-JSON
+default-on-missing-field.
+
 ## T191 - Form-local proven-neutral gs/ExtGState admission
 
 ### The authority contract

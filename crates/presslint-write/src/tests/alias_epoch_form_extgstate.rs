@@ -14,7 +14,7 @@
 
 use crate::{
     BlackPreservationPolicy, ConvertContentColorsOutput, ConvertContentColorsRequest,
-    DeviceLinkInput, PageSelection, convert_content_colors_incremental,
+    DeviceLinkInput, FormXObjectRefusalClass, PageSelection, convert_content_colors_incremental,
     form_xobject_effect::FormXObjectEffectAnalyzer,
 };
 use presslint_pdf::{
@@ -22,6 +22,7 @@ use presslint_pdf::{
     inspect_document_access, locate_xref_object,
 };
 
+use super::alias_epoch_form::assert_only_class;
 use super::content_color_convert::{
     GRAY_TO_GRAY_LINK, assemble_classic, contains, link_bytes, occurrence_count,
     page_decoded_stream, stream_body,
@@ -146,6 +147,42 @@ fn analyze_object(
         },
         object_offset(lookup, object_number),
     )
+}
+
+/// Analyze object 5 of `objects[0]` once in a fresh request-scoped analyzer
+/// and return its tallied per-page refusal-class counts.
+fn refusal_counts_for(objects: &[Vec<u8>]) -> crate::FormXObjectRefusalCounts {
+    let input = form_pdf(objects);
+    let access = inspect_document_access(&input).expect("open");
+    let lookup = backend_lookup(&access.backend);
+    let offset = object_offset(lookup, 5);
+    let mut analyzer = FormXObjectEffectAnalyzer::new();
+    analyzer.analyze(
+        &input,
+        lookup,
+        IndirectRef {
+            object_number: 5,
+            generation: 0,
+        },
+        offset,
+    );
+    analyzer.take_page_refusal_counts()
+}
+
+// --- Refusal-class taxonomy lock (T192) --------------------------------------
+
+#[test]
+fn an_unsafe_or_unresolved_gs_activation_classifies_extgstate_authority() {
+    // No own `/ExtGState` at all.
+    assert_only_class(
+        &refusal_counts_for(&[form("", b"/GS0 gs 0 0 m 1 1 l f")]),
+        FormXObjectRefusalClass::ExtGStateAuthority,
+    );
+    // An own `/ExtGState` entry with active overprint.
+    assert_only_class(
+        &refusal_counts_for(&[gsform("/GS0 << /OPM 1 >>", b"/GS0 gs 0 0 m 1 1 l f")]),
+        FormXObjectRefusalClass::ExtGStateAuthority,
+    );
 }
 
 // --- Admission and neutrality matrix ------------------------------------------
