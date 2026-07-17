@@ -4,6 +4,153 @@ Earlier entries are preserved in
 [JOURNAL-archive-2.md](JOURNAL-archive-2.md) and
 [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T197 - Proof-only page-retarget clone commit transaction, zero emitted-byte change
+
+### The proof-only transaction contract (binding)
+
+`form_clone_set_plan/commit.rs` adds the missing page-retarget half of the
+clone transaction while holding the combined transaction one step short of
+the writer. The private request-atomic `CloneCommitBatch` owns the moved
+(never copied) staged `FreshObjectBytes` vector, ONE corroborated
+`PlannedDirtyObject` per affected page, and compact per-set metadata — built
+in `content_sequence_pipeline` immediately after the staged export and
+deliberately DROPPED. No fresh object or page-retarget object reaches any
+production writer, so emitted product bytes stay byte-identical to the
+staged-export-only behaviour (locked by an explicit qualifying-document
+guard: `output.bytes == write_incremental_revision(input, [])` plus a
+no-fresh-header/no-page-header tail scan over the batch the pipeline built
+and dropped). Rationale unchanged from the staged export: an emitted clone
+batch without every retarget would put dark unreachable bodies into durable
+product state, so clones and retargets must land together in ONE appended
+revision. The activation slice (T198) performs the first hand-off through a
+crate-private dirty+fresh bridge and a separate public opt-in entry, with
+committed/refused counters; the CLI stays legacy.
+
+### Page-leaf retarget proof, before reservation
+
+Plan build now proves the page edit BEFORE the single request reservation,
+while the complete binding report is available. Per seeded page, all
+fail-closed into the new `CloneSetRefusal::PageRetargetRefused` class
+(`PageRetargetProofRefusal`): exact leaf multiplicity over ALL binding-report
+pages — selected and unselected alike — must be one (`LeafNotUnique`;
+rewriting a repeated leaf would retarget every occurrence); the retained
+uncompressed page identity/offset must re-corroborate through one
+`inspect_indirect_object_dictionary` header check (`PageIdentityMismatch`);
+the page dictionary must carry exactly one well-formed `/Parent` reference —
+decoded-name and duplicate sensitive (an undecodable key could hide a
+duplicate, so it refuses), value-kind checked, whole-value exact
+(`ParentNotSingleReference`); and `decide_indirect_object_edit(page,
+[parent])` must answer `InPlaceMutation` — the page-box ownership precedent
+(`OwnershipNotInPlace`, defensive). The witness `target_ownership` concerns
+the bound Form TARGET and is never reused as page ownership; the document
+consumer index is not rebuilt (multiplicity comes from the already-built
+binding report). A failed proof refuses every seed on that page WITHOUT
+walking: zero budget usage, no reservation contribution, honest
+candidate/refused counters. Proven pages retain the
+`IndirectObjectEditDecision` on the set for the retarget boundaries.
+
+### Single-value-through-`endobj` export prerequisite
+
+Before any staged clone can reach a writer, every UNCOMPRESSED member must
+prove its indirect object holds exactly one supported value followed only by
+PDF whitespace/comments and one delimiter-bounded `endobj` token
+(ISO 32000-1 §7.3.10). The check token-scans from the classified value end
+(dictionary/array balanced extent, scalar token end, reference span, or the
+end of the `endstream` keyword) — never a raw `endobj` byte search that
+could match inside strings/comments/stream data, and never a repair. A
+classified NumberLike body that is not a reference must additionally satisfy
+the PDF number grammar exactly (the same `is_pdf_number_lexeme` rule
+compressed-member admission applies), so a malformed digit-led token such as
+`12foo` is never copied as a supported value. A second value (`<< >> 5`,
+`12 34`, a value after `endstream`), a malformed scalar, a misspelled
+keyword (`endobjX`), trailing non-trivia, or a missing `endobj` refuses the
+ENTIRE staged batch with the new
+`CloneSetExportRefusal::UncompressedMemberNotSingleValue`. Compressed-member
+admission is unchanged (§7.5.7 members carry no `endobj`).
+
+### Retarget materialization and corroboration
+
+`build_clone_commit_batch(input, &plan, staged)` runs only after a
+successful staged export, in plan order, all fail-closed into one typed
+`CloneCommitRefusal` (distinct from the closure/reservation/export classes):
+the staged body count must cover the planned member total exactly
+(`StagedBatchMisaligned`); every planned set needs its retained page proof
+naming this page with `InPlaceMutation` (`PageOwnershipMissing`) and at
+least one site (`NoRetargetSites`); every root maps exactly once through its
+SET-LOCAL `source_to_fresh` (`RootMappingInvalid`) to a generation-zero
+identity (`FreshRootNotGenerationZero`) — no request-global map, so two
+page-specific sets for one shared source root keep distinct fresh
+identities. Sets group by EXACT page identity (ordinal, leaf reference,
+retained offset); distinct groups must anchor distinct page objects
+(`PageIdentityCollision`, defensive). Each page is re-resolved ONCE at its
+retained offset with a corroborated header/dictionary
+(`PageResolutionMismatch`); each site's key/value ranges must sit inside
+that dictionary in key-then-value order (`SiteOutsideDictionary`), the key
+bytes must still spell the retained raw name (`SiteKeyMismatch`), the value
+must parse exactly and wholly as the expected old target
+(`SiteValueMismatch`) which must be the set root (`SiteTargetNotRoot`), and
+duplicate/overlapping value ranges refuse (`SiteOverlap`). The page
+dictionary is copied once per unique proven page into ONE exactly sized
+buffer: after the overlap refusal the ascending disjoint value ranges
+partition the dictionary into verbatim segments and per-site replacements,
+materialized in one sequential pass with checked offset arithmetic
+(`SpliceArithmetic`) — no `Vec::splice` tail movement, no reallocation —
+replacing ONLY each value range with `N 0 R` of the mapped fresh root —
+every non-target byte verbatim. One `PlannedDirtyObject`
+per page carries one existing `MutationBoundary::DictionaryEntry`
+`Replace`/`ExistingValue` boundary per site with the retained page ownership
+proof and `DerivedFromObject { root }` provenance. Any failure discards the
+ENTIRE batch — moved staged bodies included; no prefix/middle/suffix
+salvage, no second reservation.
+
+### Seams the activation slice may consume
+
+`CloneCommitBatch { fresh_objects: Vec<FreshObjectBytes>, page_retargets:
+Vec<PlannedDirtyObject>, sets: Vec<CommittedCloneSet { page, root,
+fresh_root, retarget_sites }> }`, produced by
+`commit::build_clone_commit_batch(input, &FormCloneSetPlan, staged)` after
+`FormCloneSetPlan::stage_export`. The writer's independent
+`FreshReservationFloorMismatch` proof stays authoritative at hand-off time;
+no counter, serde shape, public API, CLI behaviour, writer bridge, or
+trailer behaviour changed in this slice.
+
+### Complexity and peak allocation
+
+Retarget cost is `O(reported pages + sets + sites + total rewritten page
+dictionary bytes)`: multiplicity is one `BTreeMap` pass over the
+binding-report pages; the page proof is one dictionary inspection per seeded
+page; commit re-inspects each unique page once and touches each site a
+constant number of times. The linear dictionary bound is real, not
+amortized: the replacement body is materialized in one exactly sized
+single-pass segment copy (final length settled with checked arithmetic
+BEFORE the allocation), so many sites on one page never degrade to
+`O(sites × dictionary_bytes)` tail movement and the initial copy never
+reallocates. Peak allocation over the existing whole-file input/output
+baseline: the ONE moved staged body batch (bounded by the existing 64 MiB
+materialized-body budget; moved, never copied at the commit seam) plus one
+replacement page-dictionary body per unique proven page (bounded by the
+distinct source dictionary extents plus a few replacement bytes per site).
+Failure is charge-once and request-terminal; no retry or partial
+materialization amplification.
+
+### Tests and sizes
+
+`tests/form_clone_commit.rs` (new, 627 lines) covers the `endobj` admission
+matrix (hand-built framing tails plus real-plan dictionary/scalar/
+post-`endstream` second values with counter assertions), the malformed
+digit-led scalar (`12foo`) whole-batch suppression regression, every
+reachable page-proof refusal path (duplicate leaf, unselected-page
+multiplicity, missing/duplicate-escaped/non-reference `/Parent`, retained
+decisions on proven pages), the full commit corroboration matrix over
+tampered real plans, several sites/sets on one page becoming one dirty page
+object (including length-changing replacements exercising the single-pass
+segment copy), page-specific fresh identities for one shared root,
+request-wide suppression, deterministic plan order, and the emitted-byte
+identity guard. `tests/form_clone_export.rs` changed mechanically only
+(`pub(super)` seams, one struct-literal field; 1,323 lines). Sizes:
+`form_clone_set_plan.rs` 1,116; `commit.rs` 457; `export.rs` 1,198;
+`content_sequence_pipeline.rs` 713 — all under the 1,400 gate.
+
 ## T196 - Clone-body staged export with full validation, zero emitted-byte change
 
 ### The staged/validate-only contract (binding)

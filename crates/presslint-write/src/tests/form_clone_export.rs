@@ -35,7 +35,7 @@ use crate::{
 use super::content_color_convert::{GRAY_TO_GRAY_LINK, one_link};
 use super::{last_trailer_size, reopen};
 
-const fn reference(object_number: u32, generation: u16) -> IndirectRef {
+pub(super) const fn reference(object_number: u32, generation: u16) -> IndirectRef {
     IndirectRef {
         object_number,
         generation,
@@ -44,22 +44,22 @@ const fn reference(object_number: u32, generation: u16) -> IndirectRef {
 
 /// The default form slot's exact body extent (dictionary through the end of
 /// the `endstream` keyword).
-const FORM_BODY: &str =
+pub(super) const FORM_BODY: &str =
     "<< /Type /XObject /Subtype /Form /BBox [0 0 1 1] /Length 0 >>\nstream\n\nendstream";
 
-type StageResult = Result<Vec<FreshObjectBytes>, CloneSetExportRefusal>;
+pub(super) type StageResult = Result<Vec<FreshObjectBytes>, CloneSetExportRefusal>;
 
 // ---------------------------------------------------------------------------
 // Classic-document fixtures (self-contained copies of the plan-test builders).
 // ---------------------------------------------------------------------------
 
-fn in_use(body: &str) -> Vec<u8> {
+pub(super) fn in_use(body: &str) -> Vec<u8> {
     body.as_bytes().to_vec()
 }
 
 /// Assemble a classic-xref document from in-use object bodies (object numbers
 /// start at 1), returning the buffer plus each object's byte offset.
-fn assemble_with_offsets(slots: &[Vec<u8>]) -> (Vec<u8>, Vec<usize>) {
+pub(super) fn assemble_with_offsets(slots: &[Vec<u8>]) -> (Vec<u8>, Vec<usize>) {
     let mut buf = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::with_capacity(slots.len());
     for (index, body) in slots.iter().enumerate() {
@@ -81,13 +81,13 @@ fn assemble_with_offsets(slots: &[Vec<u8>]) -> (Vec<u8>, Vec<usize>) {
     (buf, offsets)
 }
 
-fn assemble(slots: &[Vec<u8>]) -> Vec<u8> {
+pub(super) fn assemble(slots: &[Vec<u8>]) -> Vec<u8> {
     assemble_with_offsets(slots).0
 }
 
 /// The standard catalog + page-tree prefix: object 1 catalog, object 2 pages
 /// root, remaining slots supplied by the caller starting at object 3.
-fn document(kids: &str, count: usize, rest: &[Vec<u8>]) -> Vec<u8> {
+pub(super) fn document(kids: &str, count: usize, rest: &[Vec<u8>]) -> Vec<u8> {
     let mut slots = vec![
         in_use("<< /Type /Catalog /Pages 2 0 R >>"),
         in_use(&format!("<< /Type /Pages /Kids [{kids}] /Count {count} >>")),
@@ -96,20 +96,20 @@ fn document(kids: &str, count: usize, rest: &[Vec<u8>]) -> Vec<u8> {
     assemble(&slots)
 }
 
-fn page(xobject_entries: &str) -> Vec<u8> {
+pub(super) fn page(xobject_entries: &str) -> Vec<u8> {
     in_use(&format!(
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /XObject << {xobject_entries} >> >> >>"
     ))
 }
 
-fn form(extra: &str) -> Vec<u8> {
+pub(super) fn form(extra: &str) -> Vec<u8> {
     in_use(&format!(
         "<< /Type /XObject /Subtype /Form /BBox [0 0 1 1]{extra} /Length 0 >>\nstream\n\nendstream"
     ))
 }
 
 /// Two leaf pages (objects 3 and 4) sharing one Form (object 5).
-fn shared_form_document() -> Vec<u8> {
+pub(super) fn shared_form_document() -> Vec<u8> {
     document(
         "3 0 R 4 0 R",
         2,
@@ -117,7 +117,7 @@ fn shared_form_document() -> Vec<u8> {
     )
 }
 
-fn final_startxref(source: &[u8]) -> usize {
+pub(super) fn final_startxref(source: &[u8]) -> usize {
     presslint_pdf::inspect_pdf_source(source)
         .expect("source inspects")
         .startxref
@@ -125,7 +125,7 @@ fn final_startxref(source: &[u8]) -> usize {
         .byte_offset
 }
 
-const fn empty_consumers(byte_len: usize) -> ObjectConsumerIndexInspection {
+pub(super) const fn empty_consumers(byte_len: usize) -> ObjectConsumerIndexInspection {
     ObjectConsumerIndexInspection {
         byte_len,
         entries: Vec::new(),
@@ -145,7 +145,7 @@ const fn empty_consumers(byte_len: usize) -> ObjectConsumerIndexInspection {
 }
 
 /// Build the plan over real document access and stage the export.
-fn stage(source: &[u8]) -> (FormCloneSetPlan, StageResult) {
+pub(super) fn stage(source: &[u8]) -> (FormCloneSetPlan, StageResult) {
     let access = inspect_document_access(source).expect("document access inspects");
     let lookup = lookup_from_backend(&access.backend);
     let consumers = inspect_object_consumer_index(source, &access);
@@ -165,7 +165,7 @@ fn stage(source: &[u8]) -> (FormCloneSetPlan, StageResult) {
 
 /// Like [`stage`] with the synthetic complete-but-empty consumer index, so
 /// single-page fixtures qualify and dangling references stay admissible.
-fn stage_with_empty_consumers(source: &[u8]) -> (FormCloneSetPlan, StageResult) {
+pub(super) fn stage_with_empty_consumers(source: &[u8]) -> (FormCloneSetPlan, StageResult) {
     let access = inspect_document_access(source).expect("document access inspects");
     let lookup = lookup_from_backend(&access.backend);
     let consumers = empty_consumers(source.len());
@@ -183,7 +183,7 @@ fn stage_with_empty_consumers(source: &[u8]) -> (FormCloneSetPlan, StageResult) 
     (plan, outcome)
 }
 
-fn staged_fresh(outcome: StageResult) -> Vec<FreshObjectBytes> {
+pub(super) fn staged_fresh(outcome: StageResult) -> Vec<FreshObjectBytes> {
     match outcome {
         Ok(fresh_objects) => fresh_objects,
         Err(refusal) => {
@@ -192,7 +192,7 @@ fn staged_fresh(outcome: StageResult) -> Vec<FreshObjectBytes> {
     }
 }
 
-fn export_refusal(outcome: &StageResult) -> &CloneSetExportRefusal {
+pub(super) fn export_refusal(outcome: &StageResult) -> &CloneSetExportRefusal {
     match outcome {
         Err(refusal) => refusal,
         Ok(_) => panic!("expected an export refusal"),
@@ -200,7 +200,10 @@ fn export_refusal(outcome: &StageResult) -> &CloneSetExportRefusal {
 }
 
 /// Identity-matched per-page counts for every leaf, in document order.
-fn all_page_counts(plan: &FormCloneSetPlan, source: &[u8]) -> Vec<FormCloneSetPlanCounts> {
+pub(super) fn all_page_counts(
+    plan: &FormCloneSetPlan,
+    source: &[u8],
+) -> Vec<FormCloneSetPlanCounts> {
     let access = inspect_document_access(source).expect("document access inspects");
     access
         .page_leaves
@@ -211,7 +214,7 @@ fn all_page_counts(plan: &FormCloneSetPlan, source: &[u8]) -> Vec<FormCloneSetPl
         .collect()
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+pub(super) fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
@@ -232,7 +235,7 @@ const fn zero_budget() -> CloneSetBudgetUsage {
 
 /// One hand-built planned set with sequential fresh identities from
 /// `fresh_first`, aligned with `members`.
-fn hand_built_set(
+pub(super) fn hand_built_set(
     root: IndirectRef,
     root_object_byte_offset: usize,
     members: Vec<CloneSetMember>,
@@ -258,6 +261,7 @@ fn hand_built_set(
         root_object_byte_offset,
         retarget_sites: Vec::new(),
         budget: zero_budget(),
+        page_ownership: None,
         outcome: CloneSetOutcome::Planned {
             members,
             null_equivalents: Vec::new(),
@@ -266,7 +270,7 @@ fn hand_built_set(
     }
 }
 
-fn uncompressed_member(
+pub(super) fn uncompressed_member(
     object_number: u32,
     object_byte_offset: usize,
     outgoing: Vec<IndirectRef>,
@@ -1198,7 +1202,7 @@ fn one_failing_set_discards_the_whole_batch_and_suppresses_every_ready_set() {
 // ---------------------------------------------------------------------------
 
 /// Two pages sharing one form, each with its own content stream.
-fn convertible_clone_set_document(content: &str) -> Vec<u8> {
+pub(super) fn convertible_clone_set_document(content: &str) -> Vec<u8> {
     document(
         "3 0 R 4 0 R",
         2,

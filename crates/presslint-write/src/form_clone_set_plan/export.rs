@@ -21,7 +21,12 @@
 //! rewriting, re-scan equality against the translated census. The re-scan
 //! uses the range-bearing sibling of the plan's census scanner — one shared
 //! scanner core, so plan-scan and export-scan are token-identical by
-//! construction.
+//! construction. Every uncompressed member must additionally prove its
+//! indirect object holds exactly ONE supported value followed only by
+//! whitespace/comments and one delimiter-bounded `endobj` token (§7.3.10),
+//! token-scanned from the classified value end — never a raw `endobj` byte
+//! search; compressed-member admission is unchanged (§7.5.7 has no
+//! `endobj`).
 //!
 //! # Materialization
 //!
@@ -87,6 +92,7 @@ pub(crate) const MAX_FORM_CLONE_MATERIALIZED_BODY_BYTES: usize = 64 * 1024 * 102
 
 const LENGTH_KEY: &[u8] = b"/Length";
 const ENDSTREAM_KEYWORD_LEN: usize = b"endstream".len();
+const ENDOBJ_KEYWORD: &[u8] = b"endobj";
 
 /// One staged set's fold-ready totals, indexed back into the plan's set list.
 #[derive(Debug)]
@@ -198,6 +204,18 @@ pub(crate) enum CloneSetExportRefusal {
     /// bodies, or a body whose extent cannot be located).
     UnsupportedBodyShape {
         /// The member with the unsupported body.
+        #[cfg_attr(not(test), allow(dead_code))]
+        member: IndirectRef,
+    },
+    /// An uncompressed member's indirect object does not hold exactly one
+    /// supported value followed only by PDF whitespace/comments and one
+    /// delimiter-bounded `endobj` token (§7.3.10): a second value, trailing
+    /// non-trivia, a malformed digit-led scalar (`12foo`), a misspelled
+    /// keyword (`endobjX`), or a missing `endobj` all refuse. Token-scanned
+    /// from the classified value end — never a raw byte search, never a
+    /// repair.
+    UncompressedMemberNotSingleValue {
+        /// The member whose object framing failed the admission.
         #[cfg_attr(not(test), allow(dead_code))]
         member: IndirectRef,
     },
@@ -536,6 +554,7 @@ fn materialize_uncompressed(
 
     let shape =
         classify_uncompressed_body(input, lookup, member, object_byte_offset, fresh_by_source)?;
+    admit_uncompressed_single_value(input, shape.body_span.end, member)?;
     splice_and_verify(
         input,
         shape.body_span,
@@ -621,11 +640,21 @@ fn classify_uncompressed_body(
         }
         IndirectObjectBodyLeadingTokenKind::NumberLike => {
             // A reference-shaped scalar body is the whole `N G R` span (and
-            // may itself be rewritten); a plain number is one token.
-            let end = parse_indirect_reference(input, first_token).map_or_else(
-                |_| body_token_end(input, first_token, input.len()),
-                |reference| reference.reference_range.end,
-            );
+            // may itself be rewritten); a plain scalar must satisfy the PDF
+            // number grammar exactly — a malformed digit-led token such as
+            // `12foo` is not one supported value (the same lexeme check the
+            // compressed-member admission applies).
+            let end = if let Ok(reference) = parse_indirect_reference(input, first_token) {
+                reference.reference_range.end
+            } else {
+                let token_end = body_token_end(input, first_token, input.len());
+                if !is_pdf_number_lexeme(&input[first_token..token_end]) {
+                    return Err(CloneSetExportRefusal::UncompressedMemberNotSingleValue {
+                        member: member.source,
+                    });
+                }
+                token_end
+            };
             Ok(UncompressedBodyShape {
                 body_span: first_token..end,
                 dictionary_window_len: None,
@@ -1027,8 +1056,37 @@ fn body_token_end(buffer: &[u8], start: usize, end: usize) -> usize {
     cursor
 }
 
-/// True when `buffer[cursor..end]` holds only PDF whitespace and comments.
-fn is_trivia_only(buffer: &[u8], mut cursor: usize, end: usize) -> bool {
+/// Prove one uncompressed member's indirect object holds exactly one
+/// supported value: after the classified value (or `endstream`) only PDF
+/// whitespace/comments may follow until one exact delimiter-bounded `endobj`
+/// token (§7.3.10 — one value per indirect object). Anything else — a second
+/// value, `endobjX`, trailing non-trivia, or a missing `endobj` — refuses.
+fn admit_uncompressed_single_value(
+    input: &[u8],
+    value_end: usize,
+    member: &CloneSetMember,
+) -> Result<(), CloneSetExportRefusal> {
+    let refusal = || CloneSetExportRefusal::UncompressedMemberNotSingleValue {
+        member: member.source,
+    };
+    let keyword_start = skip_trivia(input, value_end, input.len());
+    let keyword_end = keyword_start
+        .checked_add(ENDOBJ_KEYWORD.len())
+        .filter(|end| *end <= input.len())
+        .ok_or_else(refusal)?;
+    if &input[keyword_start..keyword_end] != ENDOBJ_KEYWORD {
+        return Err(refusal());
+    }
+    match input.get(keyword_end) {
+        None => Ok(()),
+        Some(&byte) if is_pdf_whitespace(byte) || is_pdf_delimiter(byte) => Ok(()),
+        Some(_) => Err(refusal()),
+    }
+}
+
+/// First non-trivia offset at or after `cursor`, bounded to `end` (PDF
+/// whitespace and `%` comments through their EOL are trivia).
+fn skip_trivia(buffer: &[u8], mut cursor: usize, end: usize) -> usize {
     while cursor < end {
         let byte = buffer[cursor];
         if is_pdf_whitespace(byte) {
@@ -1038,10 +1096,15 @@ fn is_trivia_only(buffer: &[u8], mut cursor: usize, end: usize) -> bool {
                 cursor += 1;
             }
         } else {
-            return false;
+            break;
         }
     }
-    true
+    cursor
+}
+
+/// True when `buffer[cursor..end]` holds only PDF whitespace and comments.
+fn is_trivia_only(buffer: &[u8], cursor: usize, end: usize) -> bool {
+    skip_trivia(buffer, cursor, end) == end
 }
 
 /// Exclusive end of one literal-string token, bounded to this member span.

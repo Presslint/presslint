@@ -52,7 +52,9 @@ use crate::{
         LocatedContentStream, PageStreamsPlan, StreamMode, StreamOutcome, page_index_of,
         plan_page_streams,
     },
-    form_clone_set_plan::{FormCloneSetPlan, FormCloneSetPlanCounts},
+    form_clone_set_plan::{
+        FormCloneSetPlan, FormCloneSetPlanCounts, commit::build_clone_commit_batch,
+    },
     page_content_sequence::{OccurrenceInput, PageContentSequence, PhysicalObjectPlan},
     page_device_space_policy::{PageColorFacts, PageColorFactsIndex},
     stream_object_body::build_stream_object_body,
@@ -159,10 +161,19 @@ where
     // Staged/validate-only clone-body export: every planned set is
     // materialized and fully validated immediately after plan construction,
     // BEFORE the per-page counts are consumed, and the staged counters are
-    // committed atomically — but the validated batch is intentionally dropped
-    // here, never handed to the writer, so emitted product bytes stay
-    // byte-identical to the plan-only behaviour.
-    let _ = form_clone_set_plan.stage_export(input, lookup);
+    // committed atomically. A successful staged batch is then materialized
+    // into the full request-atomic clone commit transaction — the moved
+    // staged fresh bodies PLUS one corroborated planned dirty page object
+    // per affected page — and deliberately DROPPED: no fresh object or
+    // page-retarget object reaches any production writer, so emitted product
+    // bytes stay byte-identical to the plan-only behaviour.
+    if let Ok(staged) = form_clone_set_plan.stage_export(input, lookup) {
+        drop(build_clone_commit_batch(
+            input,
+            &form_clone_set_plan,
+            staged,
+        ));
+    }
     let ownership = ContentObjectOwnershipIndex::new(&document.pages, consumers);
     // The `ExtGState` report is inspected ONCE and reused for both the safety
     // preflight and the font-policy edit fact. An inspection failure poisons

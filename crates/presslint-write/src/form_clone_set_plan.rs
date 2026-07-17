@@ -21,6 +21,23 @@
 //! [`crate::ConvertedPage`] (plan counters plus staged-export counters) is
 //! published.
 //!
+//! # Page-leaf retarget proof (before reservation)
+//!
+//! A clone set is admissible only when its future page retarget is already
+//! proven safe: the leaf reference must be UNIQUE across ALL binding-report
+//! pages (selected and unselected alike — retargeting a repeated leaf would
+//! rebind every occurrence), the retained uncompressed page identity/offset
+//! must re-corroborate, the page dictionary must carry exactly one
+//! well-formed `/Parent` reference, and
+//! [`presslint_pdf::decide_indirect_object_edit`] over that sole parent must
+//! answer `InPlaceMutation` (the page-box ownership precedent). The witness
+//! `target_ownership` concerns the bound Form TARGET and is never reused as
+//! page ownership. A failed proof refuses the whole set BEFORE any closure
+//! walk or reservation. The transaction half — staged bodies plus one
+//! corroborated planned dirty page object per affected page, built
+//! request-atomically and deliberately dropped by production — lives in
+//! [`commit`].
+//!
 //! # Frontier policy
 //!
 //! Fail-closed with NO drop lane and NO null-out rewrite: exact known
@@ -57,11 +74,14 @@
 use std::collections::BTreeMap;
 
 use presslint_pdf::{
-    BindingContainerLocality, BindingResourcesSource, DictionaryEntryByteRange, IndirectRef,
-    ObjectConsumerIndexInspection, ObjectConsumerReferrer, ObjectLookup,
-    PageXObjectBindingUnprovenReason, PageXObjectBindingVerdict, PageXObjectBindingWitness,
-    PageXObjectBindingsInspection, PdfName, XObjectBindingSubtype,
-    inspect_document_page_xobject_bindings_with_lookup,
+    BindingContainerLocality, BindingResourcesSource, DictionaryEntryByteRange,
+    DictionaryValueKind, IndirectObjectDictionaryInspection, IndirectObjectEditDecision,
+    IndirectObjectEditDisposition, IndirectRef, ObjectConsumerIndexInspection,
+    ObjectConsumerReferrer, ObjectLookup, PageXObjectBindingUnprovenReason,
+    PageXObjectBindingVerdict, PageXObjectBindingWitness, PageXObjectBindingsInspection, PdfName,
+    XObjectBindingSubtype, decide_indirect_object_edit,
+    inspect_document_page_xobject_bindings_with_lookup, inspect_indirect_object_dictionary,
+    parse_indirect_reference,
 };
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +90,7 @@ use crate::writer::{FreshObjectBytes, WriteError};
 use self::export::{CloneSetExportRefusal, StagedExportBatch, build_staged_export};
 use self::walk::{CloneSetBudgetUsage, walk_reached_form_closure};
 
+pub(crate) mod commit;
 pub(crate) mod export;
 pub(crate) mod walk;
 
@@ -77,6 +98,15 @@ pub(crate) mod walk;
 /// (ISO 32000-1 Annex C, Table C.1). A reservation whose highest fresh
 /// identity exceeds this limit is refused before the plan is declared ready.
 const ANNEX_C_MAX_INDIRECT_OBJECT_NUMBER: u32 = 8_388_607;
+
+/// Honest budget usage for a set refused by the page proof: the closure walk
+/// never ran, so nothing was spent.
+const UNWALKED_BUDGET: CloneSetBudgetUsage = CloneSetBudgetUsage {
+    max_depth_reached: 0,
+    unique_members: 0,
+    reference_occurrences: 0,
+    decode_work_bytes: 0,
+};
 
 /// Per-page clone-set plan counts (public projection, additive counters).
 ///
@@ -175,11 +205,10 @@ pub(crate) struct CloneSetPageIdentity {
     pub(crate) object_byte_offset: usize,
 }
 
-/// One page `/XObject` entry the future retarget slice must rewrite to the
+/// One page `/XObject` entry the retarget materializer must rewrite to the
 /// root's fresh identity: the exact key/value byte ranges inside the
 /// leaf-direct `/XObject` subdictionary plus the expected old target.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct CloneSetRetargetSite {
     /// Raw entry name bytes without the leading slash (reporting spelling).
     pub(crate) name: PdfName,
@@ -418,6 +447,43 @@ pub(crate) enum CloneSetRefusal {
         #[cfg_attr(not(test), allow(dead_code))]
         reason: ReservationRefusal,
     },
+    /// The page-leaf retarget-edit proof refused BEFORE any closure walk or
+    /// reservation: the future retarget could not be proven safe, so the set
+    /// never consumes walk or reservation budget.
+    PageRetargetRefused {
+        /// Exact first proof refusal.
+        #[cfg_attr(not(test), allow(dead_code))]
+        refusal: PageRetargetProofRefusal,
+    },
+}
+
+/// Why one page's leaf retarget-edit proof refused. The proof runs once per
+/// seeded page while the COMPLETE binding report is available, before any
+/// closure walk and before the single request reservation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PageRetargetProofRefusal {
+    /// The leaf reference appears more than once across ALL binding-report
+    /// pages (selected and unselected alike); rewriting one leaf dictionary
+    /// would retarget every occurrence.
+    LeafNotUnique {
+        /// Exact page-leaf multiplicity observed in the binding report.
+        #[cfg_attr(not(test), allow(dead_code))]
+        occurrences: usize,
+    },
+    /// Re-inspection at the retained uncompressed offset did not corroborate
+    /// the page header identity or a readable page dictionary.
+    PageIdentityMismatch,
+    /// The page dictionary does not carry exactly one well-formed direct
+    /// `/Parent` indirect reference (decoded-name and duplicate sensitive,
+    /// whole-value exact).
+    ParentNotSingleReference,
+    /// The ownership decision did not admit in-place mutation (defensive:
+    /// one proven parent always does under the public decision contract).
+    OwnershipNotInPlace {
+        /// Disposition the decision answered instead.
+        #[cfg_attr(not(test), allow(dead_code))]
+        disposition: IndirectObjectEditDisposition,
+    },
 }
 
 /// Why the single request reservation refused.
@@ -490,6 +556,10 @@ pub(crate) struct FormCloneSet {
     /// refusals, so a budget refusal always reads as fully spent).
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) budget: CloneSetBudgetUsage,
+    /// Retained page-leaf ownership proof (`InPlaceMutation` over the sole
+    /// `/Parent`), carried into the retarget boundaries. `None` exactly when
+    /// the proof itself refused the set before walking.
+    pub(crate) page_ownership: Option<IndirectObjectEditDecision>,
     /// Planned members + reservation, or the exact first refusal.
     pub(crate) outcome: CloneSetOutcome,
 }
@@ -574,6 +644,14 @@ impl FormCloneSetPlan {
                 consumers,
             )
         });
+        // Page-leaf multiplicity over ALL binding-report pages (selected and
+        // unselected alike), built once while the complete report is
+        // available: the retarget proof must see every occurrence, and the
+        // document consumer index is never rebuilt for it.
+        let mut leaf_multiplicity: BTreeMap<IndirectRef, usize> = BTreeMap::new();
+        for page in &bindings.pages {
+            *leaf_multiplicity.entry(page.page_reference).or_insert(0) += 1;
+        }
         let mut page_identities = Vec::new();
         for page in &bindings.pages {
             // `select_indices` supplies sorted, deduplicated ordinals. The
@@ -588,7 +666,11 @@ impl FormCloneSetPlan {
                 object_byte_offset: page.page_object_byte_offset,
             };
             if let Some(frontier) = frontier.as_ref() {
-                plan.seed_page_sets(input, lookup, frontier, identity, page);
+                let occurrences = leaf_multiplicity
+                    .get(&page.page_reference)
+                    .copied()
+                    .unwrap_or(0);
+                plan.seed_page_sets(input, lookup, frontier, identity, page, occurrences);
             } else {
                 plan.count_page_without_walking(page);
             }
@@ -694,6 +776,19 @@ impl FormCloneSetPlan {
         }
     }
 
+    /// Total closure member count across every planned (non-refused) set:
+    /// the single request reservation size, which the commit batch must
+    /// cover exactly with staged fresh bodies.
+    pub(crate) fn planned_member_total(&self) -> usize {
+        self.sets
+            .iter()
+            .map(|set| match &set.outcome {
+                CloneSetOutcome::Planned { members, .. } => members.len(),
+                CloneSetOutcome::Refused { .. } => 0,
+            })
+            .sum()
+    }
+
     /// Test-only constructor: drive the staged export directly with
     /// hand-built sets (page-slot counter folding is exercised through real
     /// plans; this plan has no slots).
@@ -717,8 +812,10 @@ impl FormCloneSetPlan {
     }
 
     /// Group one page's qualifying witnesses into `(page, target)` seeds
-    /// (deterministic by target reference), walk each seed's closure, and
-    /// append the sets in plan order.
+    /// (deterministic by target reference), prove the page-leaf retarget
+    /// edit once, walk each seed's closure, and append the sets in plan
+    /// order. A failed page proof refuses every seed on the page WITHOUT
+    /// walking, so no refused set consumes walk or reservation budget.
     fn seed_page_sets(
         &mut self,
         input: &[u8],
@@ -726,6 +823,7 @@ impl FormCloneSetPlan {
         frontier: &StructuralFrontier,
         identity: CloneSetPageIdentity,
         page: &PageXObjectBindingsInspection,
+        leaf_occurrences: usize,
     ) {
         let mut seeds: BTreeMap<IndirectRef, (usize, Vec<CloneSetRetargetSite>)> = BTreeMap::new();
         for witness in &page.witnesses {
@@ -745,23 +843,43 @@ impl FormCloneSetPlan {
                 SeedClass::Disqualified => self.disqualified_witnesses += 1,
             }
         }
+        if seeds.is_empty() {
+            return;
+        }
 
+        // The retarget proof runs once per seeded page. The witness
+        // `target_ownership` concerns the bound Form target and is
+        // deliberately never consulted here.
+        let proof = prove_page_retarget_edit(input, identity, leaf_occurrences);
         for (root, (root_object_byte_offset, retarget_sites)) in seeds {
-            let walk = walk_reached_form_closure(input, lookup, frontier, root);
-            let outcome = match walk.result {
-                Ok(closure) => CloneSetOutcome::Planned {
-                    members: closure.members,
-                    null_equivalents: closure.null_equivalents,
-                    source_to_fresh: Vec::new(),
-                },
-                Err(refusal) => CloneSetOutcome::Refused { refusal },
+            let (budget, page_ownership, outcome) = match &proof {
+                Ok(decision) => {
+                    let walk = walk_reached_form_closure(input, lookup, frontier, root);
+                    let outcome = match walk.result {
+                        Ok(closure) => CloneSetOutcome::Planned {
+                            members: closure.members,
+                            null_equivalents: closure.null_equivalents,
+                            source_to_fresh: Vec::new(),
+                        },
+                        Err(refusal) => CloneSetOutcome::Refused { refusal },
+                    };
+                    (walk.budget, Some(decision.clone()), outcome)
+                }
+                Err(refusal) => (
+                    UNWALKED_BUDGET,
+                    None,
+                    CloneSetOutcome::Refused {
+                        refusal: CloneSetRefusal::PageRetargetRefused { refusal: *refusal },
+                    },
+                ),
             };
             self.sets.push(FormCloneSet {
                 page: identity,
                 root,
                 root_object_byte_offset,
                 retarget_sites,
-                budget: walk.budget,
+                budget,
+                page_ownership,
                 outcome,
             });
         }
@@ -788,14 +906,7 @@ impl FormCloneSetPlan {
     /// the Annex C limit check that runs before the plan is declared ready —
     /// refuses EVERY would-be-planned set with the typed reservation class.
     fn reserve_all_or_nothing(&mut self, input: &[u8]) {
-        let total: usize = self
-            .sets
-            .iter()
-            .map(|set| match &set.outcome {
-                CloneSetOutcome::Planned { members, .. } => members.len(),
-                CloneSetOutcome::Refused { .. } => 0,
-            })
-            .sum();
+        let total = self.planned_member_total();
         let refusal = match crate::reserve_fresh_object_references(input, total) {
             Err(error) => Some(ReservationRefusal::FloorProof {
                 error: Box::new(error),
@@ -907,6 +1018,70 @@ enum SeedClass {
     /// Counted, never walked: wrong subtype, non-leaf-direct path, or a
     /// non-qualifying verdict (including an incomplete consumer index).
     Disqualified,
+}
+
+/// Prove one page leaf admits the future retarget edit: unique leaf across
+/// the complete binding report, corroborated retained identity/offset,
+/// exactly one well-formed `/Parent` reference, and the page-box ownership
+/// precedent [`decide_indirect_object_edit`] answering `InPlaceMutation`.
+fn prove_page_retarget_edit(
+    input: &[u8],
+    identity: CloneSetPageIdentity,
+    leaf_occurrences: usize,
+) -> Result<IndirectObjectEditDecision, PageRetargetProofRefusal> {
+    if leaf_occurrences != 1 {
+        return Err(PageRetargetProofRefusal::LeafNotUnique {
+            occurrences: leaf_occurrences,
+        });
+    }
+    let Ok(dictionary) = inspect_indirect_object_dictionary(input, identity.object_byte_offset)
+    else {
+        return Err(PageRetargetProofRefusal::PageIdentityMismatch);
+    };
+    if dictionary.reference != identity.reference {
+        return Err(PageRetargetProofRefusal::PageIdentityMismatch);
+    }
+    let Some(parent) = single_parent_reference(input, &dictionary) else {
+        return Err(PageRetargetProofRefusal::ParentNotSingleReference);
+    };
+    let decision = decide_indirect_object_edit(identity.reference, [parent]);
+    if decision.disposition != IndirectObjectEditDisposition::InPlaceMutation {
+        return Err(PageRetargetProofRefusal::OwnershipNotInPlace {
+            disposition: decision.disposition,
+        });
+    }
+    Ok(decision)
+}
+
+/// Parse the page's single `/Parent` indirect reference, decoded-name and
+/// duplicate sensitive: an undecodable top-level key (which could hide a
+/// duplicate), a repeated decoded `Parent`, a non-reference value, or a
+/// value that does not parse exactly and wholly as `N G R` all fail closed.
+fn single_parent_reference(
+    input: &[u8],
+    dictionary: &IndirectObjectDictionaryInspection,
+) -> Option<IndirectRef> {
+    let mut parent = None;
+    for entry in &dictionary.entries {
+        let raw_key = input.get(entry.key_range.start..entry.key_range.end)?;
+        let decoded = raw_key
+            .strip_prefix(b"/")
+            .and_then(crate::page_xobject_policy::decode_pdf_name)?;
+        if decoded.as_ref() != b"Parent" {
+            continue;
+        }
+        if parent.is_some() || entry.value_kind != DictionaryValueKind::IndirectReferenceLike {
+            return None;
+        }
+        let parsed = parse_indirect_reference(input, entry.value_range.start).ok()?;
+        if parsed.reference_range.start != entry.value_range.start
+            || parsed.reference_range.end != entry.value_range.end
+        {
+            return None;
+        }
+        parent = Some(parsed.reference);
+    }
+    parent
 }
 
 /// Seed qualification: decoded `/Subtype /Form`, an explicitly leaf-direct

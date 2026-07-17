@@ -24,6 +24,7 @@ mod content_color_convert_resource_space;
 mod content_color_rewrite;
 mod content_object_ownership;
 mod extgstate_page_guard;
+mod form_clone_commit;
 mod form_clone_export;
 mod form_clone_set_plan;
 mod fresh_objects;
