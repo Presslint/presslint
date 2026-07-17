@@ -52,6 +52,7 @@ use crate::{
         LocatedContentStream, PageStreamsPlan, StreamMode, StreamOutcome, page_index_of,
         plan_page_streams,
     },
+    form_clone_set_plan::{FormCloneSetPlan, FormCloneSetPlanCounts},
     page_content_sequence::{OccurrenceInput, PageContentSequence, PhysicalObjectPlan},
     page_device_space_policy::{PageColorFacts, PageColorFactsIndex},
     stream_object_body::build_stream_object_body,
@@ -92,7 +93,10 @@ struct PreparedSequenceObject<'a> {
 /// join did not match); the exact identity-matched page `/Font` report (advisory
 /// — a `None` fact makes the caller's font policy unknown and never skips the
 /// page); and the exact identity-matched page `/ExtGState` report (the SAME
-/// report used by the safety preflight, never inspected twice); and the request
+/// report used by the safety preflight, never inspected twice); the page's
+/// identity-matched observe-only [`FormCloneSetPlanCounts`] from the ONE
+/// request-scoped clone-set plan (empty counts on a failed identity join,
+/// never a page skip); and the request
 /// `ObjectLookup` (Copy), so an `FnMut` callback can resolve exact demanded
 /// objects (for example root Form colour-effect analysis) through the
 /// already-open backend without reopening the document. Each `None` advisory
@@ -118,6 +122,7 @@ where
         Option<&PageXObjectResourcesInspection>,
         Option<&PageFontResourcesInspection>,
         Option<&PageExtGStateResourcesInspection>,
+        FormCloneSetPlanCounts,
         ObjectLookup<'_>,
     ) -> Option<PageSequenceEdit<T>>,
 {
@@ -137,10 +142,21 @@ where
         }),
     })?;
     let selected = select_indices(pages, document.pages.len())?;
-    let ownership = ContentObjectOwnershipIndex::new(
-        &document.pages,
-        inspect_object_consumer_index(input, &access),
+    // The consumer index is inspected ONCE: it is first BORROWED by the
+    // request-scoped Form clone-set plan (binding witnesses + closure walk +
+    // single reservation, observe-only), then MOVED into the ownership
+    // adapter. No second index is built.
+    let consumers = inspect_object_consumer_index(input, &access);
+    let form_clone_set_plan = FormCloneSetPlan::build(
+        input,
+        lookup,
+        access.root_reference,
+        access.catalog_pages.pages_reference,
+        access.page_tree_root.object_byte_offset,
+        &selected,
+        &consumers,
     );
+    let ownership = ContentObjectOwnershipIndex::new(&document.pages, consumers);
     // The `ExtGState` report is inspected ONCE and reused for both the safety
     // preflight and the font-policy edit fact. An inspection failure poisons
     // every selected page fail-closed (unresolved/unclassified), exactly as the
@@ -328,6 +344,13 @@ where
             page.leaf.object_byte_offset,
             page.ordinal,
         );
+        // Observe-only clone-set plan counts, joined by the SAME exact page
+        // identity triple as every other advisory report.
+        let form_clone_counts = form_clone_set_plan.page_counts(
+            page.leaf.reference,
+            page.leaf.object_byte_offset,
+            page.ordinal,
+        );
         let Some(page_edit) = edit(
             page_index,
             &sequence,
@@ -335,6 +358,7 @@ where
             xobject_page,
             font_page,
             extgstate_page,
+            form_clone_counts,
             lookup,
         ) else {
             skipped.push(whole_page_skip(

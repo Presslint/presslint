@@ -68,6 +68,7 @@ use crate::{
     },
     content_sequence_pipeline::{PageSequenceEdit, edit_page_content_incremental_sequence},
     extgstate_page_guard::{extgstate_page_skip_reason, transparency_group_page_skip_reason},
+    form_clone_set_plan::FormCloneSetPlanCounts,
     form_xobject_effect::{FormXObjectEffectAnalyzer, FormXObjectRefusalCounts},
     link_routing::{
         DeviceLinkInput, LinkConversionCounts, LinkRouting, RoutedLink, build_link_routing,
@@ -186,6 +187,12 @@ pub struct ConvertedPage {
     /// influences admission).
     #[serde(default, skip_serializing_if = "FormXObjectRefusalCounts::is_empty")]
     pub form_xobject_refusal_counts: FormXObjectRefusalCounts,
+    /// Per-page Form clone-set PLAN counts (candidate/planned/refused sets
+    /// plus planned-object and null-equivalent totals). Observe-only
+    /// telemetry from the request-scoped clone-set plan: it never influences
+    /// admission, conversion, or emitted bytes.
+    #[serde(default, skip_serializing_if = "FormCloneSetPlanCounts::is_empty")]
+    pub form_clone_set_plan_counts: FormCloneSetPlanCounts,
     /// Per-link conversion counts, one entry per supplied link in request order.
     pub links: Vec<LinkConversionCounts>,
 }
@@ -548,7 +555,7 @@ pub fn convert_content_colors_incremental(
             transparency_group_page_skip_reason(group_page)
                 .or_else(|| extgstate_page_skip_reason(extgstate_page, sequence))
         },
-        |page_index, sequence, facts, xobjects, fonts, extgstates, lookup| {
+        |page_index, sequence, facts, xobjects, fonts, extgstates, form_clone_counts, lookup| {
             convert_sequence(
                 page_index,
                 sequence,
@@ -556,6 +563,7 @@ pub fn convert_content_colors_incremental(
                 xobjects,
                 fonts,
                 extgstates,
+                form_clone_counts,
                 &routing,
                 request.black_preservation,
                 target,
@@ -620,6 +628,7 @@ fn convert_sequence(
     xobject_report: Option<&PageXObjectResourcesInspection>,
     font_report: Option<&PageFontResourcesInspection>,
     extgstate_report: Option<&PageExtGStateResourcesInspection>,
+    form_clone_set_plan_counts: FormCloneSetPlanCounts,
     routing: &LinkRouting,
     black_preservation: BlackPreservationPolicy,
     target: Option<&Selector>,
@@ -837,6 +846,7 @@ fn convert_sequence(
             resource_alias_candidates_refused: alias_tally.refused,
             operator_skips: total.skips,
             form_xobject_refusal_counts,
+            form_clone_set_plan_counts,
             links: link_counts(routing, &total.link_converted),
         },
     })

@@ -1,5 +1,19 @@
 # presslint-cli Journal
 
+## T195: convert report clone-set plan counts (test surface only)
+
+- No CLI production change. The public `ConvertedPage` struct literals in the
+  report tests add the new additive `form_clone_set_plan_counts` field
+  (`FormCloneSetPlanCounts::default()`), locking the public construction
+  shape.
+- New serde locks: the field is omitted from JSON when every counter is zero
+  (existing zero-count JSON shapes stay byte-identical), nonzero counters
+  serialize with zero inner counters omitted, older `ConvertedPage` JSON
+  without the field deserializes to the empty default, and partial counts
+  JSON defaults missing counters to zero.
+- Human/JSON rendering, command syntax, warnings, and exit policy are
+  unchanged: the counts ride the wrapped library report as-is.
+
 ## T179: convert report alias-candidate outcomes
 
 - Human conversion totals add `alias candidates converted` and

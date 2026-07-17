@@ -59,6 +59,13 @@
 //! prerequisite only: it does not build a Form clone, choose a consumer edge,
 //! or authorize paint mutation, and `fresh_objects=[]` is byte-for-byte
 //! identical to [`write_incremental_revision`].
+//!
+//! On top of that reservation currency the converter carries one private,
+//! request-scoped Form clone-set PLAN: for qualifying page-local Form binding
+//! witnesses it computes a bounded reached-Form closure and reserves fresh
+//! identities, publishing only the additive observe-only
+//! [`FormCloneSetPlanCounts`] per converted page. The plan writes no bytes,
+//! clones no object, retargets no page, and admits nothing to conversion.
 
 #![forbid(unsafe_code)]
 
@@ -71,6 +78,7 @@ pub(crate) mod content_object_ownership;
 mod content_sequence_pipeline;
 mod content_stream_plan;
 mod extgstate_page_guard;
+mod form_clone_set_plan;
 mod form_xobject_effect;
 mod fresh_objects;
 mod link_routing;
@@ -100,6 +108,7 @@ pub use content_color_rewrite::{
     rewrite_rgb_black_to_cmyk_incremental,
 };
 pub use content_edit_pipeline::PageSelection;
+pub use form_clone_set_plan::FormCloneSetPlanCounts;
 pub use form_xobject_effect::{FormXObjectRefusalClass, FormXObjectRefusalCounts};
 pub use link_routing::{DeviceLinkInput, LinkConversionCounts};
 pub use page_boxes::{

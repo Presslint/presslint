@@ -5,7 +5,7 @@ use presslint::{
 use presslint_types::PageIndex;
 use presslint_write::{
     ConvertContentColorsOutput, ConvertPageSkip, ConvertPageSkipReason, ConvertedPage,
-    FormXObjectRefusalCounts, LinkConversionCounts, OperatorSkipCounts,
+    FormCloneSetPlanCounts, FormXObjectRefusalCounts, LinkConversionCounts, OperatorSkipCounts,
 };
 use serde_json::Value;
 
@@ -33,6 +33,7 @@ fn convert_report_warns_on_zero_conversion_and_skips() {
                 ..OperatorSkipCounts::default()
             },
             form_xobject_refusal_counts: FormXObjectRefusalCounts::default(),
+            form_clone_set_plan_counts: FormCloneSetPlanCounts::default(),
             links: Vec::<LinkConversionCounts>::new(),
         }],
         skipped: vec![ConvertPageSkip {
@@ -78,6 +79,7 @@ fn human_convert_report_surfaces_page_coverage_counts() {
                 ..OperatorSkipCounts::default()
             },
             form_xobject_refusal_counts: FormXObjectRefusalCounts::default(),
+            form_clone_set_plan_counts: FormCloneSetPlanCounts::default(),
             links: Vec::<LinkConversionCounts>::new(),
         }],
         skipped: Vec::new(),
@@ -272,6 +274,73 @@ fn json_convert_report_serializes_nonzero_form_xobject_refusal_counts() {
 }
 
 #[test]
+fn json_convert_report_omits_form_clone_set_plan_counts_when_empty() {
+    let report = RunReport::convert(ConvertContentColorsOutput {
+        bytes: Vec::new(),
+        converted: vec![converted_page_with_counts(0, 0, 0)],
+        skipped: Vec::new(),
+    });
+
+    let rendered: Value = serde_json::from_str(&report.to_json_string().unwrap()).unwrap();
+    let converted = &rendered["result"]["library_output"]["converted"][0];
+
+    assert!(converted.get("form_clone_set_plan_counts").is_none());
+}
+
+#[test]
+fn json_convert_report_serializes_nonzero_form_clone_set_plan_counts() {
+    let mut page = converted_page_with_counts(0, 0, 0);
+    page.form_clone_set_plan_counts.candidate_sets = 2;
+    page.form_clone_set_plan_counts.planned_sets = 1;
+    page.form_clone_set_plan_counts.refused_sets = 1;
+    page.form_clone_set_plan_counts.planned_objects = 5;
+    let report = RunReport::convert(ConvertContentColorsOutput {
+        bytes: Vec::new(),
+        converted: vec![page],
+        skipped: Vec::new(),
+    });
+
+    let rendered: Value = serde_json::from_str(&report.to_json_string().unwrap()).unwrap();
+    let counts =
+        &rendered["result"]["library_output"]["converted"][0]["form_clone_set_plan_counts"];
+
+    assert_eq!(counts["candidate_sets"], 2);
+    assert_eq!(counts["planned_sets"], 1);
+    assert_eq!(counts["refused_sets"], 1);
+    assert_eq!(counts["planned_objects"], 5);
+    // Zero inner counters are omitted, mirroring the refusal-counts shape.
+    assert!(counts.get("null_equivalents").is_none());
+}
+
+#[test]
+fn older_converted_page_json_defaults_form_clone_set_plan_counts_to_empty() {
+    let page = converted_page_with_counts(0, 0, 0);
+    let value = serde_json::to_value(page).unwrap();
+    assert!(value.get("form_clone_set_plan_counts").is_none());
+
+    let restored: ConvertedPage = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        restored.form_clone_set_plan_counts,
+        FormCloneSetPlanCounts::default()
+    );
+    assert!(restored.form_clone_set_plan_counts.is_empty());
+}
+
+#[test]
+fn partial_form_clone_set_plan_counts_json_defaults_missing_counters_to_zero() {
+    let restored: FormCloneSetPlanCounts =
+        serde_json::from_str(r#"{"candidate_sets":3,"refused_sets":3}"#).unwrap();
+    assert_eq!(
+        restored,
+        FormCloneSetPlanCounts {
+            candidate_sets: 3,
+            refused_sets: 3,
+            ..FormCloneSetPlanCounts::default()
+        }
+    );
+}
+
+#[test]
 fn older_converted_page_json_defaults_form_xobject_refusal_counts_to_empty() {
     let page = converted_page_with_counts(0, 0, 0);
     let value = serde_json::to_value(page).unwrap();
@@ -347,6 +416,7 @@ fn converted_page_with_counts(
             ..OperatorSkipCounts::default()
         },
         form_xobject_refusal_counts: FormXObjectRefusalCounts::default(),
+        form_clone_set_plan_counts: FormCloneSetPlanCounts::default(),
         links: Vec::<LinkConversionCounts>::new(),
     }
 }
