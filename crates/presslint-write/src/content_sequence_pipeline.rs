@@ -147,7 +147,7 @@ where
     // single reservation, observe-only), then MOVED into the ownership
     // adapter. No second index is built.
     let consumers = inspect_object_consumer_index(input, &access);
-    let form_clone_set_plan = FormCloneSetPlan::build(
+    let mut form_clone_set_plan = FormCloneSetPlan::build(
         input,
         lookup,
         access.root_reference,
@@ -156,6 +156,13 @@ where
         &selected,
         &consumers,
     );
+    // Staged/validate-only clone-body export: every planned set is
+    // materialized and fully validated immediately after plan construction,
+    // BEFORE the per-page counts are consumed, and the staged counters are
+    // committed atomically — but the validated batch is intentionally dropped
+    // here, never handed to the writer, so emitted product bytes stay
+    // byte-identical to the plan-only behaviour.
+    let _ = form_clone_set_plan.stage_export(input, lookup);
     let ownership = ContentObjectOwnershipIndex::new(&document.pages, consumers);
     // The `ExtGState` report is inspected ONCE and reused for both the safety
     // preflight and the font-policy edit fact. An inspection failure poisons

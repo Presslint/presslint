@@ -27,6 +27,7 @@ mod image_xobject;
 mod indirect_reference;
 mod integer_object;
 mod object_body;
+mod object_body_reference_ranges;
 mod object_body_references;
 mod object_consumer_index;
 mod object_dictionary;

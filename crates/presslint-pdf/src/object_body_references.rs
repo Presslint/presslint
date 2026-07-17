@@ -39,6 +39,47 @@ pub struct ObjectBodyReferencesInspection {
     pub truncation: Option<ObjectBodyReferencesTruncation>,
 }
 
+/// Aligned per-token byte ranges of one extracted `N G R` indirect reference.
+///
+/// Each range is absolute within the scanned buffer and covers exactly one
+/// token: the object-number digits, the generation digits, and the bare `R`
+/// keyword. Whitespace and interior comments between the tokens are NOT part
+/// of any range, so a caller that rewrites a reference by splicing only the
+/// two numeric token ranges preserves the `R` keyword and every trivia byte
+/// exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectBodyReferenceTokenRanges {
+    /// Byte range of the object-number digit token.
+    pub object_number_range: Range<usize>,
+    /// Byte range of the generation digit token.
+    pub generation_range: Range<usize>,
+    /// Byte range of the `R` keyword token.
+    pub r_keyword_range: Range<usize>,
+}
+
+/// Indirect references extracted from one object body, with aligned per-token
+/// byte ranges.
+///
+/// This is the range-bearing sibling of [`ObjectBodyReferencesInspection`]:
+/// both are driven by the same scanner core, so for the same buffer and span
+/// they report token-identical `references`, `skipped_references`, and
+/// `truncation` by construction (strings stay opaque, comments count as
+/// whitespace, and the per-body cap is shared). `token_ranges` is aligned
+/// index-for-index with `references`; ranges address the scanned buffer, so a
+/// compressed-member scan yields decoded-buffer ranges, never source offsets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectBodyReferenceRangesInspection {
+    /// Extracted `N G R` indirect references in source order, without dedup.
+    pub references: Vec<IndirectRef>,
+    /// Per-token byte ranges aligned index-for-index with `references`.
+    pub token_ranges: Vec<ObjectBodyReferenceTokenRanges>,
+    /// Reference-shaped constructs skipped for out-of-range numbers, in source
+    /// order.
+    pub skipped_references: Vec<SkippedObjectBodyReference>,
+    /// Set when the per-body reference cap stopped the scan early.
+    pub truncation: Option<ObjectBodyReferencesTruncation>,
+}
+
 /// Structured reason a reference-shaped construct was skipped.
 ///
 /// These mirror the overflow checks of [`crate::parse_indirect_reference`]: a
@@ -141,6 +182,67 @@ pub fn inspect_object_body_references(
     input: &[u8],
     object_byte_offset: usize,
 ) -> Result<ObjectBodyReferencesInspection, ObjectBodyReferencesInspectionError> {
+    match classify_object_body_scan(input, object_byte_offset)? {
+        ObjectBodyScanTarget::Span(span) => Ok(scan_indirect_references_in_span(input, span)),
+        ObjectBodyScanTarget::NumberLikeScalar {
+            first_token_byte_offset,
+        } => Ok(scalar_body_reference_check(input, first_token_byte_offset)),
+        ObjectBodyScanTarget::Opaque => Ok(empty_inspection()),
+    }
+}
+
+/// Scan an indirect object's body for `N G R` indirect references with
+/// aligned per-token byte ranges.
+///
+/// This is the range-bearing sibling of [`inspect_object_body_references`]:
+/// both share one body-shape classifier (header inspection, leading-token
+/// classification, dictionary/array extent bounding, scalar reference-shape
+/// check) and one span scanner core, so for the same input and offset they
+/// report token-identical references, skips, and truncation by construction.
+/// Ranges are absolute within `input`. A stream object's ranges therefore
+/// always sit inside its dictionary extent — stream data is never scanned.
+///
+/// # Errors
+///
+/// Returns [`ObjectBodyReferencesInspectionError`] for exactly the failures of
+/// [`inspect_object_body_references`], produced by the shared classifier.
+pub fn inspect_object_body_reference_ranges(
+    input: &[u8],
+    object_byte_offset: usize,
+) -> Result<ObjectBodyReferenceRangesInspection, ObjectBodyReferencesInspectionError> {
+    match classify_object_body_scan(input, object_byte_offset)? {
+        ObjectBodyScanTarget::Span(span) => Ok(scan_indirect_reference_ranges_in_span(input, span)),
+        ObjectBodyScanTarget::NumberLikeScalar {
+            first_token_byte_offset,
+        } => Ok(scalar_body_reference_ranges_check(
+            input,
+            first_token_byte_offset,
+        )),
+        ObjectBodyScanTarget::Opaque => Ok(empty_ranges_inspection()),
+    }
+}
+
+/// How one classified object body is scanned for references.
+enum ObjectBodyScanTarget {
+    /// A dictionary- or array-led body bounded to its balanced extent.
+    Span(Range<usize>),
+    /// A number-like scalar body needing the three-token reference check.
+    NumberLikeScalar {
+        /// Byte offset of the body's first significant token.
+        first_token_byte_offset: usize,
+    },
+    /// A string, name, boolean, or null body: never yields references.
+    Opaque,
+}
+
+/// Shared body-shape classifier behind both inspect siblings: validates the
+/// `N G obj` header, classifies the leading body token, and bounds
+/// dictionary/array bodies to their balanced extents so stream data after a
+/// dictionary close is never scanned.
+fn classify_object_body_scan(
+    input: &[u8],
+    object_byte_offset: usize,
+) -> Result<ObjectBodyScanTarget, ObjectBodyReferencesInspectionError> {
     let header = inspect_indirect_object_header(input, object_byte_offset).map_err(|error| {
         references_error(
             input,
@@ -177,8 +279,7 @@ pub fn inspect_object_body_references(
                         error.error_byte_offset,
                     )
                 })?;
-            Ok(scan_indirect_references_in_span(
-                input,
+            Ok(ObjectBodyScanTarget::Span(
                 extent.open_byte_offset..extent.after_close_byte_offset,
             ))
         }
@@ -195,20 +296,20 @@ pub fn inspect_object_body_references(
                     )
                 },
             )?;
-            Ok(scan_indirect_references_in_span(
-                input,
+            Ok(ObjectBodyScanTarget::Span(
                 extent.open_byte_offset..extent.after_close_byte_offset,
             ))
         }
-        IndirectObjectBodyLeadingTokenKind::NumberLike => Ok(scalar_body_reference_check(
-            input,
-            body_token.first_token_byte_offset,
-        )),
+        IndirectObjectBodyLeadingTokenKind::NumberLike => {
+            Ok(ObjectBodyScanTarget::NumberLikeScalar {
+                first_token_byte_offset: body_token.first_token_byte_offset,
+            })
+        }
         IndirectObjectBodyLeadingTokenKind::HexStringOpen
         | IndirectObjectBodyLeadingTokenKind::Name
         | IndirectObjectBodyLeadingTokenKind::LiteralString
         | IndirectObjectBodyLeadingTokenKind::Boolean
-        | IndirectObjectBodyLeadingTokenKind::Null => Ok(empty_inspection()),
+        | IndirectObjectBodyLeadingTokenKind::Null => Ok(ObjectBodyScanTarget::Opaque),
     }
 }
 
@@ -275,19 +376,129 @@ pub fn scan_indirect_references_in_span(
     buffer: &[u8],
     span: Range<usize>,
 ) -> ObjectBodyReferencesInspection {
+    let mut sink = CensusSink::default();
+    scan_reference_tokens_in_span(buffer, span, &mut sink);
+    ObjectBodyReferencesInspection {
+        references: sink.references,
+        skipped_references: sink.skipped_references,
+        truncation: sink.truncation,
+    }
+}
+
+/// Scan a byte span for `N G R` indirect references, reporting aligned
+/// per-token byte ranges.
+///
+/// This is the range-bearing sibling of [`scan_indirect_references_in_span`]:
+/// both run the same scanner core with a different collection sink, so for
+/// the same buffer and span they report token-identical references, skips,
+/// and truncation by construction (strings opaque, comments whitespace, one
+/// shared [`MAX_OBJECT_BODY_REFERENCES`] cap). Ranges are absolute within
+/// `buffer`, so a compressed-member scan yields decoded-buffer ranges. The
+/// report retains no scanned bytes.
+#[must_use]
+pub fn scan_indirect_reference_ranges_in_span(
+    buffer: &[u8],
+    span: Range<usize>,
+) -> ObjectBodyReferenceRangesInspection {
+    let mut sink = RangesSink::default();
+    scan_reference_tokens_in_span(buffer, span, &mut sink);
+    ObjectBodyReferenceRangesInspection {
+        references: sink.references,
+        token_ranges: sink.token_ranges,
+        skipped_references: sink.skipped_references,
+        truncation: sink.truncation,
+    }
+}
+
+/// Collection seam of the shared span scanner core: the census sink drops the
+/// per-token ranges while the ranges sink retains them, so both public span
+/// scanners are token-identical by construction.
+trait ReferenceScanSink {
+    fn reference_count(&self) -> usize;
+    fn record_reference(&mut self, reference: IndirectRef, tokens: ObjectBodyReferenceTokenRanges);
+    fn record_skipped(&mut self, skipped: SkippedObjectBodyReference);
+    fn record_truncation(&mut self, truncation: ObjectBodyReferencesTruncation);
+}
+
+#[derive(Default)]
+struct CensusSink {
+    references: Vec<IndirectRef>,
+    skipped_references: Vec<SkippedObjectBodyReference>,
+    truncation: Option<ObjectBodyReferencesTruncation>,
+}
+
+impl ReferenceScanSink for CensusSink {
+    fn reference_count(&self) -> usize {
+        self.references.len()
+    }
+
+    fn record_reference(&mut self, reference: IndirectRef, _: ObjectBodyReferenceTokenRanges) {
+        self.references.push(reference);
+    }
+
+    fn record_skipped(&mut self, skipped: SkippedObjectBodyReference) {
+        self.skipped_references.push(skipped);
+    }
+
+    fn record_truncation(&mut self, truncation: ObjectBodyReferencesTruncation) {
+        self.truncation = Some(truncation);
+    }
+}
+
+#[derive(Default)]
+struct RangesSink {
+    references: Vec<IndirectRef>,
+    token_ranges: Vec<ObjectBodyReferenceTokenRanges>,
+    skipped_references: Vec<SkippedObjectBodyReference>,
+    truncation: Option<ObjectBodyReferencesTruncation>,
+}
+
+impl ReferenceScanSink for RangesSink {
+    fn reference_count(&self) -> usize {
+        self.references.len()
+    }
+
+    fn record_reference(&mut self, reference: IndirectRef, tokens: ObjectBodyReferenceTokenRanges) {
+        self.references.push(reference);
+        self.token_ranges.push(tokens);
+    }
+
+    fn record_skipped(&mut self, skipped: SkippedObjectBodyReference) {
+        self.skipped_references.push(skipped);
+    }
+
+    fn record_truncation(&mut self, truncation: ObjectBodyReferencesTruncation) {
+        self.truncation = Some(truncation);
+    }
+}
+
+/// One remembered unsigned digit-only integer token: its parsed value (`None`
+/// when the digit run overflows `u64`) and its byte range in the buffer.
+#[derive(Clone)]
+struct IntegerToken {
+    value: Option<u64>,
+    range: Range<usize>,
+}
+
+/// The single scanner core behind both span scanners (see
+/// [`scan_indirect_references_in_span`] for the exact token rules). It keeps a
+/// sliding window of the last two integer tokens with their byte ranges and
+/// drives the caller's sink; the token decisions are identical for every sink
+/// by construction.
+fn scan_reference_tokens_in_span<S: ReferenceScanSink>(
+    buffer: &[u8],
+    span: Range<usize>,
+    sink: &mut S,
+) {
     let end = span.end.min(buffer.len());
     // Truncating the buffer at the span end keeps every skipper span-bounded:
     // an unbounded skipper over `buffer` could otherwise walk past `span.end`
     // into sibling object-stream members or stream bytes before clamping.
     let bounded = &buffer[..end];
     let mut cursor = span.start.min(end);
-    let mut references = Vec::new();
-    let mut skipped_references = Vec::new();
-    let mut truncation = None;
-    // Sliding window of the last two unsigned digit-only integer tokens; the
-    // inner `Option` is `None` when the digit run overflows `u64`.
-    let mut previous_integer: Option<Option<u64>> = None;
-    let mut latest_integer: Option<Option<u64>> = None;
+    // Sliding window of the last two unsigned digit-only integer tokens.
+    let mut previous_integer: Option<IntegerToken> = None;
+    let mut latest_integer: Option<IntegerToken> = None;
 
     'scan: while cursor < end {
         match bounded[cursor] {
@@ -336,7 +547,10 @@ pub fn scan_indirect_references_in_span(
                 let digits = count_leading_digits(&bounded[cursor..token_end]);
                 if cursor + digits == token_end {
                     previous_integer = latest_integer.take();
-                    latest_integer = Some(parse_u64_decimal(&bounded[cursor..token_end]));
+                    latest_integer = Some(IntegerToken {
+                        value: parse_u64_decimal(&bounded[cursor..token_end]),
+                        range: cursor..token_end,
+                    });
                 } else {
                     previous_integer = None;
                     latest_integer = None;
@@ -346,19 +560,29 @@ pub fn scan_indirect_references_in_span(
             _ => {
                 let token_end = skip_scalar_token(bounded, cursor, end);
                 if &bounded[cursor..token_end] == b"R" {
-                    if let (Some(object), Some(generation)) = (previous_integer, latest_integer) {
-                        match reference_from_window(object, generation) {
+                    if let (Some(object), Some(generation)) =
+                        (previous_integer.as_ref(), latest_integer.as_ref())
+                    {
+                        match reference_from_window(object.value, generation.value) {
                             Ok(reference) => {
-                                if references.len() == MAX_OBJECT_BODY_REFERENCES {
-                                    truncation =
-                                        Some(ObjectBodyReferencesTruncation::MaxReferences {
+                                if sink.reference_count() == MAX_OBJECT_BODY_REFERENCES {
+                                    sink.record_truncation(
+                                        ObjectBodyReferencesTruncation::MaxReferences {
                                             max_references: MAX_OBJECT_BODY_REFERENCES,
-                                        });
+                                        },
+                                    );
                                     break 'scan;
                                 }
-                                references.push(reference);
+                                sink.record_reference(
+                                    reference,
+                                    ObjectBodyReferenceTokenRanges {
+                                        object_number_range: object.range.clone(),
+                                        generation_range: generation.range.clone(),
+                                        r_keyword_range: cursor..token_end,
+                                    },
+                                );
                             }
-                            Err(skipped) => skipped_references.push(skipped),
+                            Err(skipped) => sink.record_skipped(skipped),
                         }
                     }
                 }
@@ -367,12 +591,6 @@ pub fn scan_indirect_references_in_span(
                 cursor = token_end;
             }
         }
-    }
-
-    ObjectBodyReferencesInspection {
-        references,
-        skipped_references,
-        truncation,
     }
 }
 
@@ -394,23 +612,54 @@ fn scalar_body_reference_check(
             skipped_references: Vec::new(),
             truncation: None,
         },
-        Err(error) => {
-            let skipped_references = match error.reason {
-                IndirectReferenceInspectionRejection::ObjectNumberOutOfRange => {
-                    vec![SkippedObjectBodyReference::ObjectNumberOutOfRange]
-                }
-                IndirectReferenceInspectionRejection::GenerationOutOfRange => {
-                    vec![SkippedObjectBodyReference::GenerationOutOfRange]
-                }
-                IndirectReferenceInspectionRejection::OffsetOutOfBounds
-                | IndirectReferenceInspectionRejection::MalformedReference => Vec::new(),
-            };
-            ObjectBodyReferencesInspection {
-                references: Vec::new(),
-                skipped_references,
-                truncation: None,
-            }
+        Err(error) => ObjectBodyReferencesInspection {
+            references: Vec::new(),
+            skipped_references: scalar_reference_skips(error.reason),
+            truncation: None,
+        },
+    }
+}
+
+/// Range-bearing reference-shape check for a number-like scalar body.
+///
+/// The ACCEPTANCE decision is delegated to [`crate::parse_indirect_reference`]
+/// exactly like [`scalar_body_reference_check`], so both inspect siblings
+/// admit or skip the same scalar bodies. On acceptance, the per-token ranges
+/// are recovered by running the shared span scanner core over exactly the
+/// accepted `N G R` byte range, which re-finds that one reference with its
+/// token ranges; the two siblings therefore report the identical reference.
+fn scalar_body_reference_ranges_check(
+    input: &[u8],
+    first_token_byte_offset: usize,
+) -> ObjectBodyReferenceRangesInspection {
+    match parse_indirect_reference(input, first_token_byte_offset) {
+        Ok(inspection) => scan_indirect_reference_ranges_in_span(
+            input,
+            inspection.reference_range.start..inspection.reference_range.end,
+        ),
+        Err(error) => ObjectBodyReferenceRangesInspection {
+            references: Vec::new(),
+            token_ranges: Vec::new(),
+            skipped_references: scalar_reference_skips(error.reason),
+            truncation: None,
+        },
+    }
+}
+
+/// Map the shared scalar parser's numeric rejection to the scanner's skip
+/// surface. Non-reference shapes remain an empty census.
+fn scalar_reference_skips(
+    reason: IndirectReferenceInspectionRejection,
+) -> Vec<SkippedObjectBodyReference> {
+    match reason {
+        IndirectReferenceInspectionRejection::ObjectNumberOutOfRange => {
+            vec![SkippedObjectBodyReference::ObjectNumberOutOfRange]
         }
+        IndirectReferenceInspectionRejection::GenerationOutOfRange => {
+            vec![SkippedObjectBodyReference::GenerationOutOfRange]
+        }
+        IndirectReferenceInspectionRejection::OffsetOutOfBounds
+        | IndirectReferenceInspectionRejection::MalformedReference => Vec::new(),
     }
 }
 
@@ -433,6 +682,15 @@ fn reference_from_window(
 const fn empty_inspection() -> ObjectBodyReferencesInspection {
     ObjectBodyReferencesInspection {
         references: Vec::new(),
+        skipped_references: Vec::new(),
+        truncation: None,
+    }
+}
+
+const fn empty_ranges_inspection() -> ObjectBodyReferenceRangesInspection {
+    ObjectBodyReferenceRangesInspection {
+        references: Vec::new(),
+        token_ranges: Vec::new(),
         skipped_references: Vec::new(),
         truncation: None,
     }

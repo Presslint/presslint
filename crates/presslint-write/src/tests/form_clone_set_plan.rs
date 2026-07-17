@@ -933,9 +933,8 @@ fn shared_form_across_two_pages_plans_two_sets_with_distinct_identities() {
             FormCloneSetPlanCounts {
                 candidate_sets: 1,
                 planned_sets: 1,
-                refused_sets: 0,
                 planned_objects: 1,
-                null_equivalents: 0,
+                ..FormCloneSetPlanCounts::new()
             },
         );
         // A failed identity join is the empty counts, fail-closed.
@@ -1299,15 +1298,22 @@ fn converted_pages_carry_identity_matched_clone_set_plan_counts() {
     .expect("conversion succeeds");
 
     assert_eq!(output.converted.len(), 2);
+    // The staged export runs in the pipeline, so the identity-matched counts
+    // carry the staged counters too; the staged body is the form's exact
+    // dictionary-through-`endstream` extent.
+    let form_body_len =
+        "<< /Type /XObject /Subtype /Form /BBox [0 0 1 1] /Length 0 >>\nstream\n\nendstream".len();
     for page in &output.converted {
         assert_eq!(
             page.form_clone_set_plan_counts,
             FormCloneSetPlanCounts {
                 candidate_sets: 1,
                 planned_sets: 1,
-                refused_sets: 0,
                 planned_objects: 1,
-                null_equivalents: 0,
+                staged_sets: 1,
+                staged_objects: 1,
+                staged_body_bytes: form_body_len,
+                ..FormCloneSetPlanCounts::new()
             },
             "page {:?} must carry its identity-matched plan counts",
             page.page_index,
@@ -1324,14 +1330,18 @@ fn every_nonzero_counter_defeats_the_omit_when_empty_predicate() {
         FormCloneSetPlanCounts::new(),
         FormCloneSetPlanCounts::default()
     );
-    for field in 0..5 {
+    for field in 0..9 {
         let mut counts = FormCloneSetPlanCounts::new();
         match field {
             0 => counts.candidate_sets = 1,
             1 => counts.planned_sets = 1,
             2 => counts.refused_sets = 1,
             3 => counts.planned_objects = 1,
-            _ => counts.null_equivalents = 1,
+            4 => counts.null_equivalents = 1,
+            5 => counts.staged_sets = 1,
+            6 => counts.staged_objects = 1,
+            7 => counts.staged_body_bytes = 1,
+            _ => counts.export_refused_sets = 1,
         }
         assert!(!counts.is_empty(), "field {field} must defeat is_empty");
     }

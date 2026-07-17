@@ -294,6 +294,9 @@ fn json_convert_report_serializes_nonzero_form_clone_set_plan_counts() {
     page.form_clone_set_plan_counts.planned_sets = 1;
     page.form_clone_set_plan_counts.refused_sets = 1;
     page.form_clone_set_plan_counts.planned_objects = 5;
+    page.form_clone_set_plan_counts.staged_sets = 1;
+    page.form_clone_set_plan_counts.staged_objects = 5;
+    page.form_clone_set_plan_counts.staged_body_bytes = 640;
     let report = RunReport::convert(ConvertContentColorsOutput {
         bytes: Vec::new(),
         converted: vec![page],
@@ -308,8 +311,13 @@ fn json_convert_report_serializes_nonzero_form_clone_set_plan_counts() {
     assert_eq!(counts["planned_sets"], 1);
     assert_eq!(counts["refused_sets"], 1);
     assert_eq!(counts["planned_objects"], 5);
-    // Zero inner counters are omitted, mirroring the refusal-counts shape.
+    assert_eq!(counts["staged_sets"], 1);
+    assert_eq!(counts["staged_objects"], 5);
+    assert_eq!(counts["staged_body_bytes"], 640);
+    // Zero inner counters are omitted, mirroring the refusal-counts shape —
+    // the additive staged-export counters included.
     assert!(counts.get("null_equivalents").is_none());
+    assert!(counts.get("export_refused_sets").is_none());
 }
 
 #[test]
@@ -328,6 +336,8 @@ fn older_converted_page_json_defaults_form_clone_set_plan_counts_to_empty() {
 
 #[test]
 fn partial_form_clone_set_plan_counts_json_defaults_missing_counters_to_zero() {
+    // Older JSON without any staged-export counter deserializes with the
+    // additive fields defaulted to zero; a present staged counter round-trips.
     let restored: FormCloneSetPlanCounts =
         serde_json::from_str(r#"{"candidate_sets":3,"refused_sets":3}"#).unwrap();
     assert_eq!(
@@ -335,6 +345,17 @@ fn partial_form_clone_set_plan_counts_json_defaults_missing_counters_to_zero() {
         FormCloneSetPlanCounts {
             candidate_sets: 3,
             refused_sets: 3,
+            ..FormCloneSetPlanCounts::default()
+        }
+    );
+
+    let restored: FormCloneSetPlanCounts =
+        serde_json::from_str(r#"{"staged_sets":2,"export_refused_sets":1}"#).unwrap();
+    assert_eq!(
+        restored,
+        FormCloneSetPlanCounts {
+            staged_sets: 2,
+            export_refused_sets: 1,
             ..FormCloneSetPlanCounts::default()
         }
     );

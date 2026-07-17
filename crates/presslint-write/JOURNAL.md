@@ -4,6 +4,111 @@ Earlier entries are preserved in
 [JOURNAL-archive-2.md](JOURNAL-archive-2.md) and
 [JOURNAL-archive.md](JOURNAL-archive.md).
 
+## T196 - Clone-body staged export with full validation, zero emitted-byte change
+
+### The staged/validate-only contract (binding)
+
+`form_clone_set_plan/export.rs` gives the T195 plan its execution half, held
+one step short of the writer. `FormCloneSetPlan::stage_export` runs in the
+sequence pipeline immediately after plan construction and BEFORE any per-page
+count is consumed: every planned set is re-corroborated, materialized as a
+`FreshObjectBytes` batch, and FULLY validated — but the batch is dropped by
+the production caller, never handed to the writer. Emitted product bytes are
+therefore byte-identical to the plan-only behaviour for every input, locked
+by an explicit guard test (`output.bytes == write_incremental_revision(input,
+[])` for a qualifying clone-set document with no colour edit, plus a
+no-fresh-header-in-tail scan). Rationale: an emitted clone batch without the
+page retarget would put unreachable clone bodies into durable product state —
+dark bytes a consolidating rewriter (qpdf's default, without
+`--preserve-unreferenced`) silently discards — so clones and the retarget
+must land together in ONE revision (the deferred T197 hand-off to
+`write_incremental_revision_with_fresh_objects` + `retarget_sites`).
+End-to-end writer viability is still proven THIS slice by integration tests
+that drive the public fresh-object writer directly with the built batch.
+
+### Corroboration and materialization
+
+All fail-closed, one typed `CloneSetExportRefusal` class (deliberately
+distinct from the closure and reservation classes; an export failure never
+masquerades as either): input length; per-member locator re-resolution
+(exact uncompressed offset, or object-stream container + index, with the
+per-set 1 MiB decode budget re-applied as the residual per-call bound over
+object-stream re-resolution decoding); root uniqueness at its retained
+offset; re-scan census EXACTLY equal to the
+retained duplicate-preserving outgoing list; the aligned generation-zero
+source-to-fresh mapping with contiguous reservation coverage in plan order
+(which also proves batch-wide injectivity); and post-rewrite re-scan
+equality against the translated census. The re-scan uses the new
+`presslint-pdf` range-bearing sibling of the census scanner (one shared
+scanner core), so plan-scan and export-scan are token-identical by
+construction. No fingerprints (same borrowed input frame) and no
+reservation-floor recomputation (the writer's independent
+`FreshReservationFloorMismatch` proof stays authoritative for the T197
+hand-off).
+
+Bodies are source bytes with ONLY the object-number and generation numeric
+tokens of in-set references spliced to fresh identities, applied in reverse
+order (house pattern) — `R` keywords, whitespace, and interior comments are
+preserved exactly, and null-equivalent reference tokens stay byte-identical.
+Stream members preserve original framing byte-for-byte (dictionary + trivia
++ `stream` keyword + EOL as found, LF or CRLF with lone CR refused per
+§7.3.8.1, data untouched, EOL before `endstream`); references are scanned
+only in the dictionary, never in stream data; `build_stream_object_body` is
+deliberately NOT used (it normalizes framing). `/Length` verdicts: in-set
+indirect = rewrite the reference, copy the integer object verbatim;
+self-referential = explicit refusal (pypdf#3112 — T195 admits it as an
+ordinary cycle); out-of-set resolvable = plan-consistency refusal;
+null-equivalent or extent-mismatched = refusal, never repaired or
+recomputed. Top-level dictionary keys are decoded for semantic `/Length`
+authority: collisions and an escaped-only spelling refuse explicitly before
+the raw-key extent helper runs. Object-stream members materialize as plain
+generation-zero bodies from the decoded container span (decoded-buffer token
+ranges rebased against `object_body_span`) after a private admission check for one-value
+consumption and the §7.5.7 "not solely a reference" rule, which
+`extract_object_stream_member` does not prove. Complete literal- and
+hexadecimal-string compressed members are admitted and copied byte-for-byte,
+with their reference-shaped contents opaque; malformed or multi-value spans
+refuse. String-led uncompressed bodies remain an explicit unsupported shape.
+
+### Budget, atomicity, counters
+
+One request-level cumulative `MAX_FORM_CLONE_MATERIALIZED_BODY_BYTES`
+(64 MiB, qpdf#219 bloat class) bounds FINAL materialized body lengths with
+fail-closed charging: corroborated extents are pre-charged BEFORE copy work,
+and the exact final length (post reference-width changes) is settled with
+checked arithmetic BEFORE each body allocation. Duplicate bodies across
+page-specific sets count each time. These are distinct bounds at distinct
+points: the 1 MiB residual constrains object-stream re-resolution decoding;
+after the resolved member span is corroborated, its extent is charged to the
+request-level 64 MiB budget before body copying/allocation. Any export failure
+discards the ENTIRE batch (no per-set salvage, no second reservation — pikepdf#271 class) and
+marks every otherwise-ready set export-suppressed; colour edits proceed
+unchanged. The additive omit-when-zero staged-export counters on the public
+`FormCloneSetPlanCounts` (`staged_sets`, `staged_objects`,
+`staged_body_bytes`, `export_refused_sets`) are committed atomically only
+after the whole batch has succeeded or failed — never partially — through
+the same identity-corroborated page-slot join as the plan counters. Plan
+counters, `ConvertedPage` shape, the T192 refusal taxonomy, and T195
+plan/walk semantics are unchanged; serde omit-when-zero and older-JSON
+defaulting for the new fields are locked in the CLI report tests.
+
+### Complexity and allocation honesty
+
+One pass over ready sets: per member ONE re-resolution (bounded existing
+primitives; compressed containers re-decoded under the per-set 1 MiB budget,
+never cached — same amplification accounting as the walk), one range scan,
+one splice pass, one verification re-scan — no whole-document rescan. The
+uncompressed body classifier re-runs the bounded header/token/extent
+inspectors the range scan already ran internally (2–3 small bounded
+inspections per member, accepted for seam simplicity). Peak allocation is
+the materialized bodies themselves — accepted accumulation bounded by the
+64 MiB budget plus one decoded container (≤1 MiB per set) transiently —
+plus per-set source maps, staged-set metadata, and splice ranges/replacement
+digits bounded by accepted member/reference counts. Delegated scanner work
+allocates the census/range vectors. Root uniqueness, translated-census
+comparison, and atomic counter folds use iterators without temporary vectors;
+counters themselves are plain integers folded once per request.
+
 ## T195 - Bounded iterative reached-Form closure with clone-set plan, no bytes
 
 ### The plan contract

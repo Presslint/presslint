@@ -4,6 +4,39 @@ Older accumulated journal history lives in [JOURNAL-archive-4.md](JOURNAL-archiv
 
 ## Current State
 
+### T196 - Range-bearing object-body reference scanner sibling
+
+- `object_body_references.rs` adds the range-bearing sibling of the census
+  scanner family: `ObjectBodyReferenceRangesInspection` +
+  `ObjectBodyReferenceTokenRanges`, produced by
+  `scan_indirect_reference_ranges_in_span(buffer, span)` and
+  `inspect_object_body_reference_ranges(input, object_byte_offset)`. Each
+  extracted `N G R` reference carries three aligned per-token byte ranges —
+  the object-number digits, the generation digits, and the bare `R` keyword —
+  absolute within the scanned buffer, so a caller that rewrites a reference
+  by splicing ONLY the two numeric token ranges preserves the `R` keyword,
+  whitespace, and interior comments (`7 % note\n 0 R`) byte-for-byte.
+- PARITY BY CONSTRUCTION: both span scanners run ONE shared scanner core
+  (`scan_reference_tokens_in_span`, a sink-generic refactor of the previous
+  loop — the census sink drops ranges, the ranges sink retains them), and
+  both inspect siblings share ONE body-shape classifier
+  (`classify_object_body_scan`: header, leading token, dictionary/array
+  extent bounding, number-like scalar reference check). For the same input
+  the two siblings therefore report token-identical `references`,
+  `skipped_references`, and `truncation` — strings stay opaque, comments
+  count as whitespace (§7.2.2–7.2.3), stream data is never scanned, and the
+  shared `MAX_OBJECT_BODY_REFERENCES` cap truncates both identically. The
+  scalar-body path delegates ACCEPTANCE to `parse_indirect_reference` exactly
+  like the census sibling and recovers the token ranges by re-running the
+  span core over the accepted `N G R` range only.
+- The existing public API is unchanged and byte-identical in behaviour; the
+  census reports still carry no ranges. Focused coverage in
+  `tests/object_body_reference_ranges.rs`: outside-in census parity across
+  every body-shape family, per-token range exactness (slicing the buffer by
+  the reported ranges), splice-preserves-trivia, opacity, skip/truncation
+  parity, shared rejection surface, and a serde shape lock for the new
+  report.
+
 ### T194 - Page-anchored Form XObject binding/locality witness (read-only)
 
 - New `page_xobject_binding.rs` + private `page_xobject_binding/walk.rs` add

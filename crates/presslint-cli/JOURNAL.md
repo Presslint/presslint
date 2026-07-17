@@ -1,5 +1,16 @@
 # presslint-cli Journal
 
+## T196: staged-export counter serde locks (test surface only)
+
+- No CLI production change. The report tests extend the
+  `form_clone_set_plan_counts` serde locks to the additive staged-export
+  counters (`staged_sets`, `staged_objects`, `staged_body_bytes`,
+  `export_refused_sets`): nonzero values serialize, zero values are omitted
+  (existing JSON shapes stay byte-identical), and older/partial JSON without
+  the new fields deserializes them to zero.
+- Human/JSON rendering, command syntax, warnings, and exit policy are
+  unchanged: the counts ride the wrapped library report as-is.
+
 ## T195: convert report clone-set plan counts (test surface only)
 
 - No CLI production change. The public `ConvertedPage` struct literals in the

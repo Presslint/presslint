@@ -10,10 +10,16 @@
 //! [`crate::reserve_fresh_object_references`] call, and retains what the
 //! future clone-body export and one-page retarget slices need.
 //!
-//! The plan is OBSERVE-ONLY: it constructs no fresh bodies, copies/rewrites
-//! no bytes, retargets no page, mutates no Form, and never authorizes any
-//! admission. Its only public projection is the additive omit-when-empty
-//! [`FormCloneSetPlanCounts`] on [`crate::ConvertedPage`].
+//! The plan itself is OBSERVE-ONLY: it constructs no fresh bodies,
+//! copies/rewrites no bytes, retargets no page, mutates no Form, and never
+//! authorizes any admission. Its execution half is the STAGED/VALIDATE-ONLY
+//! export in [`export`]: every planned set is re-corroborated, materialized,
+//! and fully validated as a [`crate::FreshObjectBytes`] batch, but the batch
+//! is never handed to the writer by production callers — emitted product
+//! bytes stay byte-identical to the plan-only behaviour, and only the
+//! additive omit-when-empty [`FormCloneSetPlanCounts`] projection on
+//! [`crate::ConvertedPage`] (plan counters plus staged-export counters) is
+//! published.
 //!
 //! # Frontier policy
 //!
@@ -59,10 +65,12 @@ use presslint_pdf::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::writer::WriteError;
+use crate::writer::{FreshObjectBytes, WriteError};
 
+use self::export::{CloneSetExportRefusal, StagedExportBatch, build_staged_export};
 use self::walk::{CloneSetBudgetUsage, walk_reached_form_closure};
 
+pub(crate) mod export;
 pub(crate) mod walk;
 
 /// Largest indirect object number a conforming reader must support
@@ -99,6 +107,21 @@ pub struct FormCloneSetPlanCounts {
     /// sets (free or not-found targets; nothing is allocated for them).
     #[serde(default, skip_serializing_if = "count_is_zero")]
     pub null_equivalents: usize,
+    /// Planned sets whose clone bodies were materialized and fully validated
+    /// by the staged export. Staged bodies are NOT emitted: product bytes
+    /// stay byte-identical to the plan-only behaviour.
+    #[serde(default, skip_serializing_if = "count_is_zero")]
+    pub staged_sets: usize,
+    /// Total materialized member bodies across this page's staged sets.
+    #[serde(default, skip_serializing_if = "count_is_zero")]
+    pub staged_objects: usize,
+    /// Total materialized body bytes across this page's staged sets.
+    #[serde(default, skip_serializing_if = "count_is_zero")]
+    pub staged_body_bytes: usize,
+    /// Planned sets suppressed because the all-or-nothing staged export
+    /// refused (any export failure discards the whole request batch).
+    #[serde(default, skip_serializing_if = "count_is_zero")]
+    pub export_refused_sets: usize,
 }
 
 /// Serde helper: omit an additive scalar count while it is zero, so existing
@@ -119,6 +142,10 @@ impl FormCloneSetPlanCounts {
             refused_sets: 0,
             planned_objects: 0,
             null_equivalents: 0,
+            staged_sets: 0,
+            staged_objects: 0,
+            staged_body_bytes: 0,
+            export_refused_sets: 0,
         }
     }
 
@@ -130,6 +157,10 @@ impl FormCloneSetPlanCounts {
             && self.refused_sets == 0
             && self.planned_objects == 0
             && self.null_equivalents == 0
+            && self.staged_sets == 0
+            && self.staged_objects == 0
+            && self.staged_body_bytes == 0
+            && self.export_refused_sets == 0
     }
 }
 
@@ -141,7 +172,6 @@ pub(crate) struct CloneSetPageIdentity {
     /// Leaf `/Page` indirect reference.
     pub(crate) reference: IndirectRef,
     /// Resolved leaf page object byte offset.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) object_byte_offset: usize,
 }
 
@@ -163,7 +193,6 @@ pub(crate) struct CloneSetRetargetSite {
 
 /// Where one closure member's source bytes live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum CloneMemberLocator {
     /// An ordinary uncompressed indirect object at a source byte offset.
     Uncompressed {
@@ -187,10 +216,8 @@ pub(crate) struct CloneSetMember {
     /// Exact source identity (generation included).
     pub(crate) source: IndirectRef,
     /// Uncompressed offset or compressed container/member locator.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) locator: CloneMemberLocator,
     /// Duplicate-preserving outgoing `N G R` references in body source order.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) outgoing: Vec<IndirectRef>,
 }
 
@@ -437,7 +464,6 @@ pub(crate) enum CloneSetOutcome {
         /// Source-to-fresh identity pairs, aligned with `members`. This map
         /// never outlives its one clone set and is never shared across
         /// pages or separate clone operations.
-        #[cfg_attr(not(test), allow(dead_code))]
         source_to_fresh: Vec<(IndirectRef, IndirectRef)>,
     },
     /// The whole set was refused with its exact first refusal.
@@ -456,7 +482,6 @@ pub(crate) struct FormCloneSet {
     /// Root Form source reference (the witnessed bound target).
     pub(crate) root: IndirectRef,
     /// Corroborated root object byte offset from the binding witness.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) root_object_byte_offset: usize,
     /// Every qualifying witnessed page `/XObject` entry binding this root, in
     /// witness order.
@@ -479,9 +504,8 @@ struct PageCountsSlot {
 /// The request-scoped clone-set plan. Crate-private except for the
 /// [`FormCloneSetPlanCounts`] projection consumed per page.
 pub(crate) struct FormCloneSetPlan {
-    /// Total source length the plan was computed over (plan-order anchor for
-    /// the future export slice).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Total source length the plan was computed over, re-asserted by the
+    /// staged export before any member re-resolution.
     pub(crate) input_byte_len: usize,
     /// Clone sets in deterministic plan order: (page ordinal, root source
     /// reference).
@@ -577,6 +601,81 @@ impl FormCloneSetPlan {
         plan
     }
 
+    /// Run the staged clone-body export over every planned set and commit the
+    /// staged counters atomically.
+    ///
+    /// Must run immediately after [`FormCloneSetPlan::build`] and BEFORE any
+    /// [`FormCloneSetPlan::page_counts`] consumption, so the staged counters
+    /// ride the same per-page projection. The batch build is all-or-nothing:
+    /// counters are written only after the whole batch has succeeded or
+    /// failed — never partially. On success every planned set folds its
+    /// staged member/byte totals into its page slot; on failure every planned
+    /// set is marked export-suppressed with the distinct export-refused
+    /// counter, never masquerading as a closure or reservation refusal.
+    ///
+    /// STAGED/VALIDATE-ONLY: the returned batch is never handed to the writer
+    /// by production callers, so emitted product bytes stay byte-identical to
+    /// the plan-only behaviour. Tests drive the public fresh-object writer
+    /// with the returned batch directly to prove end-to-end viability.
+    pub(crate) fn stage_export(
+        &mut self,
+        input: &[u8],
+        lookup: ObjectLookup<'_>,
+    ) -> Result<Vec<FreshObjectBytes>, CloneSetExportRefusal> {
+        match build_staged_export(input, lookup, self) {
+            Ok(batch) => {
+                self.commit_staged_counts(&batch);
+                Ok(batch.fresh_objects)
+            }
+            Err(refusal) => {
+                self.commit_export_refused_counts();
+                Err(refusal)
+            }
+        }
+    }
+
+    /// Fold one successful batch's staged totals into the per-page slots,
+    /// through the same identity-corroborated join as the plan counts.
+    fn commit_staged_counts(&mut self, batch: &StagedExportBatch) {
+        for set in &batch.staged_sets {
+            let page = self.sets[set.set_index].page;
+            let Some(counts) = self.page_slot_counts(page) else {
+                continue;
+            };
+            counts.staged_sets += 1;
+            counts.staged_objects += set.member_count;
+            counts.staged_body_bytes += set.body_bytes_total;
+        }
+    }
+
+    /// Mark every otherwise-ready set export-suppressed after a batch
+    /// refusal (all-or-nothing: no partial staging survives).
+    fn commit_export_refused_counts(&mut self) {
+        for set_index in 0..self.sets.len() {
+            if !matches!(
+                self.sets[set_index].outcome,
+                CloneSetOutcome::Planned { .. }
+            ) {
+                continue;
+            }
+            let page = self.sets[set_index].page;
+            if let Some(counts) = self.page_slot_counts(page) {
+                counts.export_refused_sets += 1;
+            }
+        }
+    }
+
+    /// Mutable identity-corroborated access to one page's counts slot; a
+    /// missing, poisoned, or inconsistent slot is `None`, fail-closed.
+    fn page_slot_counts(
+        &mut self,
+        page: CloneSetPageIdentity,
+    ) -> Option<&mut FormCloneSetPlanCounts> {
+        let slot = self.page_slots.get_mut(&page.reference)?.as_mut()?;
+        (slot.object_byte_offset == page.object_byte_offset && slot.ordinal == page.ordinal)
+            .then_some(&mut slot.counts)
+    }
+
     /// Resolve one page's identity-corroborated counts; any missing,
     /// duplicate, or inconsistent match is the empty counts, fail-closed.
     pub(crate) fn page_counts(
@@ -592,6 +691,17 @@ impl FormCloneSetPlan {
             slot.counts
         } else {
             FormCloneSetPlanCounts::new()
+        }
+    }
+
+    /// Test-only constructor: drive the staged export directly with
+    /// hand-built sets (page-slot counter folding is exercised through real
+    /// plans; this plan has no slots).
+    #[cfg(test)]
+    pub(crate) fn from_sets_for_tests(input_byte_len: usize, sets: Vec<FormCloneSet>) -> Self {
+        Self {
+            sets,
+            ..Self::empty(input_byte_len, true)
         }
     }
 

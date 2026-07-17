@@ -192,10 +192,13 @@ pub use object_body::{
     inspect_indirect_object_body_token,
 };
 pub use object_body_references::{
-    MAX_OBJECT_BODY_REFERENCES, ObjectBodyReferencesInspection,
+    MAX_OBJECT_BODY_REFERENCES, ObjectBodyReferenceRangesInspection,
+    ObjectBodyReferenceTokenRanges, ObjectBodyReferencesInspection,
     ObjectBodyReferencesInspectionError, ObjectBodyReferencesInspectionRejection,
-    ObjectBodyReferencesTruncation, SkippedObjectBodyReference, inspect_object_body_references,
-    inspect_object_body_references_resolved, scan_indirect_references_in_span,
+    ObjectBodyReferencesTruncation, SkippedObjectBodyReference,
+    inspect_object_body_reference_ranges, inspect_object_body_references,
+    inspect_object_body_references_resolved, scan_indirect_reference_ranges_in_span,
+    scan_indirect_references_in_span,
 };
 pub use object_consumer_index::{
     MAX_OBJECT_CONSUMER_CACHE_BYTES, MAX_OBJECT_CONSUMER_EXPANDED_NODES,
